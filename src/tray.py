@@ -116,6 +116,7 @@ class TrayApp(QSystemTrayIcon):
         self._worker: SyncWorker | None = None
         self._debounce_pending: bool = False
         self._watcher: QFileSystemWatcher | None = None
+        self._watcher_paused: bool = False
         self._settings_dialog: SettingsDialog | None = None
         self._log_viewer: LogViewerDialog | None = None
         self._progress_dialog: SyncProgressDialog | None = None
@@ -214,10 +215,16 @@ class TrayApp(QSystemTrayIcon):
         self._watcher.directoryChanged.connect(self._on_dir_changed)
 
     def _on_file_changed(self, path: str) -> None:
+        if self._watcher_paused:
+            logger.debug("File changed (ignored, watcher paused): %s", path)
+            return
         logger.debug("File changed: %s", path)
         self._schedule_debounced_sync()
 
     def _on_dir_changed(self, path: str) -> None:
+        if self._watcher_paused:
+            logger.debug("Directory changed (ignored, watcher paused): %s", path)
+            return
         logger.debug("Directory changed: %s", path)
         self._schedule_debounced_sync()
 
@@ -233,6 +240,11 @@ class TrayApp(QSystemTrayIcon):
         self._debounce_pending = False
         logger.info("Debounce fired — triggering sync")
         self._trigger_sync()
+
+    def _resume_watcher(self) -> None:
+        """Resume file watcher after sync completes."""
+        self._watcher_paused = False
+        logger.debug("File watcher resumed")
 
     # ------------------------------------------------------------------
     # Settings
@@ -358,6 +370,10 @@ class TrayApp(QSystemTrayIcon):
         self._action_sync.setEnabled(False)
         self._action_settings.setEnabled(False)
 
+        # Pause file watcher to prevent sync loops
+        self._watcher_paused = True
+        logger.debug("File watcher paused during sync")
+
         # Show progress dialog
         if self._progress_dialog is None:
             self._progress_dialog = SyncProgressDialog(parent=None)
@@ -412,6 +428,10 @@ class TrayApp(QSystemTrayIcon):
         if self._progress_dialog is not None:
             self._progress_dialog.sync_finished(success=True)
 
+        # Resume file watcher after cooldown (5s to let filesystem settle)
+        QTimer.singleShot(5000, self._resume_watcher)
+        logger.debug("File watcher will resume in 5s")
+
         # Check if any browser is currently running — if so, use waiting state
         any_running = any(b.is_running() for b in ALL_BROWSERS)
         state = "waiting" if any_running else "idle"
@@ -437,6 +457,10 @@ class TrayApp(QSystemTrayIcon):
         # Update progress dialog
         if self._progress_dialog is not None:
             self._progress_dialog.sync_finished(success=False)
+
+        # Resume file watcher after cooldown even on error
+        QTimer.singleShot(5000, self._resume_watcher)
+        logger.debug("File watcher will resume in 5s (after error)")
 
         # Re-enable buttons even on error
         self._action_sync.setEnabled(True)

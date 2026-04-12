@@ -198,3 +198,38 @@ def test_on_settings_saved_no_folder_keeps_engine(qapp, tmp_path):
 
     mock_engine_cls.assert_not_called()
     assert tray._engine is old_engine
+
+
+def test_watcher_paused_during_sync(qapp, tmp_path):
+    """File watcher is paused during sync to prevent loops."""
+    tray = _make_tray(qapp, tmp_path)
+
+    # Initially not paused
+    assert not tray._watcher_paused
+
+    # Pause when sync starts
+    tray._on_sync_started()
+    assert tray._watcher_paused
+
+    # Resume after sync finishes
+    tray._resume_watcher()
+    assert not tray._watcher_paused
+
+
+def test_file_watcher_ignores_changes_when_paused(qapp, tmp_path):
+    """File watcher ignores changes when paused."""
+    tray = _make_tray(qapp, tmp_path)
+    tray._watcher_paused = True
+
+    # File changed event should be ignored (no debounce scheduled)
+    tray._on_file_changed(str(tmp_path / "metadata.json"))
+    assert not tray._debounce_pending
+
+    # Directory changed event should be ignored
+    tray._on_dir_changed(str(tmp_path))
+    assert not tray._debounce_pending
+
+    # When not paused, events should trigger debounce
+    tray._watcher_paused = False
+    tray._on_file_changed(str(tmp_path / "metadata.json"))
+    assert tray._debounce_pending
