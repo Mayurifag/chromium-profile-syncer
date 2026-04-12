@@ -65,9 +65,16 @@ def _signal_existing(pid: int) -> None:
             _LOG.warning("Could not signal pid %d: %s", pid, exc)
 
 
+_EXPECTED_NAMES = {"chromium-profile-syncer", "python", "python3"}
+
+
 def _terminate(pid: int) -> None:
     try:
         proc = psutil.Process(pid)
+        name = proc.name().lower()
+        if name not in _EXPECTED_NAMES:
+            _LOG.warning("PID %d is %s, not our process — skipping terminate", pid, name)
+            return
         proc.terminate()
         try:
             proc.wait(timeout=3)
