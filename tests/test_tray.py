@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -223,13 +224,75 @@ def test_file_watcher_ignores_changes_when_paused(qapp, tmp_path):
 
     # File changed event should be ignored (no debounce scheduled)
     tray._on_file_changed(str(tmp_path / "metadata.json"))
-    assert not tray._debounce_pending
+    assert not tray._debounce_timer.isActive()
 
     # Directory changed event should be ignored
     tray._on_dir_changed(str(tmp_path))
-    assert not tray._debounce_pending
+    assert not tray._debounce_timer.isActive()
 
     # When not paused, events should trigger debounce
     tray._watcher_paused = False
     tray._on_file_changed(str(tmp_path / "metadata.json"))
-    assert tray._debounce_pending
+    assert tray._debounce_timer.isActive()
+
+
+# ---------------------------------------------------------------------------
+# Debounce reset tests
+# ---------------------------------------------------------------------------
+
+
+def test_debounce_resets_on_repeated_events(qapp, tmp_path):
+    """Calling _schedule_debounced_sync twice leaves exactly one pending timer."""
+    from PySide6.QtCore import QCoreApplication
+
+    tray = _make_tray(qapp, tmp_path)
+    tray._debounce_timer.setInterval(0)
+
+    trigger_mock = MagicMock()
+    tray._trigger_sync = trigger_mock
+
+    tray._schedule_debounced_sync()
+    tray._schedule_debounced_sync()
+
+    assert tray._debounce_timer.isActive()
+
+    QCoreApplication.processEvents()
+
+    trigger_mock.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Permissions check tests
+# ---------------------------------------------------------------------------
+
+
+def test_check_sync_folder_permissions_accessible(tmp_path):
+    """_check_sync_folder_permissions returns True for a readable/writable path."""
+    from src.tray import TrayApp
+
+    assert TrayApp._check_sync_folder_permissions(tmp_path) is True
+
+
+def test_check_sync_folder_permissions_missing():
+    """_check_sync_folder_permissions returns False for a nonexistent path."""
+    from src.tray import TrayApp
+
+    assert TrayApp._check_sync_folder_permissions(Path("/nonexistent/path")) is False
+
+
+def test_trigger_sync_warns_on_bad_permissions(qapp, tmp_path):
+    """_trigger_sync shows a warning and skips SyncWorker when permissions fail."""
+    tray = _make_tray(qapp, tmp_path)
+
+    mock_config = MagicMock()
+    mock_config.get_sync_folder.return_value = tmp_path
+    mock_config.get_sync_interval.return_value = 30
+    tray._config = mock_config
+
+    with patch.object(tray, "showMessage") as mock_show, \
+         patch("src.tray.TrayApp._check_sync_folder_permissions", return_value=False):
+        tray._trigger_sync()
+
+    assert tray._worker is None
+    mock_show.assert_called_once()
+    assert mock_show.call_args[0][2].name == "Warning"
