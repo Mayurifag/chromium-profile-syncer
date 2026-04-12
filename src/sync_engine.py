@@ -54,6 +54,9 @@ class SyncEngine:
         self.browsers = browsers
         self.logger = logging.getLogger(f"{__name__}.SyncEngine")
         self._progress_cb: Callable[[str], None] | None = None
+        # Sync statistics
+        self._synced_count: int = 0
+        self._skipped_count: int = 0
 
     def _report(self, description: str) -> None:
         if self._progress_cb:
@@ -163,6 +166,7 @@ class SyncEngine:
         src_mtime = src.stat().st_mtime if src.exists() else 0.0
         dst_mtime = dst.stat().st_mtime if dst.exists() else 0.0
         if src_mtime == dst_mtime:
+            self._skipped_count += 1
             return
         if direction == "push":
             if src_mtime > dst_mtime and src.exists():
@@ -170,23 +174,31 @@ class SyncEngine:
                 self._report(src.name)
                 self.logger.info("Copying file: %s → %s", src.name, dst)
                 shutil.copy2(src, dst)
+                self._synced_count += 1
+            else:
+                self._skipped_count += 1
         elif direction == "pull":
             if dst_mtime > src_mtime and dst.exists():
                 src.parent.mkdir(parents=True, exist_ok=True)
                 self._report(dst.name)
                 self.logger.info("Copying file: %s → %s", dst.name, src)
                 shutil.copy2(dst, src)
+                self._synced_count += 1
+            else:
+                self._skipped_count += 1
         else:  # both
             if src_mtime > dst_mtime:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 self._report(src.name)
                 self.logger.info("Copying file: %s → %s", src.name, dst)
                 shutil.copy2(src, dst)
+                self._synced_count += 1
             else:
                 src.parent.mkdir(parents=True, exist_ok=True)
                 self._report(dst.name)
                 self.logger.info("Copying file: %s → %s", dst.name, src)
                 shutil.copy2(dst, src)
+                self._synced_count += 1
 
     # ------------------------------------------------------------------
     # Extension sync (version-based)
@@ -272,12 +284,14 @@ class SyncEngine:
                 "Extension %s: Web Store extension — tracking ID (will register by ID)",
                 ext_id,
             )
+            self._skipped_count += 1
             return
 
         profile_ver = self._extension_dir_version(profile_best) if profile_best else (0,)
         sync_ver = self._extension_dir_version(sync_best) if sync_best else (0,)
 
         if profile_ver == sync_ver:
+            self._skipped_count += 1
             return  # already in sync
 
         if profile_ver > sync_ver:
@@ -291,6 +305,9 @@ class SyncEngine:
                 )
                 sync_id_dir.mkdir(parents=True, exist_ok=True)
                 self._copy_leveldb_atomic(profile_best, dest)
+                self._synced_count += 1
+            else:
+                self._skipped_count += 1
         else:
             if direction in ("pull", "both") and sync_best is not None:
                 dest = profile_id_dir / sync_best.name
@@ -302,6 +319,9 @@ class SyncEngine:
                 )
                 profile_id_dir.mkdir(parents=True, exist_ok=True)
                 self._copy_leveldb_atomic(sync_best, dest)
+                self._synced_count += 1
+            else:
+                self._skipped_count += 1
 
     def _best_extension_version_dir(self, id_dir: Path) -> Path | None:
         """Return the subdirectory with the highest parsed version, or None."""
@@ -360,6 +380,7 @@ class SyncEngine:
             sync_mtime = self._dir_mtime(sync_unit) if sync_unit.exists() else 0.0
 
             if profile_mtime == sync_mtime:
+                self._skipped_count += 1
                 return
 
             if direction == "push":
@@ -369,6 +390,9 @@ class SyncEngine:
                     )
                     sync_base.mkdir(parents=True, exist_ok=True)
                     self._copy_leveldb_atomic(profile_unit, sync_unit)
+                    self._synced_count += 1
+                else:
+                    self._skipped_count += 1
             elif direction == "pull":
                 if sync_mtime > profile_mtime:
                     self.logger.info(
@@ -376,6 +400,9 @@ class SyncEngine:
                     )
                     profile_base.mkdir(parents=True, exist_ok=True)
                     self._copy_leveldb_atomic(sync_unit, profile_unit)
+                    self._synced_count += 1
+                else:
+                    self._skipped_count += 1
             else:  # both
                 if profile_mtime > sync_mtime:
                     self.logger.info(
@@ -383,12 +410,14 @@ class SyncEngine:
                     )
                     sync_base.mkdir(parents=True, exist_ok=True)
                     self._copy_leveldb_atomic(profile_unit, sync_unit)
+                    self._synced_count += 1
                 else:
                     self.logger.info(
                         "LevelDB %s/%s: sync newer — copying to profile", subpath, name
                     )
                     profile_base.mkdir(parents=True, exist_ok=True)
                     self._copy_leveldb_atomic(sync_unit, profile_unit)
+                    self._synced_count += 1
 
         with ThreadPoolExecutor(max_workers=8) as pool:
             for fut in as_completed({pool.submit(_sync_unit, n): n for n in unit_names}):
@@ -527,6 +556,10 @@ class SyncEngine:
         meta_path = self.sync_folder / "metadata.json"
         is_first_sync = not meta_path.exists()
 
+        # Reset sync statistics
+        self._synced_count = 0
+        self._skipped_count = 0
+
         if is_first_sync:
             self.logger.info("Starting initial sync (first-time setup)")
         else:
@@ -587,10 +620,16 @@ class SyncEngine:
                     )
 
         self.update_metadata()
+
+        # Log summary
+        summary = (
+            f"Synced: {self._synced_count} items, "
+            f"Skipped: {self._skipped_count} items (unchanged)"
+        )
         if is_first_sync:
-            self.logger.info("Initial sync complete")
+            self.logger.info("Initial sync complete — %s", summary)
         else:
-            self.logger.info("sync_all complete")
+            self.logger.info("Sync complete — %s", summary)
 
         return {"is_first_sync": is_first_sync}
 

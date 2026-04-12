@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from src.dracula import BOLD_HEADING, BOLD_LABEL, DEFAULT_LOG_COLOR, LOG_COLORS, MUTED_TEXT
+
 _LOG = logging.getLogger(__name__)
 
 
@@ -64,7 +66,7 @@ class SyncProgressDialog(QDialog):
 
         # Status label
         self._status_label = QLabel("Starting sync...")
-        self._status_label.setStyleSheet("font-weight: bold; font-size: 12pt;")
+        self._status_label.setStyleSheet(BOLD_HEADING)
         layout.addWidget(self._status_label)
 
         # Progress bar
@@ -76,12 +78,12 @@ class SyncProgressDialog(QDialog):
 
         # Profile info label
         self._profile_label = QLabel("")
-        self._profile_label.setStyleSheet("color: #6272a4; font-size: 10pt;")
+        self._profile_label.setStyleSheet(MUTED_TEXT)
         layout.addWidget(self._profile_label)
 
         # Log area
         log_label = QLabel("Activity Log:")
-        log_label.setStyleSheet("font-weight: bold; margin-top: 8px;")
+        log_label.setStyleSheet(BOLD_LABEL)
         layout.addWidget(log_label)
 
         self._text_edit = QTextEdit()
@@ -119,15 +121,7 @@ class SyncProgressDialog(QDialog):
 
     def _append_log(self, level: str, message: str) -> None:
         """Append a log message with color coding based on level."""
-        # Color map for log levels
-        colors = {
-            "DEBUG": "#808080",     # Gray
-            "INFO": "#4ec9b0",      # Teal
-            "WARNING": "#dcdcaa",   # Yellow
-            "ERROR": "#f48771",     # Red
-            "CRITICAL": "#ff0000",  # Bright red
-        }
-        color = colors.get(level, "#d4d4d4")
+        color = LOG_COLORS.get(level, DEFAULT_LOG_COLOR)
 
         # Insert colored text
         cursor = self._text_edit.textCursor()

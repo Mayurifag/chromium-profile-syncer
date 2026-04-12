@@ -55,19 +55,48 @@ class BrowserBase(ABC):
         root = self.profile_root()
         return (root / "External Extensions") if root else None
 
-    @staticmethod
-    def get_profile_name(profile_path: Path) -> str:
-        """Read display name from Preferences JSON, fallback to directory name."""
+    def get_profile_name(self, profile_path: Path) -> str:
+        """Read display name from Local State or Preferences, fallback to directory name."""
         import json
 
+        profile_dir_name = profile_path.name
+
+        # Try reading from Local State first (has email and better names)
+        try:
+            root = self.profile_root()
+            if root:
+                local_state_path = root / "Local State"
+                if local_state_path.exists():
+                    local_state = json.loads(local_state_path.read_text(encoding="utf-8"))
+                    info_cache = local_state.get("profile", {}).get("info_cache", {})
+                    profile_info = info_cache.get(profile_dir_name, {})
+
+                    # Priority: custom name (if not default) > email > gaia_name
+                    is_default = profile_info.get("is_using_default_name", True)
+                    name = profile_info.get("name", "").strip()
+                    if name and not is_default:
+                        return name
+
+                    user_name = profile_info.get("user_name", "").strip()
+                    if user_name:
+                        return user_name
+
+                    gaia_name = profile_info.get("gaia_name", "").strip()
+                    if gaia_name:
+                        return gaia_name
+        except (OSError, json.JSONDecodeError, KeyError):
+            pass
+
+        # Fallback to Preferences file
         try:
             prefs = json.loads((profile_path / "Preferences").read_text(encoding="utf-8"))
-            name = prefs.get("profile", {}).get("name", "")
+            name = prefs.get("profile", {}).get("name", "").strip()
             if name:
                 return name
         except (OSError, json.JSONDecodeError, KeyError):
             pass
-        return profile_path.name
+
+        return profile_dir_name
 
     def is_running(self) -> bool:
         names_lower = {n.lower() for n in self.process_names}

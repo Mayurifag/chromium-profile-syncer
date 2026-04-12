@@ -9,8 +9,8 @@ import tempfile
 from PySide6.QtWidgets import QApplication
 
 from src import autostart, config, single_instance
+from src.dracula import DRACULA_STYLESHEET
 from src.sync_engine import SyncEngine
-from src.theme import DRACULA_STYLESHEET
 from src.tray import TrayApp
 
 
@@ -50,7 +50,6 @@ def main() -> None:
     has_profiles = any(profiles for profiles in config.get_enabled_profiles().values())
     autostart.apply(has_profiles)
 
-    # Open settings dialog on manual launch (not autostart)
     if not args.tray:
         QTimer.singleShot(0, tray.open_settings)
 

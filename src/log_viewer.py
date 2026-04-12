@@ -11,6 +11,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from src.dracula import DEFAULT_LOG_COLOR, LOG_COLORS, LOG_VIEWER_TEXTEDIT
+
 _LOG = logging.getLogger(__name__)
 
 
@@ -66,13 +68,7 @@ class LogViewerDialog(QDialog):
         self._text_edit.setFont(font)
 
         # Dark theme for better readability
-        self._text_edit.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                border: none;
-            }
-        """)
+        self._text_edit.setStyleSheet(LOG_VIEWER_TEXTEDIT)
 
         layout.addWidget(self._text_edit)
 
@@ -98,15 +94,7 @@ class LogViewerDialog(QDialog):
 
     def _append_log(self, level: str, message: str) -> None:
         """Append a log message with color coding based on level."""
-        # Color map for log levels
-        colors = {
-            "DEBUG": "#808080",     # Gray
-            "INFO": "#4ec9b0",      # Teal
-            "WARNING": "#dcdcaa",   # Yellow
-            "ERROR": "#f48771",     # Red
-            "CRITICAL": "#ff0000",  # Bright red
-        }
-        color = colors.get(level, "#d4d4d4")
+        color = LOG_COLORS.get(level, DEFAULT_LOG_COLOR)
 
         # Insert colored text
         cursor = self._text_edit.textCursor()

@@ -43,6 +43,7 @@ This builds the app, kills the running instance, installs, and launches automati
 - Line length: 100 characters
 - Ruff rules: E, F, I, UP
 - Target: Python 3.12
+- **No obvious comments** — do not add comments that merely restate what the code does. Comments should only explain *why*, not *what*. The code itself should be self-explanatory through clear naming and structure.
 
 ## Key Implementation Details
 

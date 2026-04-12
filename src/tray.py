@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from src import autostart
 from src.browsers import ALL_BROWSERS
+from src.dracula import ICON_COLORS
 from src.settings import SettingsDialog
 from src.sync_engine import SyncEngine
 from src.sync_progress import SyncProgressDialog
@@ -20,13 +21,6 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
-
-_ICON_COLORS: dict[str, str] = {
-    "idle": "#bd93f9",      # Dracula purple
-    "syncing": "#8be9fd",   # Dracula cyan
-    "waiting": "#f1fa8c",   # Dracula yellow
-    "error": "#ff5555",     # Dracula red
-}
 
 
 class SyncWorker(QThread):
@@ -47,19 +41,15 @@ class SyncWorker(QThread):
         self.started.emit()
         logger.info("SyncWorker: sync started")
         try:
-            # Wire up progress callback to track per-profile progress
             def _progress_handler(desc: str) -> None:
                 self.progress.emit(desc)
-                # Parse "browser/profile" format
                 if "/" in desc:
                     parts = desc.split("/", 1)
                     browser, profile = parts[0], parts[1]
 
-                    # New profile started?
                     if self._current_profile is None or \
                        self._current_profile[0] != browser or \
                        self._current_profile[1] != profile:
-                        # Get direction from config
                         from src import config as _config
                         directions = _config.get_profile_directions()
                         direction = directions.get(browser, {}).get(profile, "both")
@@ -73,11 +63,9 @@ class SyncWorker(QThread):
                         self._profile_count = 0
                         self._profile_start = datetime.now().timestamp()
 
-                    # Update count
                     self._profile_count += 1
                     elapsed = datetime.now().timestamp() - self._profile_start
 
-                    # Emit profile progress every 10 items or every second
                     last_emit = getattr(self, "_last_emit", 0)
                     if self._profile_count % 10 == 0 or elapsed - last_emit > 1.0:
                         self.profile_progress.emit(
@@ -119,7 +107,7 @@ class TrayApp(QSystemTrayIcon):
         self._watcher_paused: bool = False
         self._settings_dialog: SettingsDialog | None = None
         self._progress_dialog: SyncProgressDialog | None = None
-        self._next_sync_time: float = 0.0  # timestamp of next sync
+        self._next_sync_time: float = 0.0
         self._countdown_timer: QTimer | None = None
 
         self.setIcon(self._make_icon("idle"))
@@ -160,8 +148,7 @@ class TrayApp(QSystemTrayIcon):
 
     @staticmethod
     def _make_icon(state: str) -> QIcon:
-        """Draw a 22x22 filled circle for the given state."""
-        color_hex = _ICON_COLORS.get(state, _ICON_COLORS["idle"])
+        color_hex = ICON_COLORS.get(state, ICON_COLORS["idle"])
         pixmap = QPixmap(22, 22)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
@@ -186,14 +173,12 @@ class TrayApp(QSystemTrayIcon):
         logger.debug("Periodic sync timer armed (%d min)", interval_minutes)
 
     def _setup_countdown_timer(self) -> None:
-        """Timer that updates the countdown display every second."""
         self._countdown_timer = QTimer(self)
-        self._countdown_timer.setInterval(1000)  # 1 second
+        self._countdown_timer.setInterval(1000)
         self._countdown_timer.timeout.connect(self._update_countdown)
         self._countdown_timer.start()
 
     def _update_countdown(self) -> None:
-        """Update next sync countdown in settings dialog."""
         if self._settings_dialog is not None:
             remaining = int(self._next_sync_time - time.time())
             self._settings_dialog.update_next_sync_time(max(0, remaining))
@@ -201,7 +186,6 @@ class TrayApp(QSystemTrayIcon):
     def _on_timer(self) -> None:
         logger.info("Periodic timer fired — triggering sync")
         self._trigger_sync()
-        # Reset next sync time
         interval_minutes = self._config.get_sync_interval()
         self._next_sync_time = time.time() + (interval_minutes * 60)
 
@@ -213,11 +197,9 @@ class TrayApp(QSystemTrayIcon):
         self._watcher = QFileSystemWatcher(self)
         paths_to_watch: list[str] = []
 
-        # Always watch the sync folder directory itself
         if sync_folder.exists():
             paths_to_watch.append(str(sync_folder))
 
-        # Watch metadata.json only if it exists (addPath silently ignores missing paths)
         meta = sync_folder / "metadata.json"
         if meta.exists():
             paths_to_watch.append(str(meta))
@@ -259,7 +241,6 @@ class TrayApp(QSystemTrayIcon):
         self._trigger_sync()
 
     def _resume_watcher(self) -> None:
-        """Resume file watcher after sync completes."""
         self._watcher_paused = False
         logger.debug("File watcher resumed")
 
@@ -268,9 +249,7 @@ class TrayApp(QSystemTrayIcon):
     # ------------------------------------------------------------------
 
     def open_settings(self) -> None:
-        """Open the SettingsDialog and connect its saved signal."""
         if self._settings_dialog is not None:
-            # Dialog already open, just bring it to front
             self._settings_dialog.show()
             self._settings_dialog.raise_()
             self._settings_dialog.activateWindow()
@@ -284,7 +263,6 @@ class TrayApp(QSystemTrayIcon):
 
         self._settings_dialog = dialog
 
-        # macOS requires explicit activation for tray apps
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -292,15 +270,12 @@ class TrayApp(QSystemTrayIcon):
         dialog.exec()
 
     def _on_settings_closed(self) -> None:
-        """Clean up settings dialog reference."""
         self._settings_dialog = None
 
     def _on_progress_dialog_closed(self) -> None:
-        """Clean up progress dialog reference."""
         self._progress_dialog = None
 
     def _on_sync_interval_changed(self, minutes: int) -> None:
-        """Update sync timer when interval is changed."""
         if self._timer is not None:
             self._timer.stop()
             self._timer.setInterval(minutes * 60 * 1000)
@@ -309,7 +284,6 @@ class TrayApp(QSystemTrayIcon):
             logger.info("Sync interval updated to %d minutes", minutes)
 
     def _on_settings_saved(self) -> None:
-        """Rebuild SyncEngine and file watcher after settings are saved."""
         sync_folder = self._config.get_sync_folder()
         if sync_folder is None:
             logger.warning("Settings saved but no sync folder chosen — keeping existing engine")
@@ -330,7 +304,6 @@ class TrayApp(QSystemTrayIcon):
         logger.info("Autostart %s", "enabled" if has_profiles else "disabled")
 
     def _teardown_watcher(self) -> None:
-        """Stop and discard the current file watcher."""
         if self._watcher is not None:
             watched = self._watcher.files() + self._watcher.directories()
             if watched:
@@ -359,10 +332,8 @@ class TrayApp(QSystemTrayIcon):
             return
 
         logger.info("Starting sync worker")
-        # Reset next sync time when manually triggered
         interval_minutes = self._config.get_sync_interval()
         self._next_sync_time = time.time() + (interval_minutes * 60)
-        # Restart timer to align with manual sync
         if self._timer is not None:
             self._timer.stop()
             self._timer.start()
@@ -380,15 +351,12 @@ class TrayApp(QSystemTrayIcon):
         self.setIcon(self._make_icon("syncing"))
         self._action_sync.setText("⏳ Starting sync...")
         self._action_status.setText("Syncing...")
-        # Disable buttons during sync
         self._action_sync.setEnabled(False)
         self._action_settings.setEnabled(False)
 
-        # Pause file watcher to prevent sync loops
         self._watcher_paused = True
         logger.debug("File watcher paused during sync")
 
-        # Show progress dialog
         if self._progress_dialog is None:
             self._progress_dialog = SyncProgressDialog(parent=None)
             self._progress_dialog.finished.connect(self._on_progress_dialog_closed)
@@ -399,26 +367,21 @@ class TrayApp(QSystemTrayIcon):
         self._progress_dialog.activateWindow()
 
     def _on_sync_progress(self, description: str) -> None:
-        """Update status with current file/directory being synced."""
-        # Show progress inline where the "Sync Now" button was
         truncated = description[:50] + "..." if len(description) > 50 else description
         self._action_sync.setText(f"⏳ {truncated}")
         self._action_status.setText(f"Syncing: {description}")
 
-        # Update progress dialog
         if self._progress_dialog is not None:
             self._progress_dialog.on_progress(description)
 
     def _on_profile_progress(
         self, browser: str, profile: str, direction: str, count: int, elapsed: float
     ) -> None:
-        """Update settings dialog with per-profile progress."""
         if self._settings_dialog is not None:
             self._settings_dialog.update_profile_progress(
                 browser, profile, direction, count, elapsed
             )
 
-        # Update progress dialog
         if self._progress_dialog is not None:
             self._progress_dialog.update_profile_progress(
                 browser, profile, direction, count, elapsed
@@ -430,7 +393,6 @@ class TrayApp(QSystemTrayIcon):
         else:
             logger.info("Sync finished at %s", last_sync)
 
-        # Hide all profile progress bars in settings dialog
         if self._settings_dialog is not None:
             from src import config as _config
             enabled_profiles = _config.get_enabled_profiles()
@@ -438,27 +400,22 @@ class TrayApp(QSystemTrayIcon):
                 for profile in profiles:
                     self._settings_dialog.hide_profile_progress(browser, profile)
 
-        # Update progress dialog
         if self._progress_dialog is not None:
             self._progress_dialog.sync_finished(success=True)
 
-        # Resume file watcher after cooldown (5s to let filesystem settle)
         QTimer.singleShot(5000, self._resume_watcher)
         logger.debug("File watcher will resume in 5s")
 
-        # Check if any browser is currently running — if so, use waiting state
         any_running = any(b.is_running() for b in ALL_BROWSERS)
         state = "waiting" if any_running else "idle"
         self.setIcon(self._make_icon(state))
         self._action_sync.setText("Sync Now")
 
-        # Only show detailed status for subsequent syncs, not first-time setup
         if is_first_sync:
             self._action_status.setText("Initial setup complete")
         else:
             self._action_status.setText(f"Last sync: {last_sync}")
 
-        # Re-enable buttons
         self._action_sync.setEnabled(True)
         self._action_settings.setEnabled(True)
 
@@ -468,14 +425,11 @@ class TrayApp(QSystemTrayIcon):
         self._action_sync.setText("Sync Now")
         self._action_status.setText(f"Error: {msg}")
 
-        # Update progress dialog
         if self._progress_dialog is not None:
             self._progress_dialog.sync_finished(success=False)
 
-        # Resume file watcher after cooldown even on error
         QTimer.singleShot(5000, self._resume_watcher)
         logger.debug("File watcher will resume in 5s (after error)")
 
-        # Re-enable buttons even on error
         self._action_sync.setEnabled(True)
         self._action_settings.setEnabled(True)

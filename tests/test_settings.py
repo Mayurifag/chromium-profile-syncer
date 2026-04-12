@@ -153,6 +153,14 @@ class _MockBrowser:
 
         return [Path(p) for p in self._profiles]
 
+    def get_profile_name(self, profile_path):
+        """Mock implementation: just return the directory name."""
+        return profile_path.name
+
+    def profile_root(self):
+        """Mock implementation: return None to skip Local State lookup."""
+        return None
+
 
 def test_settings_dialog_constructs(qapp):
     from src.settings import SettingsDialog
