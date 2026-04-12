@@ -321,6 +321,7 @@ class TrayApp(QSystemTrayIcon):
             if watched:
                 self._watcher.removePaths(watched)
                 logger.debug("Removed watched paths: %s", watched)
+            self._watcher.deleteLater()
             self._watcher = None
             logger.debug("File watcher torn down")
 
@@ -366,6 +367,7 @@ class TrayApp(QSystemTrayIcon):
         self._worker = SyncWorker(self._engine)
         self._worker.started.connect(self._on_sync_started)
         self._worker.finished.connect(self._on_sync_finished)
+        self._worker.finished.connect(self._worker.deleteLater)
         self._worker.error.connect(self._on_sync_error)
         self._worker.progress.connect(self._on_sync_progress)
         self._worker.profile_progress.connect(self._on_profile_progress)

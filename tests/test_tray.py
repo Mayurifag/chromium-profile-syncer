@@ -115,6 +115,7 @@ def test_teardown_watcher_removes_paths(qapp, tmp_path):
     tray._teardown_watcher()
 
     mock_watcher.removePaths.assert_called_once_with([str(tmp_path)])
+    mock_watcher.deleteLater.assert_called_once()
     assert tray._watcher is None
 
 
@@ -138,6 +139,7 @@ def test_teardown_watcher_empty_paths(qapp, tmp_path):
     tray._teardown_watcher()
 
     mock_watcher.removePaths.assert_not_called()
+    mock_watcher.deleteLater.assert_called_once()
     assert tray._watcher is None
 
 
