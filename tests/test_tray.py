@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -170,12 +168,8 @@ def test_open_settings_creates_dialog(qapp, tmp_path):
 
 def test_on_settings_saved_rebuilds_engine_and_watcher(qapp, tmp_path):
     """_on_settings_saved replaces engine and watcher when folder is set."""
-    from src import config as real_config
-    from src.tray import TrayApp
 
-    engine_mock = MagicMock()
     tray = _make_tray(qapp, tmp_path)
-    old_engine = tray._engine
 
     mock_config = MagicMock()
     mock_config.get_sync_folder.return_value = tmp_path

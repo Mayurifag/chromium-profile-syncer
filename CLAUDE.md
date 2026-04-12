@@ -4,57 +4,84 @@
 
 Never hand-edit `uv.lock`. Use `uv add` / `uv remove` to manage dependencies.
 
-~~~sh
-uv add somepackage
-uv remove somepackage
-~~~
-
 ## Running Commands
 
-Always prefix Python and tool invocations with `uv run` to use the project-managed virtual environment:
+Always prefix invocations with `uv run`:
 
 ~~~sh
-# Run tests
 uv run pytest
-
-# Lint (never run ruff directly)
 uv run ruff check src tests
-
-# Run the app
 uv run python -m src.main
-# or
-uv run python src/main.py
-
-# Build executable
 uv run python build.py
 ~~~
 
-Do **not** run `pytest` or `ruff` directly — use `uv run` to ensure the correct environment.
+## After Fixes
+
+Always reinstall and relaunch after code changes:
+
+~~~sh
+make install
+~~~
+
+This builds the app, kills the running instance, installs, and launches automatically.
 
 ## Technology Constraints
 
-- **PySide6** — the Qt binding used throughout. Do not substitute PyQt6 or any other binding.
-- **Python 3.12+** — required. Do not use syntax or stdlib features unavailable in 3.12.
+- **PySide6** — do not substitute PyQt6 or any other binding.
+- **Python 3.12+** — do not use syntax or stdlib features unavailable in 3.12.
+- **rclone** — required runtime dependency for fast backup rotation (must be installed via system package manager).
 
 ## Project Structure
 
 - `src/` — application source package
-- `tests/` — test files (place all new tests here)
-- `build.py` — PyInstaller build script (cross-platform)
+- `tests/` — test files
+- `build.py` — PyInstaller build script
 - `pyproject.toml` — project metadata and tool configuration
 
 ## Code Style
 
-- Line length: 100 characters (configured in `pyproject.toml`)
+- Line length: 100 characters
 - Ruff rules: E, F, I, UP
 - Target: Python 3.12
 
-## UV Config Note
+## Key Implementation Details
 
-If bare `uv` commands fail with config errors, prefix with `UV_NO_CONFIG=1`:
+### Smart Extension Syncing
 
-~~~sh
-UV_NO_CONFIG=1 uv sync --group dev
-~~~
+**Detection:** Web Store extensions have `_metadata/verified_contents.json` (Google signature)
+- **Web Store extensions:** Only save extension ID to `webstore_extensions.json` manifest
+- **Unpacked extensions:** Sync full code (can't be re-downloaded)
+- **Auto-installation:** Generate External Extensions JSON stubs from manifest
 
-This works around any global `uv.toml` settings that may conflict.
+### Trash File Exclusion
+
+Files excluded from sync:
+- `._*` — macOS metadata on exFAT/FAT32 drives
+- `*.map` — JavaScript/CSS source maps (debugging files)
+- `IndexedDB/` — Website caches (disabled by default in config)
+
+**Implementation:**
+- rclone: `--exclude "._*"`
+- shutil.copytree: `ignore=shutil.ignore_patterns("._*")`
+
+### Backup Rotation
+
+Uses rclone for fast parallel backup rotation:
+- Parses `--stats-one-line` output for progress percentages
+- Runs with `--transfers 8 --checkers 16` for parallelism
+- Reports progress via callback to show in UI
+
+### First-Sync Detection
+
+- Checks if `metadata.json` exists before syncing
+- If missing → first-time setup (shows "Initial setup complete")
+- If exists → regular sync (shows "Last sync: [timestamp]")
+- Prevents "sync complete" spam on clean slate
+
+### Clean Button (Settings Window)
+
+- Visible only when sync folder contains data (`current/` directory exists)
+- Deletes all synced data: `current/`, `backup-1/`, `backup-2/`, `metadata.json`
+- Clears enabled profiles and browsers from config
+- Shows confirmation dialog before deletion
+- After cleaning, triggers initial upload dialog to start fresh

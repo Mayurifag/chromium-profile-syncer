@@ -46,15 +46,6 @@ def set_sync_folder(p: Path) -> None:
     _LOG.info("sync_folder set to %s", p)
 
 
-_DEFAULT_DATA_TYPES: dict[str, bool] = {
-    "extensions": True,
-    "bookmarks": True,
-    "custom_dictionary": True,
-    "local_storage": True,
-    "indexeddb": True,
-}
-
-
 def get_enabled_browsers() -> dict[str, bool]:
     """Return {browser_name: enabled} dict. Empty dict means all installed are enabled."""
     return load().get("enabled_browsers", {})
@@ -81,22 +72,6 @@ def set_enabled_profiles(profiles: dict[str, list[str]]) -> None:
     _LOG.info("enabled_profiles updated")
 
 
-def get_enabled_data_types() -> dict[str, bool]:
-    """Return {data_type: enabled}. Defaults to all True."""
-    saved = load().get("enabled_data_types", {})
-    result = dict(_DEFAULT_DATA_TYPES)
-    result.update(saved)
-    return result
-
-
-def set_enabled_data_types(data_types: dict[str, bool]) -> None:
-    """Persist enabled_data_types mapping."""
-    data = load()
-    data["enabled_data_types"] = data_types
-    save(data)
-    _LOG.info("enabled_data_types updated: %s", data_types)
-
-
 def get_profile_directions() -> dict[str, dict[str, str]]:
     """Return {browser_name: {profile_name: direction}}.
     direction is one of: "both", "push", "pull". Default "both".
@@ -111,13 +86,15 @@ def set_profile_directions(directions: dict[str, dict[str, str]]) -> None:
 
 
 def get_autostart() -> bool:
-    """Return autostart preference. Defaults to True."""
-    return bool(load().get("autostart", True))
+    """Return whether the app should start on login. Defaults to True."""
+    return load().get("autostart", True)
 
 
 def set_autostart(enabled: bool) -> None:
-    """Persist autostart preference."""
+    """Persist the autostart setting."""
     data = load()
     data["autostart"] = enabled
     save(data)
     _LOG.info("autostart set to %s", enabled)
+
+

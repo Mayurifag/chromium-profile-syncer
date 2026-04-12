@@ -8,14 +8,15 @@ APP_NAME = "chromium-profile-syncer"
 
 
 def _exe_args() -> list[str]:
-    """Return the command args to launch this app.
+    """Return the command args to launch this app with --tray flag.
 
     In a PyInstaller frozen bundle, sys.executable is the bundle itself.
     In dev mode, we need the interpreter plus the script path.
+    Always includes --tray for autostart (launches in tray-only mode).
     """
     if getattr(sys, "frozen", False):
-        return [sys.executable]
-    return [sys.executable, str(Path(sys.argv[0]).resolve())]
+        return [sys.executable, "--tray"]
+    return [sys.executable, str(Path(sys.argv[0]).resolve()), "--tray"]
 
 
 def apply(enabled: bool) -> None:

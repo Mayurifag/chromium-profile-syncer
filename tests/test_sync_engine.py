@@ -2,15 +2,10 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from src.sync_engine import NEVER_SYNC, SyncEngine, _parse_version
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -314,7 +309,10 @@ def test_sync_all_uses_direction_from_config(tmp_path: Path) -> None:
     )
     engine = _make_engine(sync_folder, browsers=[browser])
 
-    with patch("src.config.get_profile_directions", return_value={"TestBrowser": {"Default": "push"}}):
+    directions = {"TestBrowser": {"Default": "push"}}
+    with patch("src.config.get_enabled_browsers", return_value={"TestBrowser": True}), \
+         patch("src.config.get_enabled_profiles", return_value={"TestBrowser": ["Default"]}), \
+         patch("src.config.get_profile_directions", return_value=directions):
         engine.sync_all()
 
     # Push: profile (newer) → sync should be updated
@@ -333,13 +331,26 @@ def _make_ext_version_dir(
     ext_id: str,
     version: str,
     manifest_version: str | None = None,
+    *,
+    webstore: bool = False,
 ) -> Path:
-    """Create Extensions/<ext_id>/<version>/ with optional manifest.json."""
+    """Create Extensions/<ext_id>/<version>/ with optional manifest.json.
+
+    If webstore=True, creates _metadata/verified_contents.json to simulate
+    a Web Store extension. Default is False (unpacked/developer extension).
+    """
     ver_dir = base / "Extensions" / ext_id / version
     ver_dir.mkdir(parents=True, exist_ok=True)
     if manifest_version is not None:
         (ver_dir / "manifest.json").write_text(
             json.dumps({"version": manifest_version}), encoding="utf-8"
+        )
+    if webstore:
+        # Create verified_contents.json to simulate Web Store extension
+        metadata_dir = ver_dir / "_metadata"
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+        (metadata_dir / "verified_contents.json").write_text(
+            json.dumps([{"description": "test"}]), encoding="utf-8"
         )
     return ver_dir
 
@@ -614,7 +625,11 @@ def test_sync_all_processes_installed_idle_browser(tmp_path: Path) -> None:
     sync_folder.mkdir()
 
     engine = _make_engine(sync_folder, browsers=[browser])
-    engine.sync_all()
+
+    with patch("src.config.get_enabled_browsers", return_value={"TestBrowser": True}), \
+         patch("src.config.get_enabled_profiles", return_value={"TestBrowser": ["Default"]}), \
+         patch("src.config.get_profile_directions", return_value={}):
+        engine.sync_all()
 
     synced = sync_folder / "current" / "TestBrowser" / "Default" / "Bookmarks"
     assert synced.exists()
@@ -664,29 +679,6 @@ def test_sync_all_filters_profiles(tmp_path: Path) -> None:
     assert not (sync_folder / "current" / "TB" / "Profile 1").exists()
 
 
-def test_sync_all_respects_data_types(tmp_path: Path) -> None:
-    profile = tmp_path / "profiles" / "Default"
-    profile.mkdir(parents=True)
-    _write_file(profile / "Bookmarks", "bk", mtime=2000.0)
-    _write_file(profile / "Preferences", "{}", mtime=2000.0)
-    _make_ext_version_dir(profile, "testext", "1.0.0", "1.0.0")
-
-    browser = _make_browser(name="TB", installed=True, running=False, profiles=[profile])
-    sync_folder = tmp_path / "sync"
-    sync_folder.mkdir()
-    engine = _make_engine(sync_folder, browsers=[browser])
-
-    with patch("src.config.get_enabled_data_types", return_value={
-        "extensions": False, "bookmarks": True, "custom_dictionary": True,
-        "local_storage": True, "indexeddb": True,
-    }):
-        engine.sync_all()
-
-    synced = sync_folder / "current" / "TB" / "Default"
-    assert (synced / "Bookmarks").exists()
-    assert not (synced / "Extensions").exists()
-
-
 # ---------------------------------------------------------------------------
 # update_metadata
 # ---------------------------------------------------------------------------
@@ -724,10 +716,13 @@ def test_update_metadata_timestamp_is_iso_utc(tmp_path: Path) -> None:
 
 def test_install_external_extensions_writes_stubs(tmp_path: Path) -> None:
     sync_profile = tmp_path / "sync_profile"
+    sync_profile.mkdir(parents=True)
     ext_dir = tmp_path / "External Extensions"
 
-    (sync_profile / "Extensions" / "aaabbbccc").mkdir(parents=True)
-    (sync_profile / "Extensions" / "dddeeefff").mkdir(parents=True)
+    # Create manifest with Web Store extension IDs
+    (sync_profile / "webstore_extensions.json").write_text(
+        json.dumps(["aaabbbccc", "dddeeefff"]), encoding="utf-8"
+    )
 
     engine = _make_engine(tmp_path)
     engine._install_external_extensions(sync_profile, ext_dir)
@@ -741,8 +736,13 @@ def test_install_external_extensions_writes_stubs(tmp_path: Path) -> None:
 
 def test_install_external_extensions_idempotent(tmp_path: Path) -> None:
     sync_profile = tmp_path / "sync_profile"
+    sync_profile.mkdir(parents=True)
     ext_dir = tmp_path / "External Extensions"
-    (sync_profile / "Extensions" / "aaabbbccc").mkdir(parents=True)
+
+    # Create manifest with one Web Store extension ID
+    (sync_profile / "webstore_extensions.json").write_text(
+        json.dumps(["aaabbbccc"]), encoding="utf-8"
+    )
 
     engine = _make_engine(tmp_path)
     engine._install_external_extensions(sync_profile, ext_dir)
@@ -768,7 +768,8 @@ def test_install_external_extensions_no_extensions_dir(tmp_path: Path) -> None:
 def test_sync_all_registers_external_extensions(tmp_path: Path) -> None:
     profile = tmp_path / "profiles" / "Default"
     ext_dir = tmp_path / "Ext"
-    _make_ext_version_dir(profile, "testext", "1.0.0", "1.0.0")
+    # Create a Web Store extension (will be registered but not synced)
+    _make_ext_version_dir(profile, "testext", "1.0.0", "1.0.0", webstore=True)
     _write_file(profile / "Preferences", "{}", mtime=1000.0)
 
     browser = _make_browser(name="TB", installed=True, running=False, profiles=[profile])
@@ -777,7 +778,11 @@ def test_sync_all_registers_external_extensions(tmp_path: Path) -> None:
     sync_folder = tmp_path / "sync"
     sync_folder.mkdir()
     engine = _make_engine(sync_folder, browsers=[browser])
-    engine.sync_all()
+
+    with patch("src.config.get_enabled_browsers", return_value={"TB": True}), \
+         patch("src.config.get_enabled_profiles", return_value={"TB": ["Default"]}), \
+         patch("src.config.get_profile_directions", return_value={}):
+        engine.sync_all()
 
     assert (ext_dir / "testext.json").exists()
 
@@ -826,7 +831,10 @@ def test_full_round_trip(tmp_path: Path) -> None:
     browser = _make_browser(name="Chrome", installed=True, running=False, profiles=[profile])
     engine = _make_engine(sync_folder, browsers=[browser])
 
-    engine.sync_all()
+    with patch("src.config.get_enabled_browsers", return_value={"Chrome": True}), \
+         patch("src.config.get_enabled_profiles", return_value={"Chrome": [profile.name]}), \
+         patch("src.config.get_profile_directions", return_value={}):
+        engine.sync_all()
 
     # Verify sync folder received Bookmarks
     bk_sync = sync_folder / "current" / "Chrome" / profile.name / "Bookmarks"
@@ -836,7 +844,40 @@ def test_full_round_trip(tmp_path: Path) -> None:
     # Step 2: simulate user edits in sync folder (newer mtime)
     _write_file(bk_sync, "v2", mtime=3000.0)
 
-    engine.sync_all()
+    with patch("src.config.get_enabled_browsers", return_value={"Chrome": True}), \
+         patch("src.config.get_enabled_profiles", return_value={"Chrome": [profile.name]}), \
+         patch("src.config.get_profile_directions", return_value={}):
+        engine.sync_all()
 
     # Verify profile was updated
     assert bk_profile.read_text() == "v2"
+
+
+def test_sync_all_with_empty_config_skips_browser(tmp_path: Path) -> None:
+    """When config has no entry for a browser, sync_all skips it entirely."""
+    default = tmp_path / "profiles" / "Default"
+    profile1 = tmp_path / "profiles" / "Profile 1"
+    profile2 = tmp_path / "profiles" / "Profile 2"
+
+    for p in [default, profile1, profile2]:
+        p.mkdir(parents=True)
+        _write_file(p / "Preferences", "{}", mtime=1000.0)
+
+    browser = _make_browser(
+        name="Chrome", installed=True, running=False, profiles=[default, profile1, profile2]
+    )
+    sync_folder = tmp_path / "sync"
+    sync_folder.mkdir()
+    engine = _make_engine(sync_folder, browsers=[browser])
+
+    # Config is empty (no enabled_profiles entry for Chrome)
+    with patch("src.config.get_enabled_browsers", return_value={}), \
+         patch("src.config.get_enabled_profiles", return_value={}), \
+         patch("src.config.get_profile_directions", return_value={}):
+        engine.sync_all()
+
+    # FIXED: No profiles should be synced when browser has no config entry
+    current = sync_folder / "current"
+    if current.exists():
+        chrome_dir = current / "Chrome"
+        assert not chrome_dir.exists(), "Chrome directory should not exist when no profiles enabled"

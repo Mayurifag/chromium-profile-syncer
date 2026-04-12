@@ -52,12 +52,10 @@ def test_config_accessors_importable():
     from src.config import (  # noqa: F401
         get_autostart,
         get_enabled_browsers,
-        get_enabled_data_types,
         get_enabled_profiles,
         get_profile_directions,
         set_autostart,
         set_enabled_browsers,
-        set_enabled_data_types,
         set_enabled_profiles,
         set_profile_directions,
     )
@@ -88,24 +86,6 @@ def test_enabled_profiles_roundtrip():
     assert config_module.get_enabled_profiles() == profiles
 
 
-def test_enabled_data_types_default_all_true():
-    dt = config_module.get_enabled_data_types()
-    for key in ("extensions", "bookmarks", "custom_dictionary", "local_storage", "indexeddb"):
-        assert dt[key] is True
-
-
-def test_enabled_data_types_roundtrip():
-    data_types = {
-        "extensions": True,
-        "bookmarks": False,
-        "custom_dictionary": True,
-        "local_storage": False,
-        "indexeddb": True,
-    }
-    config_module.set_enabled_data_types(data_types)
-    assert config_module.get_enabled_data_types() == data_types
-
-
 def test_autostart_default_true():
     assert config_module.get_autostart() is True
 
@@ -125,7 +105,10 @@ def test_profile_directions_default_empty():
 
 
 def test_profile_directions_roundtrip():
-    directions = {"Thorium": {"Default": "push", "Profile 1": "pull"}, "Chrome": {"Default": "both"}}
+    directions = {
+        "Thorium": {"Default": "push", "Profile 1": "pull"},
+        "Chrome": {"Default": "both"},
+    }
     config_module.set_profile_directions(directions)
     assert config_module.get_profile_directions() == directions
 
@@ -176,15 +159,11 @@ def test_settings_dialog_constructs(qapp):
     dlg.close()
 
 
-def test_settings_dialog_has_expected_attributes(qapp):
+def test_settings_dialog_has_expected_attributes(qapp, tmp_path):
     from src.settings import SettingsDialog
 
     dlg = SettingsDialog(browsers_list=[_MockBrowser("Alpha"), _MockBrowser("Beta")])
-    assert "Alpha" in dlg._profile_checks
-    assert "Beta" in dlg._profile_checks
-    assert "Alpha" in dlg._profile_directions
-    assert "Beta" in dlg._profile_directions
-    assert len(dlg._data_type_checks) == 5
+    assert dlg._profile_states == {}
     assert dlg._autostart_check is not None
     dlg.close()
 
@@ -193,17 +172,38 @@ def test_settings_dialog_no_browsers(qapp):
     from src.settings import SettingsDialog
 
     dlg = SettingsDialog(browsers_list=[])
-    assert dlg._profile_checks == {}
+    assert dlg._profile_states == {}
     dlg.close()
 
 
-def test_settings_dialog_profile_checks_populated(qapp):
+def test_settings_dialog_profile_states_populated(qapp, tmp_path):
     from src.settings import SettingsDialog
+
+    sync_folder = tmp_path / "sync"
+    sync_folder.mkdir()
+    config_module.set_sync_folder(sync_folder)
 
     mock = _MockBrowser("Chrome", profiles=["Default", "Profile 1", "Profile 2"])
     dlg = SettingsDialog(browsers_list=[mock])
-    profiles = dlg._profile_checks.get("Chrome", {})
-    assert set(profiles.keys()) == {"Default", "Profile 1", "Profile 2"}
+    states = dlg._profile_states.get("Chrome", {})
+    assert set(states.keys()) == {"Default", "Profile 1", "Profile 2"}
+    dlg.close()
+
+
+def test_rebuild_profiles_synced_profile_enabled(qapp, tmp_path):
+    """Profile present in sync folder gets state=True; others False."""
+    from src.settings import SettingsDialog
+
+    sync_folder = tmp_path / "sync"
+    (sync_folder / "current" / "Chrome" / "Default").mkdir(parents=True)
+
+    mock = _MockBrowser("Chrome", profiles=["Default", "Profile 1"])
+    dlg = SettingsDialog(browsers_list=[mock])
+    dlg._rebuild_profiles(sync_folder)
+
+    states = dlg._profile_states.get("Chrome", {})
+    assert states["Default"] is True
+    assert states["Profile 1"] is False
     dlg.close()
 
 
@@ -219,4 +219,145 @@ def test_settings_dialog_accept_saves_config(qapp, monkeypatch):
     dlg._on_accept()
 
     assert config_module.get_autostart() is False
+    dlg.close()
+
+
+def test_initial_upload_only_one_profile_enabled(qapp, tmp_path):
+    """After initial upload of ONE profile, only that profile should show as enabled."""
+    from src.settings import SettingsDialog, _profiles_in_sync_folder
+    from src.sync_engine import SyncEngine
+
+    # Setup: clean state
+    sync_folder = tmp_path / "sync"
+    sync_folder.mkdir()
+
+    # Clear config (simulating Clean button)
+    config_module.set_enabled_profiles({})
+    config_module.set_enabled_browsers({})
+
+    # Create 3 local profiles
+    profiles_dir = tmp_path / "profiles"
+    default = profiles_dir / "Default"
+    profile1 = profiles_dir / "Profile 1"
+    profile2 = profiles_dir / "Profile 2"
+
+    for p in [default, profile1, profile2]:
+        p.mkdir(parents=True)
+        (p / "Preferences").write_text("{}", encoding="utf-8")
+        (p / "Bookmarks").write_text('{"roots":{}}', encoding="utf-8")
+
+    # Simulate initial upload of ONLY Default profile
+    engine = SyncEngine(sync_folder)
+    sync_profile_path = sync_folder / "current" / "Chrome" / "Default"
+    engine.sync_browser_profile(default, sync_profile_path, direction="push")
+    engine.update_metadata()
+
+    # Debug: list all directories created in sync folder
+    current = sync_folder / "current" / "Chrome"
+    if current.exists():
+        dirs = [d.name for d in current.iterdir() if d.is_dir()]
+        print(f"Directories in sync folder: {dirs}")
+
+    # Verify sync folder structure
+    synced = _profiles_in_sync_folder(sync_folder)
+    assert synced == {"Chrome": {"Default"}}, \
+        f"Expected only Default profile in sync folder, got: {synced}"
+
+    # Create dialog with all 3 profiles
+    mock = _MockBrowser("Chrome", profiles=["Default", "Profile 1", "Profile 2"])
+    dlg = SettingsDialog(browsers_list=[mock])
+    dlg._rebuild_profiles(sync_folder)
+
+    # Verify only Default shows as enabled
+    states = dlg._profile_states.get("Chrome", {})
+    assert states["Default"] is True, "Default profile should be enabled after upload"
+    assert states["Profile 1"] is False, "Profile 1 should NOT be enabled"
+    assert states["Profile 2"] is False, "Profile 2 should NOT be enabled"
+
+    dlg.close()
+
+
+def test_profiles_in_sync_folder_ignores_files(qapp, tmp_path):
+    """_profiles_in_sync_folder should only count directories, not files."""
+    from src.settings import _profiles_in_sync_folder
+
+    sync_folder = tmp_path / "sync"
+    chrome_dir = sync_folder / "current" / "Chrome"
+    chrome_dir.mkdir(parents=True)
+
+    # Create profile directory
+    (chrome_dir / "Default").mkdir()
+
+    # Create files that should be ignored
+    (chrome_dir / "webstore_extensions.json").write_text("[]", encoding="utf-8")
+    (chrome_dir / ".DS_Store").write_text("", encoding="utf-8")
+
+    synced = _profiles_in_sync_folder(sync_folder)
+    assert synced == {"Chrome": {"Default"}}, \
+        f"Should only detect Default directory, got: {synced}"
+
+
+def test_clean_then_upload_clears_old_profiles(qapp, tmp_path):
+    """After Clean, only the newly uploaded profile should show as enabled."""
+    from src.settings import SettingsDialog, _profiles_in_sync_folder
+    from src.sync_engine import SyncEngine
+
+    sync_folder = tmp_path / "sync"
+    sync_folder.mkdir()
+
+    # Setup: simulate previously synced state with multiple profiles
+    profiles_dir = tmp_path / "profiles"
+    default = profiles_dir / "Default"
+    profile1 = profiles_dir / "Profile 1"
+
+    for p in [default, profile1]:
+        p.mkdir(parents=True)
+        (p / "Preferences").write_text("{}", encoding="utf-8")
+
+    # Sync both profiles initially
+    engine = SyncEngine(sync_folder)
+    for local_prof, name in [(default, "Default"), (profile1, "Profile 1")]:
+        sync_path = sync_folder / "current" / "Chrome" / name
+        engine.sync_browser_profile(local_prof, sync_path, direction="push")
+
+    # Save to config
+    config_module.set_enabled_profiles({"Chrome": ["Default", "Profile 1"]})
+    config_module.set_enabled_browsers({"Chrome": True})
+
+    # Verify both are synced
+    synced = _profiles_in_sync_folder(sync_folder)
+    assert synced == {"Chrome": {"Default", "Profile 1"}}
+
+    # Simulate Clean button: delete sync data and clear config
+    import shutil
+    for path in ["current", "backup-1", "backup-2"]:
+        target = sync_folder / path
+        if target.exists():
+            shutil.rmtree(target)
+    config_module.set_enabled_profiles({})
+    config_module.set_enabled_browsers({})
+
+    # Verify config is cleared
+    assert config_module.get_enabled_profiles() == {}
+    assert config_module.get_enabled_browsers() == {}
+
+    # Now upload only Default profile (simulating initial upload after clean)
+    sync_path = sync_folder / "current" / "Chrome" / "Default"
+    engine.sync_browser_profile(default, sync_path, direction="push")
+    engine.update_metadata()
+
+    # Verify only Default is in sync folder
+    synced = _profiles_in_sync_folder(sync_folder)
+    assert synced == {"Chrome": {"Default"}}, \
+        f"After clean and re-upload, expected only Default, got: {synced}"
+
+    # Build UI and verify only Default shows as enabled
+    mock = _MockBrowser("Chrome", profiles=["Default", "Profile 1"])
+    dlg = SettingsDialog(browsers_list=[mock])
+    dlg._rebuild_profiles(sync_folder)
+
+    states = dlg._profile_states.get("Chrome", {})
+    assert states["Default"] is True, "Default should be enabled (just uploaded)"
+    assert states["Profile 1"] is False, "Profile 1 should NOT be enabled (was cleaned)"
+
     dlg.close()

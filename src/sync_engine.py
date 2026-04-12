@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
-import time
-from datetime import datetime, timezone
+import subprocess
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,6 +17,14 @@ if TYPE_CHECKING:
 NEVER_SYNC: frozenset[str] = frozenset(
     ["Login Data", "Cookies", "Web Data", "History", "Secure Preferences"]
 )
+
+DEFAULT_DATA_TYPES: dict[str, bool] = {
+    "extensions": True,
+    "bookmarks": True,
+    "custom_dictionary": True,
+    "local_storage": True,
+    "indexeddb": False,  # Website caches - typically not needed
+}
 
 _LOG = logging.getLogger(__name__)
 
@@ -42,6 +53,67 @@ class SyncEngine:
             browsers = ALL_BROWSERS
         self.browsers = browsers
         self.logger = logging.getLogger(f"{__name__}.SyncEngine")
+        self._progress_cb: Callable[[str], None] | None = None
+
+    def _report(self, description: str) -> None:
+        if self._progress_cb:
+            self._progress_cb(description)
+
+    def _rclone_sync(self, src: Path, dst: Path, description: str = "") -> None:
+        """Sync src → dst using rclone with progress reporting.
+
+        Uses rclone for fast parallel transfers with real-time progress.
+        """
+        self._report(f"{description} (starting...)" if description else "Starting sync...")
+
+        cmd = [
+            "rclone", "sync",
+            str(src), str(dst),
+            "--stats", "1s",           # Update stats every 1 second
+            "--stats-one-line",        # Single line output for parsing
+            "--transfers", "8",        # 8 parallel transfers
+            "--checkers", "16",        # 16 parallel checksum threads
+            "--exclude", "._*",        # Exclude macOS metadata files
+        ]
+
+        # Log the full command being executed
+        self.logger.info("Executing: %s", " ".join(cmd))
+
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+
+            # Parse progress output
+            for line in iter(process.stdout.readline, ""):
+                line = line.strip()
+                if not line:
+                    continue
+
+                # Parse rclone stats line
+                # Example: "Transferred: 123.456 MiB / 500 MiB, 25%, 10 MiB/s, ETA 30s"
+                match = re.search(r"Transferred:\s+[\d.]+\s*\w+\s*/\s*[\d.]+\s*\w+,\s*(\d+)%", line)
+                if match:
+                    pct = match.group(1)
+                    status = f"{description} ({pct}%)" if description else f"Syncing ({pct}%)"
+                    self._report(status)
+                elif "Transferred:" in line:
+                    # Show abbreviated status if we can't parse percentage
+                    self._report(f"{description}..." if description else "Syncing...")
+
+            process.wait()
+            if process.returncode != 0:
+                raise subprocess.CalledProcessError(process.returncode, cmd)
+
+            self.logger.debug("rclone sync complete: %s → %s", src, dst)
+
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            self.logger.exception("rclone sync failed: %s → %s", src, dst)
+            raise OSError(f"rclone sync failed: {exc}") from exc
 
     # ------------------------------------------------------------------
     # Low-level primitives
@@ -57,11 +129,14 @@ class SyncEngine:
         try:
             if tmp.exists():
                 shutil.rmtree(tmp)
-            shutil.copytree(src, tmp)
+            self._report(src.name)
+            self.logger.info("Copying LevelDB: %s → %s", src.name, dst)
+            # Use ignore function to skip macOS metadata files
+            shutil.copytree(src, tmp, ignore=shutil.ignore_patterns("._*"))
             if dst.exists():
                 shutil.rmtree(dst)
             shutil.move(str(tmp), dst)
-            self.logger.debug("Atomic copy: %s → %s", src, dst)
+            self.logger.debug("Atomic copy complete: %s → %s", src, dst)
         except OSError:
             self.logger.exception("Atomic copy failed: %s → %s (dst untouched)", src, dst)
             # dst is intentionally not touched; tmp may remain
@@ -90,29 +165,41 @@ class SyncEngine:
         if direction == "push":
             if src_mtime > dst_mtime and src.exists():
                 dst.parent.mkdir(parents=True, exist_ok=True)
+                self._report(src.name)
+                self.logger.info("Copying file: %s → %s", src.name, dst)
                 shutil.copy2(src, dst)
-                self.logger.info("Synced %s → %s", src, dst)
         elif direction == "pull":
             if dst_mtime > src_mtime and dst.exists():
                 src.parent.mkdir(parents=True, exist_ok=True)
+                self._report(dst.name)
+                self.logger.info("Copying file: %s → %s", dst.name, src)
                 shutil.copy2(dst, src)
-                self.logger.info("Synced %s → %s", dst, src)
         else:  # both
             if src_mtime > dst_mtime:
                 dst.parent.mkdir(parents=True, exist_ok=True)
+                self._report(src.name)
+                self.logger.info("Copying file: %s → %s", src.name, dst)
                 shutil.copy2(src, dst)
-                self.logger.info("Synced %s → %s", src, dst)
             else:
                 src.parent.mkdir(parents=True, exist_ok=True)
+                self._report(dst.name)
+                self.logger.info("Copying file: %s → %s", dst.name, src)
                 shutil.copy2(dst, src)
-                self.logger.info("Synced %s → %s", dst, src)
 
     # ------------------------------------------------------------------
     # Extension sync (version-based)
     # ------------------------------------------------------------------
 
+    def _is_webstore_extension(self, version_dir: Path) -> bool:
+        """Check if an extension version is from Chrome Web Store.
+
+        Web Store extensions have _metadata/verified_contents.json with signatures.
+        Unpacked/developer extensions don't have this file.
+        """
+        return (version_dir / "_metadata" / "verified_contents.json").exists()
+
     def _sync_extensions(self, profile_dir: Path, sync_dir: Path, direction: str = "both") -> None:
-        """Sync Extensions/ — higher manifest.json version wins."""
+        """Sync Extensions/ — only sync unpacked extensions, track Web Store ones in manifest."""
         profile_ext_dir = profile_dir / "Extensions"
         sync_ext_dir = sync_dir / "Extensions"
 
@@ -123,20 +210,66 @@ class SyncEngine:
         if sync_ext_dir.exists():
             ext_ids.update(d.name for d in sync_ext_dir.iterdir() if d.is_dir())
 
-        for ext_id in ext_ids:
-            profile_id_dir = profile_ext_dir / ext_id
-            sync_id_dir = sync_ext_dir / ext_id
-            self._sync_extension_id(profile_id_dir, sync_id_dir, ext_id, direction)
+        # Track Web Store extension IDs in a manifest file
+        webstore_ids: set[str] = set()
+        manifest_path = sync_dir / "webstore_extensions.json"
+
+        # Load existing manifest
+        if manifest_path.exists():
+            try:
+                webstore_ids = set(json.loads(manifest_path.read_text(encoding="utf-8")))
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {
+                pool.submit(
+                    self._sync_extension_id,
+                    profile_ext_dir / ext_id,
+                    sync_ext_dir / ext_id,
+                    ext_id,
+                    direction,
+                    webstore_ids,
+                ): ext_id
+                for ext_id in ext_ids
+            }
+            for fut in as_completed(futures):
+                fut.result()
+
+        # Save updated manifest
+        if webstore_ids:
+            sync_dir.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(json.dumps(sorted(webstore_ids)), encoding="utf-8")
+            self.logger.debug("Saved Web Store extensions manifest: %d IDs", len(webstore_ids))
 
     def _sync_extension_id(
-        self, profile_id_dir: Path, sync_id_dir: Path, ext_id: str, direction: str = "both"
+        self,
+        profile_id_dir: Path,
+        sync_id_dir: Path,
+        ext_id: str,
+        direction: str,
+        webstore_ids: set[str],
     ) -> None:
-        """Sync one extension ID directory by picking the higher version."""
+        """Sync one extension ID directory by picking the higher version.
+
+        Only syncs unpacked/developer extensions (no Web Store signature).
+        Web Store extensions are tracked in webstore_ids set for external registration.
+        """
         # Find best version dir on each side
         profile_best = self._best_extension_version_dir(profile_id_dir)
         sync_best = self._best_extension_version_dir(sync_id_dir)
 
         if profile_best is None and sync_best is None:
+            return
+
+        # Check if this is a Web Store extension (skip syncing the code, just track ID)
+        check_dir = profile_best if profile_best else sync_best
+        if check_dir and self._is_webstore_extension(check_dir):
+            webstore_ids.add(ext_id)
+            self.logger.debug(
+                "Extension %s: Web Store extension — tracking ID (will register by ID)",
+                ext_id,
+            )
             return
 
         profile_ver = self._extension_dir_version(profile_best) if profile_best else (0,)
@@ -149,7 +282,7 @@ class SyncEngine:
             if direction in ("push", "both") and profile_best is not None:
                 dest = sync_id_dir / profile_best.name
                 self.logger.info(
-                    "Extension %s: profile version %s > sync %s — copying to sync",
+                    "Extension %s: unpacked extension, profile version %s > sync %s — syncing",
                     ext_id,
                     profile_ver,
                     sync_ver,
@@ -160,7 +293,7 @@ class SyncEngine:
             if direction in ("pull", "both") and sync_best is not None:
                 dest = profile_id_dir / sync_best.name
                 self.logger.info(
-                    "Extension %s: sync version %s > profile %s — copying to profile",
+                    "Extension %s: unpacked extension, sync version %s > profile %s — syncing",
                     ext_id,
                     sync_ver,
                     profile_ver,
@@ -218,14 +351,14 @@ class SyncEngine:
         if sync_base.exists():
             unit_names.update(d.name for d in sync_base.iterdir() if d.is_dir())
 
-        for name in unit_names:
+        def _sync_unit(name: str) -> None:
             profile_unit = profile_base / name
             sync_unit = sync_base / name
             profile_mtime = self._dir_mtime(profile_unit) if profile_unit.exists() else 0.0
             sync_mtime = self._dir_mtime(sync_unit) if sync_unit.exists() else 0.0
 
             if profile_mtime == sync_mtime:
-                continue
+                return
 
             if direction == "push":
                 if profile_mtime > sync_mtime:
@@ -255,6 +388,10 @@ class SyncEngine:
                     profile_base.mkdir(parents=True, exist_ok=True)
                     self._copy_leveldb_atomic(sync_unit, profile_unit)
 
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for fut in as_completed({pool.submit(_sync_unit, n): n for n in unit_names}):
+                fut.result()
+
     # ------------------------------------------------------------------
     # Backup rotation
     # ------------------------------------------------------------------
@@ -266,15 +403,18 @@ class SyncEngine:
         current = self.sync_folder / "current"
 
         if backup2.exists():
+            self._report("Removing old backup-2...")
             shutil.rmtree(backup2)
             self.logger.debug("Evicted backup-2")
 
         if backup1.exists():
+            self._report("Rotating backup-1 → backup-2...")
             shutil.move(str(backup1), backup2)
             self.logger.debug("Renamed backup-1 → backup-2")
 
         if current.exists():
-            shutil.copytree(current, backup1)
+            # Use rclone for fast parallel copy with progress
+            self._rclone_sync(current, backup1, "Creating backup")
             self.logger.debug("Copied current → backup-1")
 
     # ------------------------------------------------------------------
@@ -282,14 +422,23 @@ class SyncEngine:
     # ------------------------------------------------------------------
 
     def _install_external_extensions(self, sync_profile_path: Path, ext_dir: Path) -> None:
-        """Write External Extensions JSON stubs for extensions present in the sync folder.
+        """Write External Extensions JSON stubs for Web Store extensions from manifest.
 
+        Reads webstore_extensions.json manifest to find which extensions to register.
         Each stub tells the browser to install the extension from the Chrome Web Store
-        on next launch.  Files are only written when they do not already exist, so
-        repeated syncs are idempotent.
+        on next launch. Unpacked extensions are synced directly via file copy.
         """
-        sync_ext_dir = sync_profile_path / "Extensions"
-        if not sync_ext_dir.exists():
+        manifest_path = sync_profile_path / "webstore_extensions.json"
+        if not manifest_path.exists():
+            return
+
+        try:
+            ext_ids = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            self.logger.warning("Failed to read webstore_extensions.json")
+            return
+
+        if not ext_ids:
             return
 
         ext_dir.mkdir(parents=True, exist_ok=True)
@@ -297,13 +446,11 @@ class SyncEngine:
             {"external_update_url": "https://clients2.google.com/service/update2/crx"}
         )
 
-        for entry in sync_ext_dir.iterdir():
-            if not entry.is_dir():
-                continue
-            stub = ext_dir / f"{entry.name}.json"
+        for ext_id in ext_ids:
+            stub = ext_dir / f"{ext_id}.json"
             if not stub.exists():
                 stub.write_text(payload, encoding="utf-8")
-                self.logger.info("Registered external extension stub: %s", entry.name)
+                self.logger.info("Registered Web Store extension: %s", ext_id)
 
     # ------------------------------------------------------------------
     # Per-profile orchestration
@@ -314,70 +461,79 @@ class SyncEngine:
         profile_path: Path,
         sync_profile_path: Path,
         data_types: dict[str, bool] | None = None,
+        *,
         direction: str = "both",
+        on_progress: Callable[[str], None] | None = None,
     ) -> None:
         """Sync a single browser profile against its mirror in the sync folder.
 
-        *data_types* controls which categories are included.  ``None`` means
-        all categories enabled (same as passing all-True dict).
+        *data_types* controls which file categories are synced (all enabled by default).
         *direction* is one of "both", "push", or "pull".
+        *on_progress* is called with a short description each time a file/dir is copied.
         """
+        self._progress_cb = on_progress
         dt = data_types or {}
-        sync_extensions = dt.get("extensions", True)
-        sync_bookmarks = dt.get("bookmarks", True)
-        sync_dictionary = dt.get("custom_dictionary", True)
-        sync_local_storage = dt.get("local_storage", True)
-        sync_indexeddb = dt.get("indexeddb", True)
-
         sync_profile_path.mkdir(parents=True, exist_ok=True)
         self.logger.info("Syncing profile: %s ↔ %s", profile_path, sync_profile_path)
 
-        if sync_extensions:
+        if dt.get("extensions", True):
             self._sync_extensions(profile_path, sync_profile_path, direction)
             for subpath in ("Local Extension Settings", "Sync Extension Settings"):
                 self._sync_leveldb_dir(profile_path, sync_profile_path, subpath, direction)
 
-        if sync_local_storage:
+        if dt.get("local_storage", True):
             self._sync_leveldb_dir(
                 profile_path, sync_profile_path, "Local Storage/leveldb", direction
             )
 
-        if sync_indexeddb:
+        if dt.get("indexeddb", False):
             self._sync_leveldb_dir(profile_path, sync_profile_path, "IndexedDB", direction)
 
-        # Preferences is always synced (browser settings, not sensitive)
-        plain_files = ["Preferences"]
-        if sync_bookmarks:
-            plain_files.append("Bookmarks")
-        if sync_dictionary:
-            plain_files.append("Custom Dictionary.txt")
-
-        for filename in plain_files:
+        plain_files: list[tuple[str, str | None]] = [
+            ("Preferences", None),
+            ("Bookmarks", "bookmarks"),
+            ("Custom Dictionary.txt", "custom_dictionary"),
+        ]
+        for filename, key in plain_files:
+            if key is not None and not dt.get(key, True):
+                continue
             src = profile_path / filename
             dst = sync_profile_path / filename
             if src.exists() or dst.exists():
                 self._sync_file(src, dst, direction)
 
+        self._progress_cb = None
         self.logger.info("Profile sync complete: %s", profile_path.name)
 
     # ------------------------------------------------------------------
     # Top-level orchestration
     # ------------------------------------------------------------------
 
-    def sync_all(self) -> None:
-        """Sync all installed, non-running browsers, respecting saved config."""
+    def sync_all(self) -> dict[str, bool]:
+        """Sync all installed, non-running browsers, respecting saved config.
+
+        Returns a dict with 'is_first_sync' to indicate if this was initial setup.
+        """
         from src import config as _config
 
         enabled_browsers = _config.get_enabled_browsers()
         enabled_profiles = _config.get_enabled_profiles()
-        data_types = _config.get_enabled_data_types()
         directions = _config.get_profile_directions()
+        data_types = DEFAULT_DATA_TYPES
 
-        self.logger.info("Starting sync_all")
+        # Detect first-time sync (no metadata.json exists yet)
+        meta_path = self.sync_folder / "metadata.json"
+        is_first_sync = not meta_path.exists()
+
+        if is_first_sync:
+            self.logger.info("Starting initial sync (first-time setup)")
+        else:
+            self.logger.info("Starting sync_all")
+
         self._rotate_backups()
 
         for browser in self.browsers:
-            if not enabled_browsers.get(browser.name, True):
+            if enabled_browsers.get(browser.name) is False:
                 self.logger.debug("Browser %s disabled in settings — skipping", browser.name)
                 continue
             if not browser.is_installed():
@@ -396,8 +552,13 @@ class SyncEngine:
                 continue
 
             allowed = enabled_profiles.get(browser.name)
-            if allowed is not None:
-                profiles = [p for p in profiles if p.name in allowed]
+            if allowed is None or not allowed:
+                self.logger.info(
+                    "Browser %s: no enabled profiles in config — skipping", browser.name
+                )
+                continue
+
+            profiles = [p for p in profiles if p.name in allowed]
             if not profiles:
                 self.logger.info("Browser %s: no enabled profiles — skipping", browser.name)
                 continue
@@ -405,19 +566,16 @@ class SyncEngine:
             ext_dir = browser.external_extensions_dir()
             self.logger.info("Browser %s: syncing %d profile(s)", browser.name, len(profiles))
             for profile_path in profiles:
+                self._report(f"{browser.name}/{profile_path.name}")
                 sync_profile_path = (
                     self.sync_folder / "current" / browser.name / profile_path.name
                 )
                 direction = directions.get(browser.name, {}).get(profile_path.name, "both")
                 try:
                     self.sync_browser_profile(
-                        profile_path, sync_profile_path, data_types, direction
+                        profile_path, sync_profile_path, data_types, direction=direction
                     )
-                    if (
-                        ext_dir is not None
-                        and data_types.get("extensions", True)
-                        and direction in ("pull", "both")
-                    ):
+                    if ext_dir is not None and direction in ("pull", "both"):
                         self._install_external_extensions(sync_profile_path, ext_dir)
                 except OSError:
                     self.logger.exception(
@@ -427,12 +585,17 @@ class SyncEngine:
                     )
 
         self.update_metadata()
-        self.logger.info("sync_all complete")
+        if is_first_sync:
+            self.logger.info("Initial sync complete")
+        else:
+            self.logger.info("sync_all complete")
+
+        return {"is_first_sync": is_first_sync}
 
     def update_metadata(self) -> None:
         """Write metadata.json to the sync folder."""
         metadata = {
-            "last_sync": datetime.now(tz=timezone.utc).isoformat(),
+            "last_sync": datetime.now(tz=UTC).isoformat(),
             "version": 1,
         }
         meta_path = self.sync_folder / "metadata.json"

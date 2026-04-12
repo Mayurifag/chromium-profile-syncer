@@ -4,8 +4,6 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from src.browsers import ALL_BROWSERS
 from src.browsers.base import BrowserBase
 from src.browsers.chrome import Chrome
@@ -39,7 +37,8 @@ def test_profile_root_returns_path() -> None:
 def test_is_installed_false_when_missing() -> None:
     for cls in (Thorium, Helium, Chrome, Yandex):
         browser = cls()
-        with patch.object(type(browser), "profile_root", return_value=Path("/nonexistent/does/not/exist")):
+        missing = Path("/nonexistent/does/not/exist")
+        with patch.object(type(browser), "profile_root", return_value=missing):
             assert browser.is_installed() is False
 
 
@@ -96,7 +95,8 @@ def test_discover_profiles_skips_non_matching_dirs(tmp_path: Path) -> None:
 
 def test_discover_profiles_empty_when_not_installed() -> None:
     browser = Thorium()
-    with patch.object(type(browser), "profile_root", return_value=Path("/nonexistent/does/not/exist")):
+    missing = Path("/nonexistent/does/not/exist")
+    with patch.object(type(browser), "profile_root", return_value=missing):
         assert browser.discover_profiles() == []
 
 

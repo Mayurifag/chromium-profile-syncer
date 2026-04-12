@@ -2,29 +2,28 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
-
+from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
 # _exe_args
 # ---------------------------------------------------------------------------
 
 def test_exe_args_frozen():
-    """In a frozen bundle, only sys.executable is returned."""
+    """In a frozen bundle, returns [executable, --tray] for autostart."""
     import src.autostart as autostart
     with patch.object(sys, "frozen", True, create=True):
         result = autostart._exe_args()
-    assert result == [sys.executable]
+    assert result == [sys.executable, "--tray"]
 
 
 def test_exe_args_dev_mode(tmp_path):
-    """In dev mode, returns [interpreter, resolved script path]."""
+    """In dev mode, returns [interpreter, script path, --tray] for autostart."""
     import src.autostart as autostart
     fake_script = str(tmp_path / "main.py")
     with patch.object(sys, "frozen", False, create=True), \
          patch.object(sys, "argv", [fake_script]):
         result = autostart._exe_args()
-    assert result == [sys.executable, str(Path(fake_script).resolve())]
+    assert result == [sys.executable, str(Path(fake_script).resolve()), "--tray"]
 
 
 # ---------------------------------------------------------------------------
