@@ -61,6 +61,9 @@ def test_log_viewer_dialog_creation(qapp):
     # Verify text edit is read-only
     assert dialog._text_edit.isReadOnly()
 
+    # Verify log cap
+    assert dialog._text_edit.document().maximumBlockCount() == 1000
+
     # Handler should be added
     assert dialog._handler in root_logger.handlers
     assert len(root_logger.handlers) == initial_handlers + 1

@@ -59,6 +59,7 @@ class LogViewerDialog(QDialog):
 
         # Text display
         self._text_edit = QTextEdit()
+        self._text_edit.document().setMaximumBlockCount(1000)
         self._text_edit.setReadOnly(True)
         self._text_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
 
