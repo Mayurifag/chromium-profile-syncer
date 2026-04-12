@@ -16,7 +16,6 @@ from src.browsers import ALL_BROWSERS
 from src.dracula import ICON_COLORS
 from src.settings import SettingsDialog
 from src.sync_engine import SyncEngine, find_rclone
-from src.sync_progress import SyncProgressDialog
 
 if TYPE_CHECKING:
     pass
@@ -25,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 
 class SyncWorker(QThread):
-    started = Signal()  # type: ignore[assignment]
     finished = Signal(str, bool)  # timestamp, is_first_sync
     error = Signal(str)
     progress = Signal(str)  # type: ignore[assignment]
@@ -39,7 +37,6 @@ class SyncWorker(QThread):
         self._profile_start = 0.0
 
     def run(self) -> None:
-        self.started.emit()
         logger.info("SyncWorker: sync started")
         try:
             def _progress_handler(desc: str) -> None:
@@ -110,7 +107,6 @@ class TrayApp(QSystemTrayIcon):
         self._watcher: QFileSystemWatcher | None = None
         self._watcher_paused: bool = False
         self._settings_dialog: SettingsDialog | None = None
-        self._progress_dialog: SyncProgressDialog | None = None
         self._next_sync_time: float = 0.0
         self._countdown_timer: QTimer | None = None
 
@@ -167,9 +163,17 @@ class TrayApp(QSystemTrayIcon):
         return QIcon(pixmap)
 
     def _warn_rclone_missing(self) -> None:
+        import sys
+        if sys.platform == "darwin":
+            msg = "rclone is required for sync. Install via Homebrew: brew install rclone"
+        elif sys.platform == "win32":
+            msg = "rclone is required for sync. Download from https://rclone.org/downloads/"
+        else:
+            msg = "rclone is required for sync. Install: sudo apt install rclone"
+
         self.showMessage(
             "rclone not found",
-            "rclone is required for sync. Install via Homebrew: brew install rclone",
+            msg,
             QSystemTrayIcon.MessageIcon.Warning,
         )
 
@@ -229,14 +233,12 @@ class TrayApp(QSystemTrayIcon):
 
     def _on_file_changed(self, path: str) -> None:
         if self._watcher_paused:
-            logger.debug("File changed (ignored, watcher paused): %s", path)
             return
         logger.debug("File changed: %s", path)
         self._schedule_debounced_sync()
 
     def _on_dir_changed(self, path: str) -> None:
         if self._watcher_paused:
-            logger.debug("Directory changed (ignored, watcher paused): %s", path)
             return
         logger.debug("Directory changed: %s", path)
         self._schedule_debounced_sync()
@@ -283,9 +285,6 @@ class TrayApp(QSystemTrayIcon):
 
     def _on_settings_closed(self) -> None:
         self._settings_dialog = None
-
-    def _on_progress_dialog_closed(self) -> None:
-        self._progress_dialog = None
 
     def _on_sync_interval_changed(self, minutes: int) -> None:
         if self._timer is not None:
@@ -384,33 +383,16 @@ class TrayApp(QSystemTrayIcon):
         self._watcher_paused = True
         logger.debug("File watcher paused during sync")
 
-        if self._progress_dialog is None:
-            self._progress_dialog = SyncProgressDialog(parent=None)
-            self._progress_dialog.finished.connect(self._on_progress_dialog_closed)
-
-        self._progress_dialog.sync_started()
-        self._progress_dialog.show()
-        self._progress_dialog.raise_()
-        self._progress_dialog.activateWindow()
-
     def _on_sync_progress(self, description: str) -> None:
         truncated = description[:50] + "..." if len(description) > 50 else description
         self._action_sync.setText(f"⏳ {truncated}")
         self._action_status.setText(f"Syncing: {description}")
-
-        if self._progress_dialog is not None:
-            self._progress_dialog.on_progress(description)
 
     def _on_profile_progress(
         self, browser: str, profile: str, direction: str, count: int, elapsed: float
     ) -> None:
         if self._settings_dialog is not None:
             self._settings_dialog.update_profile_progress(
-                browser, profile, direction, count, elapsed
-            )
-
-        if self._progress_dialog is not None:
-            self._progress_dialog.update_profile_progress(
                 browser, profile, direction, count, elapsed
             )
 
@@ -426,9 +408,6 @@ class TrayApp(QSystemTrayIcon):
             for browser, profiles in enabled_profiles.items():
                 for profile in profiles:
                     self._settings_dialog.hide_profile_progress(browser, profile)
-
-        if self._progress_dialog is not None:
-            self._progress_dialog.sync_finished(success=True)
 
         QTimer.singleShot(5000, self._resume_watcher)
         logger.debug("File watcher will resume in 5s")
@@ -451,9 +430,6 @@ class TrayApp(QSystemTrayIcon):
         self.setIcon(self._make_icon("error"))
         self._action_sync.setText("Sync Now")
         self._action_status.setText(f"Error: {msg}")
-
-        if self._progress_dialog is not None:
-            self._progress_dialog.sync_finished(success=False)
 
         QTimer.singleShot(5000, self._resume_watcher)
         logger.debug("File watcher will resume in 5s (after error)")

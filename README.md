@@ -17,12 +17,11 @@ The architecture supports adding more Chromium-derived browsers with minimal cha
 | Bookmarks                  | Yes                                                   |
 | Extensions (unpacked)      | Yes — full code synced                                |
 | Extensions (Web Store)     | ID only — auto-downloads from Chrome Web Store        |
-| Extension settings/storage | Yes                                                   |
-| Local Storage              | Yes                                                   |
-| Preferences                | Yes                                                   |
-| Custom Dictionary          | Yes                                                   |
-| IndexedDB (website caches) | No (disabled by default, ~300MB+ of unnecessary data) |
-| Web Data (search engines)  | No (skipped for v1)                                   |
+| Extension settings/storage | Yes                        |
+| Local Storage              | Yes                        |
+| Preferences                | Yes                        |
+| Custom Dictionary          | Yes                        |
+| Web Data (search engines)  | No (skipped for v1)        |
 
 ### Smart Extension Syncing
 
@@ -42,9 +41,7 @@ Passwords, cookies, payment data, and browsing history are **intentionally exclu
 ### Trash Files Excluded
 
 Files automatically excluded from sync (waste space, no value):
-- `._*` — macOS metadata files on exFAT/FAT32 drives (~103MB saved)
-- `*.map` — JavaScript/CSS source maps for debugging (~51MB saved)
-- `IndexedDB/` — Website cache data (disabled by default, ~317MB saved)
+- `._*` — macOS metadata files on exFAT/FAT32 drives
 
 ## Installation
 
@@ -81,27 +78,38 @@ Requirements: **Python 3.12+**, **[uv](https://docs.astral.sh/uv/)**, **rclone**
 git clone <repo-url>
 cd chromium-profile-syncer
 
-# Install rclone first
-brew install rclone  # macOS
-# OR: sudo apt install rclone  # Linux
+# Install rclone first (choose your platform)
+brew install rclone              # macOS
+sudo apt install rclone          # Linux (Debian/Ubuntu)
+sudo pacman -S rclone            # Linux (Arch)
+# Windows: Download from https://rclone.org/downloads/
+~~~
 
-# Build and install (macOS)
+~~~sh
+# Build and install (all platforms)
 make install
 
 # Or manual build
 uv sync --group dev
-uv run python build.py
+uv run python build.py --install
 ~~~
 
-**macOS:** The `.app` bundle is written to `dist/chromium-profile-syncer.app`
-**Windows/Linux:** Executable is `dist/chromium-profile-syncer` or `dist/chromium-profile-syncer.exe`
+**Build output locations:**
+- **macOS:** `dist/chromium-profile-syncer.app`
+- **Windows:** `dist/chromium-profile-syncer.exe`
+- **Linux:** `dist/chromium-profile-syncer`
 
-**macOS `make install` does:**
-1. Builds app bundle
-2. Kills running instance
-3. Removes Gatekeeper quarantine
-4. Installs to `~/Applications/`
-5. Launches the app
+**Install locations:**
+- **macOS:** `~/Applications/chromium-profile-syncer.app`
+- **Windows:** `%LOCALAPPDATA%\Programs\chromium-profile-syncer\chromium-profile-syncer.exe`
+- **Linux:** `~/.local/bin/chromium-profile-syncer`
+
+**What `install` does:**
+1. Builds the executable/bundle
+2. Kills any running instance
+3. Installs to platform-specific location
+4. Launches the app
+5. **(macOS only)** Removes Gatekeeper quarantine
 
 ## Usage
 
@@ -159,7 +167,7 @@ uv run pytest
 # Lint only
 uv run ruff check src tests
 
-# Build and install (macOS)
+# Build and install
 make install
 
 # Run from source
@@ -210,9 +218,10 @@ src/
 - First sync shows "Initial setup complete" (no timestamp spam)
 - Subsequent syncs show "Last sync: [ISO timestamp]"
 
-**Config location:**
-- `~/.config/chromium-profile-syncer/config.json` (Linux/macOS)
-- `%APPDATA%\chromium-profile-syncer\config.json` (Windows)
+**Config locations:**
+- **macOS/Linux:** `~/.config/chromium-profile-syncer/config.json`
+- **Windows:** `%APPDATA%\chromium-profile-syncer\config.json`
 
 **Lock file:**
-- `~/.config/chromium-profile-syncer/app.lock` (prevents multiple instances)
+- **macOS/Linux:** `~/.config/chromium-profile-syncer/app.lock`
+- **Windows:** `%APPDATA%\chromium-profile-syncer\app.lock`

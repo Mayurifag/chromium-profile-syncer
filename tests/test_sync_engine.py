@@ -583,7 +583,7 @@ def test_sync_browser_profile_preferences_always_synced(tmp_path: Path) -> None:
     engine.sync_browser_profile(
         profile, sync_profile,
         {"extensions": False, "bookmarks": False, "custom_dictionary": False,
-         "local_storage": False, "indexeddb": False},
+         "local_storage": False},
     )
 
     assert (sync_profile / "Preferences").exists()

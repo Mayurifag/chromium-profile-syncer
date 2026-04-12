@@ -4,7 +4,9 @@ import json
 import logging
 import re
 import shutil
+import sqlite3
 import subprocess
+import sys
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
@@ -15,7 +17,23 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.browsers.base import BrowserBase
 
-_FALLBACK_PATHS = [Path("/opt/homebrew/bin/rclone"), Path("/usr/local/bin/rclone")]
+
+def _get_rclone_fallback_paths() -> list[Path]:
+    """Return platform-specific fallback paths for rclone."""
+    if sys.platform == "darwin":
+        return [Path("/opt/homebrew/bin/rclone"), Path("/usr/local/bin/rclone")]
+    elif sys.platform == "win32":
+        # Windows: Check Program Files and common install locations
+        program_files = Path("C:/Program Files/rclone/rclone.exe")
+        program_files_x86 = Path("C:/Program Files (x86)/rclone/rclone.exe")
+        localappdata = Path.home() / "AppData" / "Local" / "rclone" / "rclone.exe"
+        return [program_files, program_files_x86, localappdata]
+    else:
+        # Linux: common binary locations
+        return [Path("/usr/bin/rclone"), Path("/usr/local/bin/rclone")]
+
+
+_FALLBACK_PATHS = _get_rclone_fallback_paths()
 
 
 @lru_cache(maxsize=1)
@@ -38,7 +56,7 @@ DEFAULT_DATA_TYPES: dict[str, bool] = {
     "bookmarks": True,
     "custom_dictionary": True,
     "local_storage": True,
-    "indexeddb": False,  # Website caches - typically not needed
+    "search_shortcuts": True,
 }
 
 _LOG = logging.getLogger(__name__)
@@ -97,7 +115,9 @@ class SyncEngine:
         ]
 
         # Log the full command being executed
-        self.logger.info("Executing: %s", " ".join(cmd))
+        self.logger.debug("Executing: %s", " ".join(cmd))
+
+        output_lines: list[str] = []
 
         try:
             process = subprocess.Popen(
@@ -114,6 +134,8 @@ class SyncEngine:
                 if not line:
                     continue
 
+                output_lines.append(line)
+
                 # Parse rclone stats line
                 # Example: "Transferred: 123.456 MiB / 500 MiB, 25%, 10 MiB/s, ETA 30s"
                 match = re.search(r"Transferred:\s+[\d.]+\s*\w+\s*/\s*[\d.]+\s*\w+,\s*(\d+)%", line)
@@ -127,19 +149,31 @@ class SyncEngine:
 
             process.wait()
             if process.returncode != 0:
-                raise subprocess.CalledProcessError(process.returncode, cmd)
+                error_output = "\n".join(output_lines[-10:]) if output_lines else "No output"
+                self.logger.error("rclone failed with output:\n%s", error_output)
+                raise subprocess.CalledProcessError(process.returncode, cmd, output=error_output)
 
             self.logger.debug("rclone sync complete: %s → %s", src, dst)
 
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        except subprocess.CalledProcessError as exc:
             self.logger.exception("rclone sync failed: %s → %s", src, dst)
-            raise OSError(f"rclone sync failed: {exc}") from exc
+            error_msg = (
+                f"rclone sync failed: {exc.output}"
+                if exc.output
+                else f"rclone sync failed: {exc}"
+            )
+            raise OSError(error_msg) from exc
+        except FileNotFoundError as exc:
+            self.logger.exception("rclone not found")
+            raise OSError(f"rclone not found: {exc}") from exc
 
     # ------------------------------------------------------------------
     # Low-level primitives
     # ------------------------------------------------------------------
 
-    def _copy_leveldb_atomic(self, src: Path, dst: Path) -> None:
+    def _copy_leveldb_atomic(
+        self, src: Path, dst: Path, *, display_name: str | None = None
+    ) -> None:
         """Copy LevelDB directory src → dst atomically via a .tmp staging area.
 
         If the copy fails, dst is left untouched.  The .tmp dir may be left
@@ -149,14 +183,12 @@ class SyncEngine:
         try:
             if tmp.exists():
                 shutil.rmtree(tmp)
-            self._report(src.name)
-            self.logger.info("Copying LevelDB: %s → %s", src.name, dst)
+            self._report(display_name or src.name)
             # Use ignore function to skip macOS metadata files
             shutil.copytree(src, tmp, ignore=shutil.ignore_patterns("._*"))
             if dst.exists():
                 shutil.rmtree(dst)
             shutil.move(str(tmp), dst)
-            self.logger.debug("Atomic copy complete: %s → %s", src, dst)
         except OSError:
             self.logger.exception("Atomic copy failed: %s → %s (dst untouched)", src, dst)
             # dst is intentionally not touched; tmp may remain
@@ -269,7 +301,7 @@ class SyncEngine:
         if webstore_ids:
             sync_dir.mkdir(parents=True, exist_ok=True)
             manifest_path.write_text(json.dumps(sorted(webstore_ids)), encoding="utf-8")
-            self.logger.debug("Saved Web Store extensions manifest: %d IDs", len(webstore_ids))
+            self.logger.info("Detected %d Web Store extensions (tracking by ID)", len(webstore_ids))
 
     def _sync_extension_id(
         self,
@@ -295,10 +327,6 @@ class SyncEngine:
         check_dir = profile_best if profile_best else sync_best
         if check_dir and self._is_webstore_extension(check_dir):
             webstore_ids.add(ext_id)
-            self.logger.debug(
-                "Extension %s: Web Store extension — tracking ID (will register by ID)",
-                ext_id,
-            )
             self._skipped_count += 1
             return
 
@@ -312,28 +340,32 @@ class SyncEngine:
         if profile_ver > sync_ver:
             if direction in ("push", "both") and profile_best is not None:
                 dest = sync_id_dir / profile_best.name
+                ext_name = self._get_extension_name(profile_best)
                 self.logger.info(
-                    "Extension %s: unpacked extension, profile version %s > sync %s — syncing",
+                    "Extension %s (%s): unpacked extension, profile version %s > sync %s — syncing",
+                    ext_name,
                     ext_id,
                     profile_ver,
                     sync_ver,
                 )
                 sync_id_dir.mkdir(parents=True, exist_ok=True)
-                self._copy_leveldb_atomic(profile_best, dest)
+                self._copy_leveldb_atomic(profile_best, dest, display_name=ext_name)
                 self._synced_count += 1
             else:
                 self._skipped_count += 1
         else:
             if direction in ("pull", "both") and sync_best is not None:
                 dest = profile_id_dir / sync_best.name
+                ext_name = self._get_extension_name(sync_best)
                 self.logger.info(
-                    "Extension %s: unpacked extension, sync version %s > profile %s — syncing",
+                    "Extension %s (%s): unpacked extension, sync version %s > profile %s — syncing",
+                    ext_name,
                     ext_id,
                     sync_ver,
                     profile_ver,
                 )
                 profile_id_dir.mkdir(parents=True, exist_ok=True)
-                self._copy_leveldb_atomic(sync_best, dest)
+                self._copy_leveldb_atomic(sync_best, dest, display_name=ext_name)
                 self._synced_count += 1
             else:
                 self._skipped_count += 1
@@ -371,6 +403,22 @@ class SyncEngine:
         raw_name = version_dir.name.split("_")[0]
         return _parse_version(raw_name)
 
+    def _get_extension_name(self, version_dir: Path) -> str:
+        """Get human-readable extension name from manifest.json.
+
+        Falls back to extension ID if name not found.
+        """
+        manifest = version_dir / "manifest.json"
+        if manifest.exists():
+            try:
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+                name = data.get("name", "")
+                if name and not name.startswith("__MSG_"):
+                    return name
+            except (OSError, json.JSONDecodeError):
+                pass
+        return version_dir.parent.name
+
     # ------------------------------------------------------------------
     # LevelDB sync (mtime-based)
     # ------------------------------------------------------------------
@@ -400,9 +448,6 @@ class SyncEngine:
 
             if direction == "push":
                 if profile_mtime > sync_mtime:
-                    self.logger.info(
-                        "LevelDB %s/%s: profile newer — copying to sync", subpath, name
-                    )
                     sync_base.mkdir(parents=True, exist_ok=True)
                     self._copy_leveldb_atomic(profile_unit, sync_unit)
                     self._synced_count += 1
@@ -410,9 +455,6 @@ class SyncEngine:
                     self._skipped_count += 1
             elif direction == "pull":
                 if sync_mtime > profile_mtime:
-                    self.logger.info(
-                        "LevelDB %s/%s: sync newer — copying to profile", subpath, name
-                    )
                     profile_base.mkdir(parents=True, exist_ok=True)
                     self._copy_leveldb_atomic(sync_unit, profile_unit)
                     self._synced_count += 1
@@ -420,16 +462,10 @@ class SyncEngine:
                     self._skipped_count += 1
             else:  # both
                 if profile_mtime > sync_mtime:
-                    self.logger.info(
-                        "LevelDB %s/%s: profile newer — copying to sync", subpath, name
-                    )
                     sync_base.mkdir(parents=True, exist_ok=True)
                     self._copy_leveldb_atomic(profile_unit, sync_unit)
                     self._synced_count += 1
                 else:
-                    self.logger.info(
-                        "LevelDB %s/%s: sync newer — copying to profile", subpath, name
-                    )
                     profile_base.mkdir(parents=True, exist_ok=True)
                     self._copy_leveldb_atomic(sync_unit, profile_unit)
                     self._synced_count += 1
@@ -502,6 +538,220 @@ class SyncEngine:
     # Per-profile orchestration
     # ------------------------------------------------------------------
 
+    def restore_profile_from_backup(
+        self,
+        profile_path: Path,
+        sync_profile_path: Path,
+        data_types: dict[str, bool] | None = None,
+        *,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> None:
+        """Complete wipe and restore: delete local profile data, copy everything from backup.
+
+        This is used for first-time profile management to ensure a clean slate.
+        """
+        self._progress_cb = on_progress
+        dt = data_types or {}
+
+        if not sync_profile_path.exists():
+            self.logger.warning("Backup does not exist at %s — cannot restore", sync_profile_path)
+            return
+
+        self.logger.info("Restoring profile from backup: %s → %s", sync_profile_path, profile_path)
+
+        # Delete local profile data (extensions, settings, bookmarks, etc.)
+        items_to_delete = []
+
+        if dt.get("extensions", True):
+            items_to_delete.append(profile_path / "Extensions")
+            items_to_delete.append(profile_path / "Local Extension Settings")
+            items_to_delete.append(profile_path / "Sync Extension Settings")
+
+        if dt.get("local_storage", True):
+            items_to_delete.append(profile_path / "Local Storage")
+
+        items_to_delete.append(profile_path / "Preferences")
+        if dt.get("bookmarks", True):
+            items_to_delete.append(profile_path / "Bookmarks")
+        if dt.get("custom_dictionary", True):
+            items_to_delete.append(profile_path / "Custom Dictionary.txt")
+
+        # Delete existing items
+        for item in items_to_delete:
+            if item.exists():
+                if item.is_dir():
+                    self.logger.debug("Deleting directory: %s", item)
+                    shutil.rmtree(item)
+                else:
+                    self.logger.debug("Deleting file: %s", item)
+                    item.unlink()
+                self._synced_count += 1
+
+        # Copy everything from backup using rclone for efficiency
+        self._report("Restoring from backup...")
+        try:
+            cmd = [
+                str(find_rclone() or "rclone"), "copy",
+                str(sync_profile_path), str(profile_path),
+                "--stats", "1s",
+                "--stats-one-line",
+                "--transfers", "8",
+                "--checkers", "16",
+                "--exclude", "._*",
+            ]
+
+            self.logger.debug("Executing restore: %s", " ".join(cmd))
+
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+
+            for line in iter(process.stdout.readline, ""):
+                line = line.strip()
+                if not line:
+                    continue
+                match = re.search(r"Transferred:\s+[\d.]+\s*\w+\s*/\s*[\d.]+\s*\w+,\s*(\d+)%", line)
+                if match:
+                    pct = match.group(1)
+                    self._report(f"Restoring ({pct}%)")
+
+            process.wait()
+            if process.returncode != 0:
+                raise subprocess.CalledProcessError(process.returncode, cmd)
+
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            self.logger.exception("Restore failed: %s", exc)
+            raise OSError(f"Restore failed: {exc}") from exc
+
+        if dt.get("search_shortcuts", True):
+            self._restore_search_shortcuts(profile_path, self.sync_folder)
+
+        self._progress_cb = None
+        self.logger.info("Profile restore complete: %s", profile_path.name)
+
+    # ------------------------------------------------------------------
+    # Search shortcuts backup/restore
+    # ------------------------------------------------------------------
+
+    def _extract_search_shortcuts(self, profile_path: Path, sync_folder_root: Path) -> None:
+        """Extract ACTIVE search shortcuts from Web Data database to global JSON file.
+
+        Reads only active (is_active = 1) keywords from Web Data and exports to
+        search_shortcuts.json at the root of sync folder (shared across all browsers).
+        Uses read-only connection to avoid lock issues.
+        Always creates the file even if extraction fails (empty array).
+        """
+        web_data_src = profile_path / "Web Data"
+        shortcuts_json = sync_folder_root / "search_shortcuts.json"
+
+        if not web_data_src.exists():
+            self.logger.debug("No Web Data database found at %s", web_data_src)
+            shortcuts_json.write_text("[]", encoding="utf-8")
+            return
+
+        try:
+            conn = sqlite3.connect(f"file:{web_data_src}?mode=ro&immutable=1", uri=True)
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT keyword, short_name, url, favicon_url, suggest_url,
+                       prepopulate_id, is_active, date_created, last_modified
+                FROM keywords
+                WHERE is_active = 1
+                ORDER BY keyword
+                """
+            )
+            rows = cursor.fetchall()
+            conn.close()
+
+            shortcuts = [
+                {
+                    "keyword": row[0],
+                    "short_name": row[1],
+                    "url": row[2],
+                    "favicon_url": row[3],
+                    "suggest_url": row[4],
+                    "prepopulate_id": row[5],
+                    "is_active": row[6],
+                    "date_created": row[7],
+                    "last_modified": row[8],
+                }
+                for row in rows
+            ]
+
+            shortcuts_json.write_text(json.dumps(shortcuts, indent=2), encoding="utf-8")
+            self._report("search_shortcuts.json")
+            self.logger.info(
+                "Extracted %d active search shortcuts to %s", len(shortcuts), shortcuts_json
+            )
+
+        except sqlite3.Error as exc:
+            self.logger.warning(
+                "Failed to extract search shortcuts from %s: %s (creating empty file)",
+                web_data_src,
+                exc,
+            )
+            shortcuts_json.write_text("[]", encoding="utf-8")
+
+    def _restore_search_shortcuts(self, profile_path: Path, sync_folder_root: Path) -> None:
+        """Restore search shortcuts from global JSON file to Web Data database (overwrite mode).
+
+        Reads search_shortcuts.json from sync folder root and overwrites all keywords
+        in the Web Data database. This removes non-active shortcuts.
+        """
+        web_data_dst = profile_path / "Web Data"
+        shortcuts_json = sync_folder_root / "search_shortcuts.json"
+
+        if not shortcuts_json.exists():
+            self.logger.debug("No search_shortcuts.json found at %s", shortcuts_json)
+            return
+
+        if not web_data_dst.exists():
+            self.logger.warning("Web Data database not found at %s — cannot restore", web_data_dst)
+            return
+
+        try:
+            shortcuts = json.loads(shortcuts_json.read_text(encoding="utf-8"))
+
+            conn = sqlite3.connect(str(web_data_dst))
+            cursor = conn.cursor()
+
+            cursor.execute("DELETE FROM keywords")
+
+            for shortcut in shortcuts:
+                cursor.execute(
+                    """
+                    INSERT INTO keywords (
+                        keyword, short_name, url, favicon_url, suggest_url,
+                        prepopulate_id, is_active, date_created, last_modified
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        shortcut["keyword"],
+                        shortcut["short_name"],
+                        shortcut["url"],
+                        shortcut.get("favicon_url", ""),
+                        shortcut.get("suggest_url", ""),
+                        shortcut.get("prepopulate_id", 0),
+                        shortcut.get("is_active", 1),
+                        shortcut.get("date_created", 0),
+                        shortcut.get("last_modified", 0),
+                    ),
+                )
+
+            conn.commit()
+            conn.close()
+
+            self._report("search shortcuts restored")
+            self.logger.info("Restored %d search shortcuts from %s", len(shortcuts), shortcuts_json)
+
+        except (sqlite3.Error, json.JSONDecodeError, KeyError) as exc:
+            self.logger.warning("Failed to restore search shortcuts: %s", exc)
+
     def sync_browser_profile(
         self,
         profile_path: Path,
@@ -532,9 +782,6 @@ class SyncEngine:
                 profile_path, sync_profile_path, "Local Storage/leveldb", direction
             )
 
-        if dt.get("indexeddb", False):
-            self._sync_leveldb_dir(profile_path, sync_profile_path, "IndexedDB", direction)
-
         plain_files: list[tuple[str, str | None]] = [
             ("Preferences", None),
             ("Bookmarks", "bookmarks"),
@@ -547,6 +794,12 @@ class SyncEngine:
             dst = sync_profile_path / filename
             if src.exists() or dst.exists():
                 self._sync_file(src, dst, direction)
+
+        if dt.get("search_shortcuts", True):
+            if direction in ("push", "both"):
+                self._extract_search_shortcuts(profile_path, self.sync_folder)
+            if direction in ("pull", "both"):
+                self._restore_search_shortcuts(profile_path, self.sync_folder)
 
         self._progress_cb = None
         self.logger.info("Profile sync complete: %s", profile_path.name)
@@ -565,6 +818,7 @@ class SyncEngine:
         enabled_browsers = _config.get_enabled_browsers()
         enabled_profiles = _config.get_enabled_profiles()
         directions = _config.get_profile_directions()
+        profiles_needing_restore = _config.get_profiles_needing_restore()
         data_types = DEFAULT_DATA_TYPES
 
         # Detect first-time sync (no metadata.json exists yet)
@@ -621,12 +875,34 @@ class SyncEngine:
                     self.sync_folder / "current" / browser.name / profile_path.name
                 )
                 direction = directions.get(browser.name, {}).get(profile_path.name, "both")
+
+                # Check if this profile needs initial restore from backup
+                needs_restore = (
+                    browser.name in profiles_needing_restore
+                    and profile_path.name in profiles_needing_restore[browser.name]
+                )
+
                 try:
-                    self.sync_browser_profile(
-                        profile_path, sync_profile_path, data_types, direction=direction
-                    )
-                    if ext_dir is not None and direction in ("pull", "both"):
-                        self._install_external_extensions(sync_profile_path, ext_dir)
+                    if needs_restore:
+                        # Complete wipe and restore from backup
+                        self.logger.info(
+                            "Profile %s/%s: performing complete restore from backup",
+                            browser.name,
+                            profile_path.name,
+                        )
+                        self.restore_profile_from_backup(
+                            profile_path, sync_profile_path, data_types
+                        )
+                        if ext_dir is not None:
+                            self._install_external_extensions(sync_profile_path, ext_dir)
+                        _config.clear_restore_flag(browser.name, profile_path.name)
+                    else:
+                        # Normal bidirectional sync
+                        self.sync_browser_profile(
+                            profile_path, sync_profile_path, data_types, direction=direction
+                        )
+                        if ext_dir is not None and direction in ("pull", "both"):
+                            self._install_external_extensions(sync_profile_path, ext_dir)
                 except OSError:
                     self.logger.exception(
                         "Failed to sync profile %s for browser %s",

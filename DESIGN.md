@@ -78,7 +78,6 @@ User Data/
 │   │   └── <ext-id>/
 │   ├── Extension Settings/   # Extension sync storage (LevelDB)
 │   │   └── <ext-id>/
-│   ├── IndexedDB/            # Per-origin IndexedDB data (LevelDB)
 │   ├── Local Storage/        # Website localStorage (LevelDB)
 │   │   └── leveldb/
 │   ├── Web Data              # SQLite — search engines + encrypted payment data
@@ -97,11 +96,10 @@ User Data/
 | Extensions (Web Store) | `Extensions/<id>/<version>/`     | Files        | ID ONLY (auto-download from Chrome Web Store)       |
 | Extension settings     | `Local Extension Settings/<id>/` | LevelDB      | YES                                                 |
 | Extension sync storage | `Extension Settings/<id>/`       | LevelDB      | YES (renamed to "Sync Extension Settings")          |
-| Bookmarks              | `Bookmarks`                      | JSON         | YES                                                 |
-| Custom dictionary      | `Custom Dictionary.txt`          | Plain text   | YES                                                 |
-| Local Storage          | `Local Storage/leveldb/`         | LevelDB      | YES                                                 |
-| IndexedDB              | `IndexedDB/`                     | LevelDB dirs | NO (disabled by default - website caches, ~300MB+)  |
-| Search engines         | `Web Data` (keywords table)      | SQLite       | NO (skipped for v1)                                 |
+| Bookmarks              | `Bookmarks`                      | JSON         | YES                                |
+| Custom dictionary      | `Custom Dictionary.txt`          | Plain text   | YES                                |
+| Local Storage          | `Local Storage/leveldb/`         | LevelDB      | YES                                |
+| Search engines         | `Web Data` (keywords table)      | SQLite       | NO (skipped for v1)                |
 
 ### What NOT to Sync (encrypted / sensitive)
 
@@ -147,14 +145,11 @@ User Data/
 ### Trash File Exclusion
 
 Files excluded from sync (waste space, no value):
-- `._*` — macOS metadata files on exFAT/FAT32 drives (103MB saved)
-- `*.map` — JavaScript/CSS source maps for debugging (51MB saved)
-- `IndexedDB/` — Website cache data, disabled by default (317MB saved)
+- `._*` — macOS metadata files on exFAT/FAT32 drives
 
 **Implementation:**
 - rclone: `--exclude "._*"`
 - shutil.copytree: `ignore=shutil.ignore_patterns("._*")`
-- IndexedDB: disabled in default config
 
 ## Settings Window
 
@@ -311,7 +306,7 @@ Platform-specific implementation:
 ✅ rclone integration for fast parallel backups
 ✅ Real-time progress in tray menu (no separate window)
 ✅ First-sync detection (no spam on clean slate)
-✅ Trash file exclusion (._*, *.map, IndexedDB)
+✅ Trash file exclusion (._* macOS metadata)
 ✅ Space optimization: 1.6GB → 300MB (80% reduction)
 ✅ Clean button to start fresh (deletes all synced data)
 

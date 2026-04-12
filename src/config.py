@@ -3,14 +3,27 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 
 _LOG = logging.getLogger(__name__)
 
-CONFIG_DIR: Path = (
-    Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    / "chromium-profile-syncer"
-)
+
+def _get_config_dir() -> Path:
+    """Return platform-specific config directory."""
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata) / "chromium-profile-syncer"
+        return Path.home() / "AppData" / "Roaming" / "chromium-profile-syncer"
+    # Unix: use XDG_CONFIG_HOME or ~/.config
+    xdg_config = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config:
+        return Path(xdg_config) / "chromium-profile-syncer"
+    return Path.home() / ".config" / "chromium-profile-syncer"
+
+
+CONFIG_DIR: Path = _get_config_dir()
 CONFIG_PATH: Path = CONFIG_DIR / "config.json"
 
 
@@ -38,12 +51,16 @@ def get_sync_folder() -> Path | None:
     return Path(value) if value else None
 
 
-def set_sync_folder(p: Path) -> None:
-    """Persist the sync folder path in config."""
+def set_sync_folder(p: Path | None) -> None:
+    """Persist the sync folder path in config. Pass None to clear."""
     data = load()
-    data["sync_folder"] = str(p)
+    if p is None:
+        data.pop("sync_folder", None)
+        _LOG.info("sync_folder cleared")
+    else:
+        data["sync_folder"] = str(p)
+        _LOG.info("sync_folder set to %s", p)
     save(data)
-    _LOG.info("sync_folder set to %s", p)
 
 
 def get_enabled_browsers() -> dict[str, bool]:
@@ -109,5 +126,38 @@ def set_sync_interval(minutes: int) -> None:
     data["sync_interval"] = minutes
     save(data)
     _LOG.info("sync_interval set to %d minutes", minutes)
+
+
+def get_profiles_needing_restore() -> dict[str, list[str]]:
+    """Return {browser_name: [profile_names]} for profiles that need initial restore from backup."""
+    return load().get("profiles_needing_restore", {})
+
+
+def mark_profile_for_restore(browser: str, profile: str) -> None:
+    """Mark a profile to be restored from backup on next sync."""
+    data = load()
+    if "profiles_needing_restore" not in data:
+        data["profiles_needing_restore"] = {}
+    if browser not in data["profiles_needing_restore"]:
+        data["profiles_needing_restore"][browser] = []
+    if profile not in data["profiles_needing_restore"][browser]:
+        data["profiles_needing_restore"][browser].append(profile)
+        save(data)
+        _LOG.info("Marked %s/%s for initial restore", browser, profile)
+
+
+def clear_restore_flag(browser: str, profile: str) -> None:
+    """Clear the restore flag after initial restore is complete."""
+    data = load()
+    if "profiles_needing_restore" not in data:
+        return
+    if browser not in data["profiles_needing_restore"]:
+        return
+    if profile in data["profiles_needing_restore"][browser]:
+        data["profiles_needing_restore"][browser].remove(profile)
+        if not data["profiles_needing_restore"][browser]:
+            del data["profiles_needing_restore"][browser]
+        save(data)
+        _LOG.info("Cleared restore flag for %s/%s", browser, profile)
 
 

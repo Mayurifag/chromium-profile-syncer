@@ -34,6 +34,7 @@ from src.dracula import (
     SMALL_MUTED,
 )
 from src.log_viewer import GUILogHandler, LogSignaler
+from src.shortcuts_editor import ShortcutsEditorDialog
 
 _LOG = logging.getLogger(__name__)
 
@@ -216,6 +217,12 @@ class SettingsDialog(QDialog):
         self._autostart_select.setCurrentIndex(0)
         self._autostart_select.currentIndexChanged.connect(self._on_autostart_changed)
         selects_layout.addWidget(self._autostart_select)
+
+        selects_layout.addSpacing(8)
+
+        edit_shortcuts_btn = QPushButton("Edit Search Shortcuts")
+        edit_shortcuts_btn.clicked.connect(self._open_shortcuts_editor)
+        selects_layout.addWidget(edit_shortcuts_btn)
 
         selects_layout.addStretch()
         selects_row.setVisible(False)
@@ -622,6 +629,14 @@ class SettingsDialog(QDialog):
                         currently = self._profile_states[bn][pn]
                         self._profile_states[bn][pn] = not currently
                         b.setText("Stop manage" if not currently else "Manage")
+
+                        # If enabling profile, check if backup exists and mark for restore
+                        if not currently and folder is not None:
+                            backup_path = folder / "current" / bn / pn
+                            if backup_path.exists():
+                                config_module.mark_profile_for_restore(bn, pn)
+                                _LOG.info("Profile %s/%s marked for initial restore", bn, pn)
+
                         self._save_profiles_config()
                         if not currently:
                             self.sync_requested.emit()
@@ -856,6 +871,46 @@ class SettingsDialog(QDialog):
 
         if self._folder_edit:
             self._folder_edit.textChanged.emit(folder_text)
+
+    def _open_shortcuts_editor(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        sync_folder = config_module.get_sync_folder()
+        if not sync_folder or not sync_folder.exists():
+            QMessageBox.warning(
+                self,
+                "No Sync Folder",
+                "Please configure a sync folder first.",
+            )
+            return
+
+        shortcuts_json_path = sync_folder / "search_shortcuts.json"
+        if not shortcuts_json_path.exists():
+            has_data = _sync_folder_has_data(sync_folder)
+
+            if has_data:
+                reply = QMessageBox.warning(
+                    self,
+                    "Corrupted Backup",
+                    "Search shortcuts backup file is missing.\n\n"
+                    "This indicates the backup is corrupted.\n"
+                    "Clean the sync folder and start fresh?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes,
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    self._clean_sync_folder(skip_confirmation=True)
+            else:
+                QMessageBox.information(
+                    self,
+                    "No Shortcuts Yet",
+                    "Search shortcuts haven't been extracted yet.\n\n"
+                    "They will be created on the next sync.",
+                )
+            return
+
+        editor = ShortcutsEditorDialog(self, shortcuts_json_path=shortcuts_json_path)
+        editor.exec()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._log_handler is not None:

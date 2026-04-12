@@ -3,18 +3,56 @@
 
 Usage:
     uv run python build.py           # build only
-    uv run python build.py --install # build .app + strip Gatekeeper + install to ~/Applications
+    uv run python build.py --install # build + install to platform-specific location
+
+Install locations:
+    macOS:   ~/Applications/chromium-profile-syncer.app
+    Windows: %LOCALAPPDATA%\\Programs\\chromium-profile-syncer\\chromium-profile-syncer.exe
+    Linux:   ~/.local/bin/chromium-profile-syncer
 """
 
+import os
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+try:
+    import psutil
+except ImportError:
+    print("Warning: psutil not installed, cannot kill running instance")
+    psutil = None
+
 APP_NAME = "chromium-profile-syncer"
-INSTALL_DIR = Path.home() / "Applications"
-INSTALL_PATH = INSTALL_DIR / f"{APP_NAME}.app"
+
+
+def _get_install_dir() -> Path:
+    """Return platform-specific install directory."""
+    if sys.platform == "darwin":
+        return Path.home() / "Applications"
+    elif sys.platform == "win32":
+        # Windows: %LOCALAPPDATA%\Programs
+        localappdata = Path.home() / "AppData" / "Local"
+        return localappdata / "Programs"
+    else:
+        # Linux: ~/.local/bin
+        return Path.home() / ".local" / "bin"
+
+
+def _get_install_path() -> Path:
+    """Return full install path including app name."""
+    install_dir = _get_install_dir()
+    if sys.platform == "darwin":
+        return install_dir / f"{APP_NAME}.app"
+    elif sys.platform == "win32":
+        return install_dir / APP_NAME / f"{APP_NAME}.exe"
+    else:
+        return install_dir / APP_NAME
+
+
+INSTALL_DIR = _get_install_dir()
+INSTALL_PATH = _get_install_path()
 
 
 def build() -> Path:
@@ -57,18 +95,26 @@ def build() -> Path:
 
 def _kill_running() -> None:
     """Kill any running instance via the lock file, then remove the lock."""
-    import os
-    import signal
+    if psutil is None:
+        return
 
-    config_dir = Path.home() / ".config" / APP_NAME
+    # Use proper config dir (cross-platform)
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        config_dir = Path(appdata) / APP_NAME if appdata else Path.home() / "AppData" / "Roaming" / APP_NAME
+    else:
+        xdg_config = os.environ.get("XDG_CONFIG_HOME")
+        config_dir = Path(xdg_config) / APP_NAME if xdg_config else Path.home() / ".config" / APP_NAME
+
     lock_file = config_dir / "app.lock"
     try:
         parts = lock_file.read_text(encoding="utf-8").strip().split(":", 1)
         pid = int(parts[0])
-        os.kill(pid, signal.SIGTERM)
+        proc = psutil.Process(pid)
+        proc.terminate()
         print(f"Terminated running instance (pid={pid})")
         time.sleep(1)
-    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError, OSError):
+    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError, OSError, psutil.NoSuchProcess):
         pass
 
 
@@ -87,18 +133,43 @@ def install(artifact: Path) -> None:
 
     print(f"Installing to {INSTALL_PATH}...")
     if artifact.is_dir():
+        # macOS .app bundle
         shutil.copytree(artifact, INSTALL_PATH)
     else:
+        # Windows/Linux single executable
+        if sys.platform == "win32":
+            # Windows: create dedicated folder for exe
+            INSTALL_PATH.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(artifact, INSTALL_PATH)
-        INSTALL_PATH.chmod(0o755)
+        if sys.platform != "win32":
+            INSTALL_PATH.chmod(0o755)
 
     print(f"Installed: {INSTALL_PATH}")
+
+    # Add to PATH on Linux if not already there
+    if sys.platform not in ("darwin", "win32"):
+        bin_dir = INSTALL_DIR
+        _add_to_path_if_needed(bin_dir)
 
     print("Launching...")
     if sys.platform == "darwin":
         subprocess.Popen(["open", str(INSTALL_PATH)])
+    elif sys.platform == "win32":
+        subprocess.Popen([str(INSTALL_PATH)], creationflags=subprocess.DETACHED_PROCESS)
     else:
         subprocess.Popen([str(INSTALL_PATH)])
+
+
+def _add_to_path_if_needed(bin_dir: Path) -> None:
+    """Check if bin_dir is in PATH, suggest adding if not (Linux only)."""
+    path_env = os.environ.get("PATH", "")
+    if str(bin_dir) not in path_env.split(os.pathsep):
+        shell_rc = Path.home() / ".bashrc"
+        if not shell_rc.exists():
+            shell_rc = Path.home() / ".zshrc"
+        print(f"\nNote: {bin_dir} is not in your PATH.")
+        print(f"Add this line to your {shell_rc.name}:")
+        print(f'  export PATH="{bin_dir}:$PATH"')
 
 
 def main() -> None:

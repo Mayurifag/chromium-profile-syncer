@@ -58,8 +58,6 @@ This builds the app, kills the running instance, installs, and launches automati
 
 Files excluded from sync:
 - `._*` — macOS metadata on exFAT/FAT32 drives
-- `*.map` — JavaScript/CSS source maps (debugging files)
-- `IndexedDB/` — Website caches (disabled by default in config)
 
 **Implementation:**
 - rclone: `--exclude "._*"`
