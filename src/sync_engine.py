@@ -74,6 +74,8 @@ class SyncEngine:
             "--transfers", "8",        # 8 parallel transfers
             "--checkers", "16",        # 16 parallel checksum threads
             "--exclude", "._*",        # Exclude macOS metadata files
+            "--checksum",              # Use checksums instead of mod-time (skip unchanged files)
+            "--fast-list",             # Use fewer transactions for faster operation
         ]
 
         # Log the full command being executed

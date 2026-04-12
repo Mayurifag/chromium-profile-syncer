@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -11,7 +12,6 @@ from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from src import autostart
 from src.browsers import ALL_BROWSERS
-from src.log_viewer import LogViewerDialog
 from src.settings import SettingsDialog
 from src.sync_engine import SyncEngine
 from src.sync_progress import SyncProgressDialog
@@ -118,8 +118,9 @@ class TrayApp(QSystemTrayIcon):
         self._watcher: QFileSystemWatcher | None = None
         self._watcher_paused: bool = False
         self._settings_dialog: SettingsDialog | None = None
-        self._log_viewer: LogViewerDialog | None = None
         self._progress_dialog: SyncProgressDialog | None = None
+        self._next_sync_time: float = 0.0  # timestamp of next sync
+        self._countdown_timer: QTimer | None = None
 
         self.setIcon(self._make_icon("idle"))
         self.setToolTip("Chromium Profile Syncer")
@@ -131,9 +132,6 @@ class TrayApp(QSystemTrayIcon):
 
         self._action_settings = self._menu.addAction("Settings")
         self._action_settings.triggered.connect(self.open_settings)
-
-        self._action_log = self._menu.addAction("Activity Log")
-        self._action_log.triggered.connect(self.open_log_viewer)
 
         self._menu.addSeparator()
 
@@ -148,6 +146,7 @@ class TrayApp(QSystemTrayIcon):
         self.setContextMenu(self._menu)
 
         self._setup_timer()
+        self._setup_countdown_timer()
 
         sync_folder = self._config.get_sync_folder()
         if sync_folder is not None:
@@ -178,15 +177,33 @@ class TrayApp(QSystemTrayIcon):
     # ------------------------------------------------------------------
 
     def _setup_timer(self) -> None:
+        interval_minutes = self._config.get_sync_interval()
         self._timer = QTimer(self)
-        self._timer.setInterval(15 * 60 * 1000)
+        self._timer.setInterval(interval_minutes * 60 * 1000)
         self._timer.timeout.connect(self._on_timer)
         self._timer.start()
-        logger.debug("Periodic sync timer armed (15 min)")
+        self._next_sync_time = time.time() + (interval_minutes * 60)
+        logger.debug("Periodic sync timer armed (%d min)", interval_minutes)
+
+    def _setup_countdown_timer(self) -> None:
+        """Timer that updates the countdown display every second."""
+        self._countdown_timer = QTimer(self)
+        self._countdown_timer.setInterval(1000)  # 1 second
+        self._countdown_timer.timeout.connect(self._update_countdown)
+        self._countdown_timer.start()
+
+    def _update_countdown(self) -> None:
+        """Update next sync countdown in settings dialog."""
+        if self._settings_dialog is not None:
+            remaining = int(self._next_sync_time - time.time())
+            self._settings_dialog.update_next_sync_time(max(0, remaining))
 
     def _on_timer(self) -> None:
         logger.info("Periodic timer fired — triggering sync")
         self._trigger_sync()
+        # Reset next sync time
+        interval_minutes = self._config.get_sync_interval()
+        self._next_sync_time = time.time() + (interval_minutes * 60)
 
     # ------------------------------------------------------------------
     # File watcher
@@ -262,6 +279,7 @@ class TrayApp(QSystemTrayIcon):
         dialog = SettingsDialog(parent=None)
         dialog.settings_saved.connect(self._on_settings_saved)
         dialog.sync_requested.connect(self._trigger_sync)
+        dialog.sync_interval_changed.connect(self._on_sync_interval_changed)
         dialog.finished.connect(lambda: self._on_settings_closed())
 
         self._settings_dialog = dialog
@@ -277,30 +295,18 @@ class TrayApp(QSystemTrayIcon):
         """Clean up settings dialog reference."""
         self._settings_dialog = None
 
-    def open_log_viewer(self) -> None:
-        """Open the activity log viewer."""
-        if self._log_viewer is not None:
-            # Dialog already open, just bring it to front
-            self._log_viewer.show()
-            self._log_viewer.raise_()
-            self._log_viewer.activateWindow()
-            return
-
-        self._log_viewer = LogViewerDialog(parent=None)
-        self._log_viewer.finished.connect(lambda: self._on_log_viewer_closed())
-
-        # macOS requires explicit activation for tray apps
-        self._log_viewer.show()
-        self._log_viewer.raise_()
-        self._log_viewer.activateWindow()
-
-    def _on_log_viewer_closed(self) -> None:
-        """Clean up log viewer reference."""
-        self._log_viewer = None
-
     def _on_progress_dialog_closed(self) -> None:
         """Clean up progress dialog reference."""
         self._progress_dialog = None
+
+    def _on_sync_interval_changed(self, minutes: int) -> None:
+        """Update sync timer when interval is changed."""
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer.setInterval(minutes * 60 * 1000)
+            self._timer.start()
+            self._next_sync_time = time.time() + (minutes * 60)
+            logger.info("Sync interval updated to %d minutes", minutes)
 
     def _on_settings_saved(self) -> None:
         """Rebuild SyncEngine and file watcher after settings are saved."""
@@ -353,6 +359,14 @@ class TrayApp(QSystemTrayIcon):
             return
 
         logger.info("Starting sync worker")
+        # Reset next sync time when manually triggered
+        interval_minutes = self._config.get_sync_interval()
+        self._next_sync_time = time.time() + (interval_minutes * 60)
+        # Restart timer to align with manual sync
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer.start()
+
         self._worker = SyncWorker(self._engine)
         self._worker.started.connect(self._on_sync_started)
         self._worker.finished.connect(self._on_sync_finished)

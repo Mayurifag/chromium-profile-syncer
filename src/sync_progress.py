@@ -76,7 +76,7 @@ class SyncProgressDialog(QDialog):
 
         # Profile info label
         self._profile_label = QLabel("")
-        self._profile_label.setStyleSheet("color: #888; font-size: 10pt;")
+        self._profile_label.setStyleSheet("color: #6272a4; font-size: 10pt;")
         layout.addWidget(self._profile_label)
 
         # Log area
@@ -92,15 +92,6 @@ class SyncProgressDialog(QDialog):
         font = QFont("Monaco, Menlo, Courier New, monospace")
         font.setPointSize(10)
         self._text_edit.setFont(font)
-
-        # Dark theme for better readability
-        self._text_edit.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                border: 1px solid #3a3a3a;
-            }
-        """)
 
         layout.addWidget(self._text_edit)
 

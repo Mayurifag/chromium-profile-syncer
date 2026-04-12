@@ -4,10 +4,9 @@ import logging
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -18,7 +17,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QProgressBar,
     QPushButton,
-    QScrollArea,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -26,8 +25,40 @@ from PySide6.QtWidgets import (
 import src.config as config_module
 from src.browsers import ALL_BROWSERS
 from src.browsers.base import BrowserBase
+from src.log_viewer import GUILogHandler, LogSignaler
 
 _LOG = logging.getLogger(__name__)
+
+
+def _make_status_indicator(is_running: bool) -> QLabel:
+    """Create an elegant status indicator with tooltip."""
+    label = QLabel()
+
+    if is_running:
+        # Create a small green dot icon
+        pixmap = QPixmap(12, 12)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Draw a subtle glow
+        painter.setBrush(QColor(80, 200, 120, 60))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(0, 0, 12, 12)
+
+        # Draw the main dot
+        painter.setBrush(QColor(80, 200, 120))
+        painter.drawEllipse(2, 2, 8, 8)
+        painter.end()
+
+        label.setPixmap(pixmap)
+        label.setToolTip("Browser is running (quit with Cmd+Q to allow sync)")
+    else:
+        # Empty space to maintain alignment
+        label.setFixedWidth(12)
+        label.setToolTip("")
+
+    return label
 
 
 def _sync_folder_has_data(folder: Path) -> bool:
@@ -59,6 +90,7 @@ def _profiles_in_sync_folder(folder: Path) -> dict[str, set[str]]:
 class SettingsDialog(QDialog):
     settings_saved = Signal()
     sync_requested = Signal()
+    sync_interval_changed = Signal(int)  # minutes
 
     def __init__(self, parent=None, *, browsers_list: list | None = None):
         super().__init__(parent)
@@ -75,15 +107,27 @@ class SettingsDialog(QDialog):
         self._profile_states: dict[str, dict[str, bool]] = {}
         # {(browser_name, profile_name): (progress_bar, info_label)}
         self._profile_progress: dict[tuple[str, str], tuple[QProgressBar, QLabel]] = {}
-        self._autostart_check: QCheckBox | None = None
+        self._autostart_select: QComboBox | None = None
         self._folder_edit: QLineEdit | None = None
         self._clean_btn: QPushButton | None = None
         self._profiles_group: QGroupBox | None = None
-        self._scroll_area: QScrollArea | None = None
         self._profiles_scroll_layout: QVBoxLayout | None = None
+        self._activity_log_select: QComboBox | None = None
+        self._activity_log_widget: QWidget | None = None
+        self._activity_log_text: QTextEdit | None = None
+        self._log_signaler: LogSignaler | None = None
+        self._log_handler: GUILogHandler | None = None
+        self._sync_interval_combo: QComboBox | None = None
+        self._next_sync_label: QLabel | None = None
+        self._next_sync_timer: QTimer | None = None
+        self._browser_status_indicators: dict[str, QLabel] = {}  # browser_name -> indicator
+        # (browser_name, profile_name) -> button
+        self._browser_buttons: dict[tuple[str, str], QPushButton] = {}
+        self._browser_status_timer: QTimer | None = None
 
         self._build_ui()
         self._load_current_settings()
+        self._setup_browser_status_timer()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -91,12 +135,15 @@ class SettingsDialog(QDialog):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
+        root.setSpacing(8)
+        root.setContentsMargins(12, 12, 12, 12)
 
         # Sync folder
         folder_group = QGroupBox("Sync folder")
         folder_layout = QHBoxLayout(folder_group)
         self._folder_edit = QLineEdit()
         self._folder_edit.setPlaceholderText("Select a folder…")
+        self._folder_edit.setReadOnly(True)
         self._folder_edit.textChanged.connect(self._on_folder_changed)
         browse_btn = QPushButton("Browse…")
         browse_btn.clicked.connect(self._browse_folder)
@@ -111,34 +158,102 @@ class SettingsDialog(QDialog):
         # Profiles section (hidden until folder is set)
         self._profiles_group = QGroupBox("Profiles")
         self._profiles_group.setVisible(False)
-        self._profiles_group.setMinimumHeight(150)
-        profiles_group_layout = QVBoxLayout(self._profiles_group)
-
-        self._scroll_area = QScrollArea()
-        self._scroll_area.setWidgetResizable(True)
-
-        scroll_content = QWidget()
-        self._profiles_scroll_layout = QVBoxLayout(scroll_content)
+        self._profiles_scroll_layout = QVBoxLayout(self._profiles_group)
         self._profiles_scroll_layout.setSpacing(4)
-        scroll_content.setLayout(self._profiles_scroll_layout)
-        self._scroll_area.setWidget(scroll_content)
-        profiles_group_layout.addWidget(self._scroll_area)
 
         root.addWidget(self._profiles_group)
 
-        # Autostart (hidden until folder is set)
-        self._autostart_check = QCheckBox("Launch on login")
-        self._autostart_check.setChecked(True)
-        self._autostart_check.setVisible(False)
-        root.addWidget(self._autostart_check)
+        # Sync interval selector (hidden until folder is set)
+        sync_interval_group = QGroupBox("Automatic Sync")
+        sync_interval_layout = QVBoxLayout(sync_interval_group)
 
-        # OK / Cancel — only applies to folder + autostart
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self._on_accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        interval_row = QWidget()
+        interval_row_layout = QHBoxLayout(interval_row)
+        interval_row_layout.setContentsMargins(0, 0, 0, 0)
+
+        interval_row_layout.addWidget(QLabel("Sync every:"))
+        self._sync_interval_combo = QComboBox()
+        self._sync_interval_combo.addItem("1 minute", 1)
+        self._sync_interval_combo.addItem("5 minutes", 5)
+        self._sync_interval_combo.addItem("10 minutes", 10)
+        self._sync_interval_combo.addItem("15 minutes", 15)
+        self._sync_interval_combo.addItem("30 minutes", 30)
+        self._sync_interval_combo.addItem("1 hour", 60)
+        self._sync_interval_combo.currentIndexChanged.connect(self._on_sync_interval_changed)
+        interval_row_layout.addWidget(self._sync_interval_combo)
+
+        # Trigger sync now button on the same row
+        trigger_sync_btn = QPushButton("Trigger sync now")
+        trigger_sync_btn.clicked.connect(lambda: self.sync_requested.emit())
+        interval_row_layout.addWidget(trigger_sync_btn)
+
+        interval_row_layout.addStretch()
+
+        sync_interval_layout.addWidget(interval_row)
+
+        self._next_sync_label = QLabel("Next sync: calculating...")
+        self._next_sync_label.setStyleSheet("color: #6272a4; font-size: 11px;")
+        sync_interval_layout.addWidget(self._next_sync_label)
+
+        sync_interval_group.setVisible(False)
+        root.addWidget(sync_interval_group)
+        self._sync_interval_group = sync_interval_group
+
+        # Activity log and autostart selects (hidden until folder is set)
+        selects_row = QWidget()
+        selects_layout = QHBoxLayout(selects_row)
+        selects_layout.setContentsMargins(0, 0, 0, 0)
+        selects_layout.setSpacing(12)
+
+        selects_layout.addWidget(QLabel("Show activity log:"))
+        self._activity_log_select = QComboBox()
+        self._activity_log_select.addItem("Yes", True)
+        self._activity_log_select.addItem("No", False)
+        self._activity_log_select.setCurrentIndex(0)
+        self._activity_log_select.currentIndexChanged.connect(self._on_activity_log_changed)
+        selects_layout.addWidget(self._activity_log_select)
+
+        selects_layout.addSpacing(12)
+
+        selects_layout.addWidget(QLabel("Launch on login:"))
+        self._autostart_select = QComboBox()
+        self._autostart_select.addItem("Yes", True)
+        self._autostart_select.addItem("No", False)
+        self._autostart_select.setCurrentIndex(0)
+        self._autostart_select.currentIndexChanged.connect(self._on_autostart_changed)
+        selects_layout.addWidget(self._autostart_select)
+
+        selects_layout.addStretch()
+        selects_row.setVisible(False)
+        root.addWidget(selects_row)
+        self._selects_row = selects_row
+
+        # Activity log section (hidden by default)
+        self._activity_log_widget = QWidget()
+        log_layout = QVBoxLayout(self._activity_log_widget)
+        log_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Text display
+        self._activity_log_text = QTextEdit()
+        self._activity_log_text.setReadOnly(True)
+        self._activity_log_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self._activity_log_text.setMinimumHeight(200)
+        self._activity_log_text.setMaximumHeight(300)
+
+        # Use monospace font for better command display
+        font = QFont("Monaco, Menlo, Courier New, monospace")
+        font.setPointSize(11)
+        self._activity_log_text.setFont(font)
+
+        log_layout.addWidget(self._activity_log_text)
+
+        # Clear button
+        clear_btn = QPushButton("Clear Log")
+        clear_btn.clicked.connect(self._clear_activity_log)
+        log_layout.addWidget(clear_btn)
+
+        self._activity_log_widget.setVisible(False)
+        root.addWidget(self._activity_log_widget)
 
     # ------------------------------------------------------------------
     # Folder change
@@ -178,6 +293,10 @@ class SettingsDialog(QDialog):
                     self._clean_btn.setVisible(False)
             return
 
+        # Save folder to config immediately after validation
+        config_module.set_sync_folder(folder)
+        self.settings_saved.emit()
+
         has_data = _sync_folder_has_data(folder)
         if self._clean_btn:
             self._clean_btn.setVisible(has_data)
@@ -193,10 +312,168 @@ class SettingsDialog(QDialog):
     def _hide_profiles(self) -> None:
         if self._profiles_group:
             self._profiles_group.setVisible(False)
-        if self._autostart_check:
-            self._autostart_check.setVisible(False)
+        if hasattr(self, "_selects_row"):
+            self._selects_row.setVisible(False)
+        if hasattr(self, "_sync_interval_group"):
+            self._sync_interval_group.setVisible(False)
+        if self._activity_log_widget:
+            self._activity_log_widget.setVisible(False)
         # Adjust window size to fit content
         self.adjustSize()
+
+    # ------------------------------------------------------------------
+    # Browser status updates
+    # ------------------------------------------------------------------
+
+    def _setup_browser_status_timer(self) -> None:
+        """Set up a timer to update browser running indicators every 2 seconds."""
+        self._browser_status_timer = QTimer(self)
+        self._browser_status_timer.setInterval(2000)  # 2 seconds
+        self._browser_status_timer.timeout.connect(self._update_browser_status_indicators)
+        self._browser_status_timer.start()
+
+    def _update_browser_status_indicators(self) -> None:
+        """Update running indicators and button states for all browsers."""
+        for browser in self._browsers:
+            indicator = self._browser_status_indicators.get(browser.name)
+            if indicator is None:
+                continue
+
+            is_running = browser.is_running()
+
+            # Update the indicator pixmap
+            if is_running:
+                pixmap = QPixmap(12, 12)
+                pixmap.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(pixmap)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+                # Draw a subtle glow
+                painter.setBrush(QColor(80, 200, 120, 60))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawEllipse(0, 0, 12, 12)
+
+                # Draw the main dot
+                painter.setBrush(QColor(80, 200, 120))
+                painter.drawEllipse(2, 2, 8, 8)
+                painter.end()
+
+                indicator.setPixmap(pixmap)
+                indicator.setToolTip("Browser is running (quit with Cmd+Q to allow sync)")
+            else:
+                indicator.setPixmap(QPixmap())  # Clear pixmap
+                indicator.setToolTip("")
+
+            # Update button states for all profiles of this browser
+            for (btn_browser, btn_profile), btn in self._browser_buttons.items():
+                if btn_browser == browser.name:
+                    btn.setEnabled(not is_running)
+                    if is_running:
+                        btn.setToolTip("Quit browser first (Cmd+Q)")
+                    else:
+                        btn.setToolTip("")
+
+    # ------------------------------------------------------------------
+    # Sync interval
+    # ------------------------------------------------------------------
+
+    def _on_sync_interval_changed(self) -> None:
+        """Save sync interval when changed."""
+        if self._sync_interval_combo is None:
+            return
+        minutes = self._sync_interval_combo.currentData()
+        config_module.set_sync_interval(minutes)
+        self.sync_interval_changed.emit(minutes)
+        _LOG.info("Sync interval changed to %d minutes", minutes)
+
+    def update_next_sync_time(self, next_sync_seconds: int) -> None:
+        """Update the next sync countdown display."""
+        if self._next_sync_label is None:
+            return
+
+        if next_sync_seconds <= 0:
+            self._next_sync_label.setText("Next sync: now")
+            return
+
+        minutes = next_sync_seconds // 60
+        seconds = next_sync_seconds % 60
+
+        if minutes > 0:
+            self._next_sync_label.setText(f"Next sync in: {minutes}m {seconds}s")
+        else:
+            self._next_sync_label.setText(f"Next sync in: {seconds}s")
+
+    # ------------------------------------------------------------------
+    # Activity log
+    # ------------------------------------------------------------------
+
+    def _on_activity_log_changed(self, index: int) -> None:
+        """Show or hide the activity log section."""
+        checked = self._activity_log_select.currentData() if self._activity_log_select else True
+        if self._activity_log_widget:
+            self._activity_log_widget.setVisible(checked)
+
+        # Set up or tear down logging handler
+        if checked:
+            if self._log_signaler is None:
+                self._log_signaler = LogSignaler()
+                self._log_signaler.log_message.connect(self._append_log)
+            if self._log_handler is None:
+                self._log_handler = GUILogHandler(self._log_signaler)
+                self._log_handler.setLevel(logging.DEBUG)
+                logging.getLogger().addHandler(self._log_handler)
+                _LOG.info("Activity log enabled in settings window")
+        else:
+            if self._log_handler is not None:
+                logging.getLogger().removeHandler(self._log_handler)
+                self._log_handler = None
+                _LOG.info("Activity log disabled in settings window")
+
+        # Adjust window size to fit content
+        self.adjustSize()
+
+    def _on_autostart_changed(self, index: int) -> None:
+        """Save autostart setting immediately."""
+        checked = self._autostart_select.currentData() if self._autostart_select else True
+        config_module.set_autostart(checked)
+        _LOG.info(f"Autostart {'enabled' if checked else 'disabled'}")
+
+    def _append_log(self, level: str, message: str) -> None:
+        """Append a log message with color coding based on level."""
+        if self._activity_log_text is None:
+            return
+
+        # Color map for log levels
+        colors = {
+            "DEBUG": "#808080",     # Gray
+            "INFO": "#4ec9b0",      # Teal
+            "WARNING": "#dcdcaa",   # Yellow
+            "ERROR": "#f48771",     # Red
+            "CRITICAL": "#ff0000",  # Bright red
+        }
+        color = colors.get(level, "#d4d4d4")
+
+        # Insert colored text
+        cursor = self._activity_log_text.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+
+        # Apply color
+        fmt = cursor.charFormat()
+        fmt.setForeground(QColor(color))
+        cursor.setCharFormat(fmt)
+
+        # Insert message
+        cursor.insertText(message + "\n")
+
+        # Auto-scroll to bottom
+        self._activity_log_text.setTextCursor(cursor)
+        self._activity_log_text.ensureCursorVisible()
+
+    def _clear_activity_log(self) -> None:
+        """Clear all log messages."""
+        if self._activity_log_text:
+            self._activity_log_text.clear()
+            _LOG.info("Activity log cleared")
 
     # ------------------------------------------------------------------
     # Initial upload
@@ -335,12 +612,12 @@ class SettingsDialog(QDialog):
                 item.widget().deleteLater()
         self._profile_states.clear()
         self._profile_progress.clear()
+        self._browser_status_indicators.clear()
+        self._browser_buttons.clear()
 
-        synced_profiles = _profiles_in_sync_folder(folder) if folder is not None else {}
         saved_profiles = config_module.get_enabled_profiles()
 
         found_any = False
-        row_index = 0  # for zebra striping
 
         for browser in self._browsers:
             profiles = browser.discover_profiles()
@@ -349,14 +626,13 @@ class SettingsDialog(QDialog):
             found_any = True
 
             self._profile_states[browser.name] = {}
-            browser_synced = synced_profiles.get(browser.name, set())
             browser_saved = set(saved_profiles.get(browser.name, []))
 
             if len(profiles) == 1:
                 # Single profile: show browser name + sync button
                 profile_path = profiles[0]
                 profile_name = profile_path.name
-                is_enabled = profile_name in browser_synced or profile_name in browser_saved
+                is_enabled = profile_name in browser_saved
                 self._profile_states[browser.name][profile_name] = is_enabled
 
                 row = QWidget()
@@ -368,19 +644,33 @@ class SettingsDialog(QDialog):
                 top_row = QWidget()
                 top_layout = QHBoxLayout(top_row)
                 top_layout.setContentsMargins(0, 0, 0, 0)
+                top_layout.setSpacing(6)
+
+                # Browser name with running indicator
+                is_running = browser.is_running()
+                indicator = _make_status_indicator(is_running)
+                self._browser_status_indicators[browser.name] = indicator
+                top_layout.addWidget(indicator)
 
                 name_lbl = QLabel(f"<b>{browser.name}</b>")
-                btn = QPushButton("Stop sync" if is_enabled else "Sync")
-                btn.setFixedWidth(90)
+                btn = QPushButton("Stop manage" if is_enabled else "Manage")
+                btn.setFixedWidth(100)
+                # Disable button if browser is running
+                if is_running:
+                    btn.setEnabled(False)
+                    btn.setToolTip("Quit browser first (Cmd+Q)")
+
+                # Store button reference for status updates
+                self._browser_buttons[(browser.name, profile_name)] = btn
 
                 def _make_handler(bn: str, pn: str, b: QPushButton) -> None:
                     def _clicked() -> None:
                         currently = self._profile_states[bn][pn]
                         self._profile_states[bn][pn] = not currently
-                        b.setText("Stop sync" if not currently else "Sync")
+                        b.setText("Stop manage" if not currently else "Manage")
                         self._save_profiles_config()
-                        self.settings_saved.emit()
-                        if not currently:  # just enabled → sync now
+                        # Trigger sync when enabling a profile
+                        if not currently:
                             self.sync_requested.emit()
                     b.clicked.connect(_clicked)
 
@@ -397,7 +687,7 @@ class SettingsDialog(QDialog):
                 progress_bar.setVisible(False)
 
                 info_label = QLabel()
-                info_label.setStyleSheet("font-size: 10px; color: #888;")
+                info_label.setStyleSheet("font-size: 10px; color: #6272a4;")
                 info_label.setVisible(False)
 
                 self._profile_progress[(browser.name, profile_name)] = (progress_bar, info_label)
@@ -406,18 +696,26 @@ class SettingsDialog(QDialog):
                 row_layout.addWidget(progress_bar)
                 row_layout.addWidget(info_label)
 
-                # Zebra striping using palette (doesn't affect button styling)
-                row.setAutoFillBackground(True)
-                palette = row.palette()
-                bg_color = QColor("#2a2a2a") if row_index % 2 == 0 else QColor("#242424")
-                palette.setColor(QPalette.ColorRole.Window, bg_color)
-                row.setPalette(palette)
-                row_index += 1
-
                 layout.addWidget(row)
             else:
                 # Multiple profiles: show browser header + profile rows
-                layout.addWidget(QLabel(f"<b>{browser.name}</b>"))
+                is_running = browser.is_running()
+
+                # Create header row with indicator
+                header_row = QWidget()
+                header_layout = QHBoxLayout(header_row)
+                header_layout.setContentsMargins(4, 4, 4, 4)
+                header_layout.setSpacing(6)
+
+                indicator = _make_status_indicator(is_running)
+                self._browser_status_indicators[browser.name] = indicator
+                header_layout.addWidget(indicator)
+
+                header_lbl = QLabel(f"<b>{browser.name}</b>")
+                header_layout.addWidget(header_lbl)
+                header_layout.addStretch()
+
+                layout.addWidget(header_row)
 
                 for profile_path in profiles:
                     profile_name = profile_path.name
@@ -427,31 +725,44 @@ class SettingsDialog(QDialog):
                         if friendly != profile_name
                         else profile_name
                     )
-                    is_enabled = profile_name in browser_synced or profile_name in browser_saved
+                    is_enabled = profile_name in browser_saved
                     self._profile_states[browser.name][profile_name] = is_enabled
 
                     row = QWidget()
                     row_layout = QVBoxLayout(row)
-                    row_layout.setContentsMargins(16, 4, 4, 4)
+                    row_layout.setContentsMargins(4, 4, 4, 4)
                     row_layout.setSpacing(2)
 
                     # Top row: name + button
                     top_row = QWidget()
                     top_layout = QHBoxLayout(top_row)
                     top_layout.setContentsMargins(0, 0, 0, 0)
+                    top_layout.setSpacing(6)
 
-                    name_lbl = QLabel(display)
-                    btn = QPushButton("Stop sync" if is_enabled else "Sync")
-                    btn.setFixedWidth(90)
+                    # Add spacing to align with indicator position
+                    spacer = QLabel()
+                    spacer.setFixedWidth(12)  # Same as indicator width
+                    top_layout.addWidget(spacer)
+
+                    name_lbl = QLabel(f"- {display}")
+                    btn = QPushButton("Stop manage" if is_enabled else "Manage")
+                    btn.setFixedWidth(100)
+                    # Disable button if browser is running (use parent browser's running state)
+                    if is_running:
+                        btn.setEnabled(False)
+                        btn.setToolTip("Quit browser first (Cmd+Q)")
+
+                    # Store button reference for status updates
+                    self._browser_buttons[(browser.name, profile_name)] = btn
 
                     def _make_handler(bn: str, pn: str, b: QPushButton) -> None:
                         def _clicked() -> None:
                             currently = self._profile_states[bn][pn]
                             self._profile_states[bn][pn] = not currently
-                            b.setText("Stop sync" if not currently else "Sync")
+                            b.setText("Stop manage" if not currently else "Manage")
                             self._save_profiles_config()
-                            self.settings_saved.emit()
-                            if not currently:  # just enabled → sync now
+                            # Trigger sync when enabling a profile
+                            if not currently:
                                 self.sync_requested.emit()
                         b.clicked.connect(_clicked)
 
@@ -468,7 +779,7 @@ class SettingsDialog(QDialog):
                     progress_bar.setVisible(False)
 
                     info_label = QLabel()
-                    info_label.setStyleSheet("font-size: 10px; color: #888;")
+                    info_label.setStyleSheet("font-size: 10px; color: #6272a4;")
                     info_label.setVisible(False)
 
                     self._profile_progress[(browser.name, profile_name)] = (
@@ -480,14 +791,6 @@ class SettingsDialog(QDialog):
                     row_layout.addWidget(progress_bar)
                     row_layout.addWidget(info_label)
 
-                    # Zebra striping using palette (doesn't affect button styling)
-                    row.setAutoFillBackground(True)
-                    palette = row.palette()
-                    bg_color = QColor("#2a2a2a") if row_index % 2 == 0 else QColor("#242424")
-                    palette.setColor(QPalette.ColorRole.Window, bg_color)
-                    row.setPalette(palette)
-                    row_index += 1
-
                     layout.addWidget(row)
 
         if not found_any:
@@ -497,8 +800,22 @@ class SettingsDialog(QDialog):
 
         if self._profiles_group:
             self._profiles_group.setVisible(True)
-        if self._autostart_check:
-            self._autostart_check.setVisible(True)
+        if hasattr(self, "_selects_row"):
+            self._selects_row.setVisible(True)
+        if hasattr(self, "_sync_interval_group"):
+            self._sync_interval_group.setVisible(True)
+        if self._activity_log_select:
+            # Trigger activity log to be shown by default
+            if self._activity_log_select.currentData() and self._activity_log_widget:
+                self._activity_log_widget.setVisible(True)
+                # Set up logging handler if not already done
+                if self._log_signaler is None:
+                    self._log_signaler = LogSignaler()
+                    self._log_signaler.log_message.connect(self._append_log)
+                if self._log_handler is None:
+                    self._log_handler = GUILogHandler(self._log_signaler)
+                    self._log_handler.setLevel(logging.DEBUG)
+                    logging.getLogger().addHandler(self._log_handler)
 
         # Adjust window size to fit content
         self.adjustSize()
@@ -511,8 +828,12 @@ class SettingsDialog(QDialog):
         enabled_browsers: dict[str, bool] = {
             bn: any(pm.values()) for bn, pm in self._profile_states.items()
         }
-        config_module.set_enabled_profiles(enabled_profiles)
-        config_module.set_enabled_browsers(enabled_browsers)
+        # Save both in one operation to avoid duplicate saves
+        data = config_module.load()
+        data["enabled_profiles"] = enabled_profiles
+        data["enabled_browsers"] = enabled_browsers
+        config_module.save(data)
+        _LOG.info("Profile configuration updated")
 
     # ------------------------------------------------------------------
     # Progress tracking
@@ -607,23 +928,32 @@ class SettingsDialog(QDialog):
         if self._folder_edit:
             self._folder_edit.textChanged.emit(folder_text)
 
-    def _on_accept(self) -> None:
-        folder_text = self._folder_edit.text().strip() if self._folder_edit else ""
-        if folder_text:
-            config_module.set_sync_folder(Path(folder_text))
-
-        if self._autostart_check is not None:
-            config_module.set_autostart(self._autostart_check.isChecked())
-
-        _LOG.info("Settings saved")
-        self.settings_saved.emit()
-        self.accept()
+    def closeEvent(self, event) -> None:  # noqa: N802
+        """Remove logging handler when window closes."""
+        if self._log_handler is not None:
+            logging.getLogger().removeHandler(self._log_handler)
+            self._log_handler = None
+        if self._next_sync_timer is not None:
+            self._next_sync_timer.stop()
+            self._next_sync_timer = None
+        if self._browser_status_timer is not None:
+            self._browser_status_timer.stop()
+            self._browser_status_timer = None
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------
     # Load helpers
     # ------------------------------------------------------------------
 
     def _load_current_settings(self) -> None:
+        # Load sync interval
+        if self._sync_interval_combo is not None:
+            interval = config_module.get_sync_interval()
+            for i in range(self._sync_interval_combo.count()):
+                if self._sync_interval_combo.itemData(i) == interval:
+                    self._sync_interval_combo.setCurrentIndex(i)
+                    break
+
         sync_folder = config_module.get_sync_folder()
         if sync_folder and self._folder_edit:
             self._folder_edit.blockSignals(True)
@@ -659,5 +989,6 @@ class SettingsDialog(QDialog):
         else:
             self._hide_profiles()
 
-        if self._autostart_check is not None:
-            self._autostart_check.setChecked(config_module.get_autostart())
+        if self._autostart_select is not None:
+            autostart = config_module.get_autostart()
+            self._autostart_select.setCurrentIndex(0 if autostart else 1)

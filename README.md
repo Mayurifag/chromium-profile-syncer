@@ -1,4 +1,4 @@
-# chromium-profile-syncer
+ # chromium-profile-syncer
 
 A cross-platform PySide6 system tray application that syncs Chromium browser profiles between machines via a shared folder (e.g. Syncthing, Dropbox, or a network share).
 
@@ -12,17 +12,17 @@ The architecture supports adding more Chromium-derived browsers with minimal cha
 
 ## What Gets Synced
 
-| Data                          | Synced                                                   |
-| ----------------------------- | -------------------------------------------------------- |
-| Bookmarks                     | Yes                                                      |
-| Extensions (unpacked)         | Yes — full code synced                                   |
-| Extensions (Web Store)        | ID only — auto-downloads from Chrome Web Store          |
-| Extension settings/storage    | Yes                                                      |
-| Local Storage                 | Yes                                                      |
-| Preferences                   | Yes                                                      |
-| Custom Dictionary             | Yes                                                      |
-| IndexedDB (website caches)    | No (disabled by default, ~300MB+ of unnecessary data)    |
-| Web Data (search engines)     | No (skipped for v1)                                      |
+| Data                       | Synced                                                |
+| -------------------------- | ----------------------------------------------------- |
+| Bookmarks                  | Yes                                                   |
+| Extensions (unpacked)      | Yes — full code synced                                |
+| Extensions (Web Store)     | ID only — auto-downloads from Chrome Web Store        |
+| Extension settings/storage | Yes                                                   |
+| Local Storage              | Yes                                                   |
+| Preferences                | Yes                                                   |
+| Custom Dictionary          | Yes                                                   |
+| IndexedDB (website caches) | No (disabled by default, ~300MB+ of unnecessary data) |
+| Web Data (search engines)  | No (skipped for v1)                                   |
 
 ### Smart Extension Syncing
 

@@ -6,38 +6,12 @@ import pathlib
 import sys
 import tempfile
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 from src import autostart, config, single_instance
 from src.sync_engine import SyncEngine
+from src.theme import DRACULA_STYLESHEET
 from src.tray import TrayApp
-
-
-def _apply_dark_palette(app: QApplication) -> None:
-    """Apply Fusion style with a dark palette on non-Linux platforms."""
-    app.setStyle("Fusion")
-    palette = QPalette()
-    dark = QColor(45, 45, 45)
-    mid_dark = QColor(60, 60, 60)
-    text = QColor(220, 220, 220)
-    highlight = QColor(42, 130, 218)
-
-    palette.setColor(QPalette.ColorRole.Window, dark)
-    palette.setColor(QPalette.ColorRole.WindowText, text)
-    palette.setColor(QPalette.ColorRole.Base, mid_dark)
-    palette.setColor(QPalette.ColorRole.AlternateBase, dark)
-    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(25, 25, 25))
-    palette.setColor(QPalette.ColorRole.ToolTipText, text)
-    palette.setColor(QPalette.ColorRole.Text, text)
-    palette.setColor(QPalette.ColorRole.Button, dark)
-    palette.setColor(QPalette.ColorRole.ButtonText, text)
-    palette.setColor(QPalette.ColorRole.BrightText, Qt.GlobalColor.red)
-    palette.setColor(QPalette.ColorRole.Link, highlight)
-    palette.setColor(QPalette.ColorRole.Highlight, highlight)
-    palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
-    app.setPalette(palette)
 
 
 def main() -> None:
@@ -58,9 +32,7 @@ def main() -> None:
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-
-    if sys.platform != "linux":
-        _apply_dark_palette(app)
+    app.setStyleSheet(DRACULA_STYLESHEET)
 
     from PySide6.QtCore import QTimer
 

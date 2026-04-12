@@ -98,3 +98,16 @@ def set_autostart(enabled: bool) -> None:
     _LOG.info("autostart set to %s", enabled)
 
 
+def get_sync_interval() -> int:
+    """Return sync interval in minutes. Defaults to 15."""
+    return load().get("sync_interval", 15)
+
+
+def set_sync_interval(minutes: int) -> None:
+    """Persist the sync interval setting."""
+    data = load()
+    data["sync_interval"] = minutes
+    save(data)
+    _LOG.info("sync_interval set to %d minutes", minutes)
+
+

@@ -145,6 +145,9 @@ class _MockBrowser:
     def is_installed(self) -> bool:
         return True
 
+    def is_running(self) -> bool:
+        return False
+
     def discover_profiles(self):
         from pathlib import Path
 
@@ -164,7 +167,7 @@ def test_settings_dialog_has_expected_attributes(qapp, tmp_path):
 
     dlg = SettingsDialog(browsers_list=[_MockBrowser("Alpha"), _MockBrowser("Beta")])
     assert dlg._profile_states == {}
-    assert dlg._autostart_check is not None
+    assert dlg._autostart_select is not None
     dlg.close()
 
 
@@ -191,11 +194,14 @@ def test_settings_dialog_profile_states_populated(qapp, tmp_path):
 
 
 def test_rebuild_profiles_synced_profile_enabled(qapp, tmp_path):
-    """Profile present in sync folder gets state=True; others False."""
+    """Profile enabled in config gets state=True; others False."""
     from src.settings import SettingsDialog
 
     sync_folder = tmp_path / "sync"
     (sync_folder / "current" / "Chrome" / "Default").mkdir(parents=True)
+
+    # Save Default profile to config (simulating user enabling it)
+    config_module.set_enabled_profiles({"Chrome": ["Default"]})
 
     mock = _MockBrowser("Chrome", profiles=["Default", "Profile 1"])
     dlg = SettingsDialog(browsers_list=[mock])
@@ -208,15 +214,14 @@ def test_rebuild_profiles_synced_profile_enabled(qapp, tmp_path):
 
 
 def test_settings_dialog_accept_saves_config(qapp, monkeypatch):
-    """Accepting the dialog persists values to config."""
+    """Changing autostart select saves config immediately."""
     from src.settings import SettingsDialog
 
     mock = _MockBrowser("Thorium", profiles=["Default"])
     dlg = SettingsDialog(browsers_list=[mock])
 
-    # Simulate user toggling autostart off
-    dlg._autostart_check.setChecked(False)
-    dlg._on_accept()
+    # Simulate user changing autostart to "No" - should save immediately
+    dlg._autostart_select.setCurrentIndex(1)  # 1 = No
 
     assert config_module.get_autostart() is False
     dlg.close()
@@ -251,6 +256,10 @@ def test_initial_upload_only_one_profile_enabled(qapp, tmp_path):
     sync_profile_path = sync_folder / "current" / "Chrome" / "Default"
     engine.sync_browser_profile(default, sync_profile_path, direction="push")
     engine.update_metadata()
+
+    # Save Default profile to config (this is what initial upload dialog does)
+    config_module.set_enabled_profiles({"Chrome": ["Default"]})
+    config_module.set_enabled_browsers({"Chrome": True})
 
     # Debug: list all directories created in sync folder
     current = sync_folder / "current" / "Chrome"
@@ -345,6 +354,10 @@ def test_clean_then_upload_clears_old_profiles(qapp, tmp_path):
     sync_path = sync_folder / "current" / "Chrome" / "Default"
     engine.sync_browser_profile(default, sync_path, direction="push")
     engine.update_metadata()
+
+    # Save Default to config (simulating initial upload dialog)
+    config_module.set_enabled_profiles({"Chrome": ["Default"]})
+    config_module.set_enabled_browsers({"Chrome": True})
 
     # Verify only Default is in sync folder
     synced = _profiles_in_sync_folder(sync_folder)
