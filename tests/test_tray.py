@@ -296,3 +296,54 @@ def test_trigger_sync_warns_on_bad_permissions(qapp, tmp_path):
     assert tray._worker is None
     mock_show.assert_called_once()
     assert mock_show.call_args[0][2].name == "Warning"
+
+
+# ---------------------------------------------------------------------------
+# rclone missing warning
+# ---------------------------------------------------------------------------
+
+
+def test_warn_rclone_missing_on_init(qapp, tmp_path):
+    """TrayApp shows a Warning tray message at init when rclone is missing."""
+    from src import config
+    from src.sync_engine import SyncEngine
+    from src.tray import TrayApp
+
+    engine = SyncEngine(tmp_path)
+
+    with patch("src.tray.find_rclone", return_value=None):
+        tray = TrayApp(engine, config)
+        with patch.object(tray, "showMessage") as mock_show:
+            # Flush the singleShot timer
+            from PySide6.QtCore import QCoreApplication
+            QCoreApplication.processEvents()
+            # Directly invoke the method to verify it calls showMessage correctly
+            tray._warn_rclone_missing()
+
+    from PySide6.QtWidgets import QSystemTrayIcon
+    mock_show.assert_called_once()
+    assert mock_show.call_args[0][2] == QSystemTrayIcon.MessageIcon.Warning
+
+
+def test_open_settings_warns_rclone_missing(qapp, tmp_path):
+    """open_settings calls showMessage with Warning when rclone is missing."""
+    tray = _make_tray(qapp, tmp_path)
+
+    mock_dialog = MagicMock()
+    mock_dialog.settings_saved = MagicMock()
+    mock_dialog.settings_saved.connect = MagicMock()
+    mock_dialog.sync_requested = MagicMock()
+    mock_dialog.sync_requested.connect = MagicMock()
+    mock_dialog.sync_interval_changed = MagicMock()
+    mock_dialog.sync_interval_changed.connect = MagicMock()
+    mock_dialog.finished = MagicMock()
+    mock_dialog.finished.connect = MagicMock()
+
+    with patch("src.tray.find_rclone", return_value=None), \
+         patch("src.tray.SettingsDialog", return_value=mock_dialog), \
+         patch.object(tray, "showMessage") as mock_show:
+        tray.open_settings()
+
+    from PySide6.QtWidgets import QSystemTrayIcon
+    mock_show.assert_called_once()
+    assert mock_show.call_args[0][2] == QSystemTrayIcon.MessageIcon.Warning

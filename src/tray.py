@@ -15,7 +15,7 @@ from src import autostart
 from src.browsers import ALL_BROWSERS
 from src.dracula import ICON_COLORS
 from src.settings import SettingsDialog
-from src.sync_engine import SyncEngine
+from src.sync_engine import SyncEngine, find_rclone
 from src.sync_progress import SyncProgressDialog
 
 if TYPE_CHECKING:
@@ -146,6 +146,9 @@ class TrayApp(QSystemTrayIcon):
 
         logger.debug("TrayApp initialized")
 
+        if find_rclone() is None:
+            QTimer.singleShot(500, self._warn_rclone_missing)
+
     # ------------------------------------------------------------------
     # Icon generation
     # ------------------------------------------------------------------
@@ -162,6 +165,13 @@ class TrayApp(QSystemTrayIcon):
         painter.drawEllipse(1, 1, 20, 20)
         painter.end()
         return QIcon(pixmap)
+
+    def _warn_rclone_missing(self) -> None:
+        self.showMessage(
+            "rclone not found",
+            "rclone is required for sync. Install via Homebrew: brew install rclone",
+            QSystemTrayIcon.MessageIcon.Warning,
+        )
 
     # ------------------------------------------------------------------
     # Timer
@@ -261,6 +271,9 @@ class TrayApp(QSystemTrayIcon):
         dialog.finished.connect(lambda: self._on_settings_closed())
 
         self._settings_dialog = dialog
+
+        if find_rclone() is None:
+            self._warn_rclone_missing()
 
         dialog.show()
         dialog.raise_()

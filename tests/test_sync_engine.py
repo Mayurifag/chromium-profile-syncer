@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from src.sync_engine import NEVER_SYNC, SyncEngine, _parse_version
+from src.sync_engine import NEVER_SYNC, SyncEngine, _parse_version, find_rclone
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -881,3 +881,40 @@ def test_sync_all_with_empty_config_skips_browser(tmp_path: Path) -> None:
     if current.exists():
         chrome_dir = current / "Chrome"
         assert not chrome_dir.exists(), "Chrome directory should not exist when no profiles enabled"
+
+
+# ---------------------------------------------------------------------------
+# find_rclone
+# ---------------------------------------------------------------------------
+
+
+def test_find_rclone_from_path() -> None:
+    find_rclone.cache_clear()
+    try:
+        with patch("shutil.which", return_value="/usr/bin/rclone"):
+            result = find_rclone()
+        assert result == Path("/usr/bin/rclone")
+    finally:
+        find_rclone.cache_clear()
+
+
+def test_find_rclone_fallback() -> None:
+    find_rclone.cache_clear()
+    try:
+        with patch("shutil.which", return_value=None), \
+             patch.object(Path, "exists", lambda self: str(self) == "/opt/homebrew/bin/rclone"):
+            result = find_rclone()
+        assert result == Path("/opt/homebrew/bin/rclone")
+    finally:
+        find_rclone.cache_clear()
+
+
+def test_find_rclone_not_found() -> None:
+    find_rclone.cache_clear()
+    try:
+        with patch("shutil.which", return_value=None), \
+             patch.object(Path, "exists", return_value=False):
+            result = find_rclone()
+        assert result is None
+    finally:
+        find_rclone.cache_clear()

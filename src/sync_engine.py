@@ -8,11 +8,26 @@ import subprocess
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.browsers.base import BrowserBase
+
+_FALLBACK_PATHS = [Path("/opt/homebrew/bin/rclone"), Path("/usr/local/bin/rclone")]
+
+
+@lru_cache(maxsize=1)
+def find_rclone() -> Path | None:
+    which = shutil.which("rclone")
+    if which:
+        return Path(which)
+    for p in _FALLBACK_PATHS:
+        if p.exists():
+            return p
+    return None
+
 
 NEVER_SYNC: frozenset[str] = frozenset(
     ["Login Data", "Cookies", "Web Data", "History", "Secure Preferences"]
@@ -70,7 +85,7 @@ class SyncEngine:
         self._report(f"{description} (starting...)" if description else "Starting sync...")
 
         cmd = [
-            "rclone", "sync",
+            str(find_rclone() or "rclone"), "sync",
             str(src), str(dst),
             "--stats", "1s",           # Update stats every 1 second
             "--stats-one-line",        # Single line output for parsing
