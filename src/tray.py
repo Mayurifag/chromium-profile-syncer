@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -102,7 +103,10 @@ class TrayApp(QSystemTrayIcon):
         self._engine = engine
         self._config = config_module
         self._worker: SyncWorker | None = None
-        self._debounce_pending: bool = False
+        self._debounce_timer = QTimer(self)
+        self._debounce_timer.setSingleShot(True)
+        self._debounce_timer.setInterval(2000)
+        self._debounce_timer.timeout.connect(self._on_debounce_fired)
         self._watcher: QFileSystemWatcher | None = None
         self._watcher_paused: bool = False
         self._settings_dialog: SettingsDialog | None = None
@@ -228,15 +232,10 @@ class TrayApp(QSystemTrayIcon):
         self._schedule_debounced_sync()
 
     def _schedule_debounced_sync(self) -> None:
-        if self._debounce_pending:
-            logger.debug("Debounce already pending — skipping")
-            return
-        self._debounce_pending = True
-        QTimer.singleShot(2000, self._on_debounce_fired)
-        logger.debug("Debounce timer started (2s)")
+        self._debounce_timer.start()
+        logger.debug("Debounce timer reset (2s)")
 
     def _on_debounce_fired(self) -> None:
-        self._debounce_pending = False
         logger.info("Debounce fired — triggering sync")
         self._trigger_sync()
 
@@ -316,6 +315,10 @@ class TrayApp(QSystemTrayIcon):
     # Sync orchestration
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _check_sync_folder_permissions(path: Path) -> bool:
+        return os.access(path, os.R_OK | os.W_OK)
+
     def _trigger_sync(self) -> None:
         if self._worker is not None and self._worker.isRunning():
             logger.info("Sync already in progress — skipping")
@@ -327,6 +330,15 @@ class TrayApp(QSystemTrayIcon):
             self.showMessage(
                 "Chromium Profile Syncer",
                 "No sync folder configured. Open Settings to choose one.",
+                QSystemTrayIcon.MessageIcon.Warning,
+            )
+            return
+
+        if not self._check_sync_folder_permissions(sync_folder):
+            logger.warning("Sync folder not readable/writable: %s", sync_folder)
+            self.showMessage(
+                "Chromium Profile Syncer",
+                f"Cannot access sync folder: {sync_folder}\nCheck folder permissions.",
                 QSystemTrayIcon.MessageIcon.Warning,
             )
             return
