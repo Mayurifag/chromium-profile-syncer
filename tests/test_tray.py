@@ -225,7 +225,7 @@ def test_file_watcher_ignores_changes_when_paused(qapp, tmp_path):
     tray._watcher_paused = True
 
     # File changed event should be ignored (no debounce scheduled)
-    tray._on_file_changed(str(tmp_path / "metadata.json"))
+    tray._on_file_changed(str(tmp_path / "current.tar"))
     assert not tray._debounce_timer.isActive()
 
     # Directory changed event should be ignored
@@ -234,7 +234,7 @@ def test_file_watcher_ignores_changes_when_paused(qapp, tmp_path):
 
     # When not paused, events should trigger debounce
     tray._watcher_paused = False
-    tray._on_file_changed(str(tmp_path / "metadata.json"))
+    tray._on_file_changed(str(tmp_path / "current.tar"))
     assert tray._debounce_timer.isActive()
 
 

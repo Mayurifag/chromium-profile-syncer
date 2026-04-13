@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import shutil
 import sqlite3
 import sys
@@ -10,6 +11,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from src.sync_engine import NEVER_SYNC, SyncEngine, _parse_version, find_rclone
 
@@ -70,6 +72,11 @@ def _make_browser(
     mock.windows_extensions_registry_key.return_value = None
     mock.windows_force_list_registry_key.return_value = None
     return mock
+
+
+def _make_aesgcm() -> AESGCM:
+    """Return a dummy AESGCM cipher for tests that need url_hash computation."""
+    return AESGCM(os.urandom(32))
 
 
 def _write_file(path: Path, content: str, mtime: float | None = None) -> Path:
@@ -673,36 +680,6 @@ def test_sync_all_filters_profiles(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# update_metadata
-# ---------------------------------------------------------------------------
-
-
-def test_update_metadata_writes_json(tmp_path: Path) -> None:
-    sync_folder = tmp_path / "sync"
-    sync_folder.mkdir()
-    engine = _make_engine(sync_folder)
-    engine.update_metadata()
-
-    meta_path = sync_folder / "metadata.json"
-    assert meta_path.exists()
-    data = json.loads(meta_path.read_text(encoding="utf-8"))
-    assert "last_sync" in data
-    assert data["version"] == 1
-
-
-def test_update_metadata_timestamp_is_iso_utc(tmp_path: Path) -> None:
-    sync_folder = tmp_path / "sync"
-    sync_folder.mkdir()
-    engine = _make_engine(sync_folder)
-    engine.update_metadata()
-
-    data = json.loads((sync_folder / "metadata.json").read_text())
-    # ISO format with timezone info (+00:00 suffix)
-    assert "T" in data["last_sync"]
-    assert "+00:00" in data["last_sync"] or "Z" in data["last_sync"]
-
-
-# ---------------------------------------------------------------------------
 # _install_external_extensions
 # ---------------------------------------------------------------------------
 
@@ -890,8 +867,16 @@ def test_sync_all_with_empty_config_skips_browser(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_web_data(path: Path, rows: list[dict]) -> None:
-    """Create a minimal Web Data SQLite file with a keywords table."""
+def _make_web_data(
+    path: Path,
+    rows: list[dict],
+    metadata: dict[str, str] | None = None,
+) -> None:
+    """Create a minimal Web Data SQLite file with a keywords table.
+
+    *metadata* optionally creates a keywords_metadata key-value table and
+    pre-populates it with the supplied entries.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
     conn.execute(
@@ -943,6 +928,14 @@ def _make_web_data(path: Path, rows: list[dict]) -> None:
                 row.get("input_encodings", "UTF-8"), row.get("alternate_urls", "[]"),
             ),
         )
+    if metadata is not None:
+        conn.execute(
+            "CREATE TABLE keywords_metadata (key VARCHAR NOT NULL UNIQUE, value LONGVARCHAR)"
+        )
+        for k, v in metadata.items():
+            conn.execute(
+                "INSERT INTO keywords_metadata (key, value) VALUES (?, ?)", (k, v)
+            )
     conn.commit()
     conn.close()
 
@@ -995,7 +988,8 @@ def test_restore_search_shortcuts_uses_sync_guid(tmp_path: Path) -> None:
     _make_web_data(profile / "Web Data", [])
 
     engine = _make_engine(tmp_path)
-    engine._restore_search_shortcuts(profile, tmp_path)
+    with patch.object(SyncEngine, "_load_oscrypt_key", return_value=_make_aesgcm()):
+        engine._restore_search_shortcuts(profile, tmp_path)
 
     conn = sqlite3.connect(str(profile / "Web Data"))
     row = conn.execute("SELECT sync_guid FROM keywords WHERE keyword='yt'").fetchone()
@@ -1017,7 +1011,8 @@ def test_restore_search_shortcuts_empty_guid_when_missing(tmp_path: Path) -> Non
     _make_web_data(profile / "Web Data", [])
 
     engine = _make_engine(tmp_path)
-    engine._restore_search_shortcuts(profile, tmp_path)
+    with patch.object(SyncEngine, "_load_oscrypt_key", return_value=_make_aesgcm()):
+        engine._restore_search_shortcuts(profile, tmp_path)
 
     conn = sqlite3.connect(str(profile / "Web Data"))
     row = conn.execute("SELECT sync_guid FROM keywords WHERE keyword='yt'").fetchone()
@@ -1088,6 +1083,39 @@ def test_extract_search_shortcuts_adopts_prefs_guid_when_db_guid_empty(tmp_path:
     assert by_keyword["yt"]["is_default"] is False
 
 
+def test_extract_search_shortcuts_marks_default_when_prefs_guid_empty(tmp_path: Path) -> None:
+    """If Preferences has no guid, the default engine is identified by URL match only."""
+    profile = tmp_path / "profile"
+    _make_web_data(
+        profile / "Web Data",
+        [
+            {"keyword": "gru", "short_name": "Google RU",
+             "url": "https://g.ru/?q={searchTerms}", "sync_guid": ""},
+            {"keyword": "yt", "short_name": "YouTube",
+             "url": "https://yt.com/?q={searchTerms}", "sync_guid": ""},
+        ],
+    )
+    profile.mkdir(parents=True, exist_ok=True)
+    (profile / "Preferences").write_text(
+        json.dumps({
+            "default_search_provider": {"guid": ""},
+            "default_search_provider_data": {
+                "mirrored_template_url_data": {"url": "https://g.ru/?q={searchTerms}"},
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    engine = _make_engine(tmp_path)
+    engine._extract_search_shortcuts(profile, tmp_path)
+
+    data = json.loads((tmp_path / "search_shortcuts.json").read_text())
+    by_keyword = {s["keyword"]: s for s in data}
+    assert by_keyword["gru"]["is_default"] is True
+    assert by_keyword["gru"]["sync_guid"] == ""  # no guid to adopt
+    assert by_keyword["yt"]["is_default"] is False
+
+
 def test_extract_search_shortcuts_no_webdata_preserves_existing_json(tmp_path: Path) -> None:
     """Missing Web Data does not wipe the existing search_shortcuts.json."""
     existing = [{"keyword": "gru", "short_name": "Google Russia", "url": "https://gru.com",
@@ -1110,12 +1138,14 @@ def test_sync_browser_profile_both_direction_does_not_extract_shortcuts(tmp_path
     """In 'both' direction the JSON is treated as the master and is never overwritten."""
     sf = tmp_path / "sync"
     sf.mkdir()
+    sync_profile = tmp_path / "sync_profile"
+    sync_profile.mkdir()
     existing = [{"keyword": "gru", "short_name": "GRU", "url": "https://gru.com",
                  "is_default": True, "sync_guid": "gru-guid", "prepopulate_id": 0,
                  "is_active": 1, "date_created": 0, "last_modified": 0,
                  "safe_for_autoreplace": 0, "input_encodings": "UTF-8",
                  "alternate_urls": "[]", "favicon_url": "", "suggest_url": ""}]
-    (sf / "search_shortcuts.json").write_text(json.dumps(existing), encoding="utf-8")
+    (sync_profile / "search_shortcuts.json").write_text(json.dumps(existing), encoding="utf-8")
 
     profile = tmp_path / "profile"
     _make_web_data(
@@ -1125,9 +1155,9 @@ def test_sync_browser_profile_both_direction_does_not_extract_shortcuts(tmp_path
     (profile / "Preferences").write_text("{}", encoding="utf-8")
 
     engine = _make_engine(sf)
-    engine.sync_browser_profile(profile, tmp_path / "sync_profile", direction="both")
+    engine.sync_browser_profile(profile, sync_profile, direction="both")
 
-    data = json.loads((sf / "search_shortcuts.json").read_text())
+    data = json.loads((sync_profile / "search_shortcuts.json").read_text())
     keywords = {s["keyword"] for s in data}
     assert "gru" in keywords, "master JSON shortcut must survive a 'both' sync"
     assert "bing" not in keywords, "local-only shortcut must not be pushed in 'both' direction"
@@ -1137,7 +1167,9 @@ def test_sync_browser_profile_push_direction_does_extract_shortcuts(tmp_path: Pa
     """In 'push' direction the local browser's shortcuts overwrite the JSON."""
     sf = tmp_path / "sync"
     sf.mkdir()
-    (sf / "search_shortcuts.json").write_text(
+    sync_profile = tmp_path / "sync_profile"
+    sync_profile.mkdir()
+    (sync_profile / "search_shortcuts.json").write_text(
         json.dumps([{"keyword": "old", "short_name": "Old", "url": "https://old.com",
                      "is_default": False, "sync_guid": "", "prepopulate_id": 0,
                      "is_active": 1, "date_created": 0, "last_modified": 0,
@@ -1154,9 +1186,9 @@ def test_sync_browser_profile_push_direction_does_extract_shortcuts(tmp_path: Pa
     (profile / "Preferences").write_text("{}", encoding="utf-8")
 
     engine = _make_engine(sf)
-    engine.sync_browser_profile(profile, tmp_path / "sync_profile", direction="push")
+    engine.sync_browser_profile(profile, sync_profile, direction="push")
 
-    data = json.loads((sf / "search_shortcuts.json").read_text())
+    data = json.loads((sync_profile / "search_shortcuts.json").read_text())
     keywords = {s["keyword"] for s in data}
     assert "new" in keywords
     assert "old" not in keywords, "push must overwrite JSON with local shortcuts"
@@ -1186,7 +1218,8 @@ def test_restore_search_shortcuts_preserves_stored_guid_and_updates_preferences(
     )
 
     engine = _make_engine(tmp_path)
-    engine._restore_search_shortcuts(profile, tmp_path)
+    with patch.object(SyncEngine, "_load_oscrypt_key", return_value=_make_aesgcm()):
+        engine._restore_search_shortcuts(profile, tmp_path)
 
     conn = sqlite3.connect(str(profile / "Web Data"))
     rows = {r[0]: r[1] for r in conn.execute("SELECT keyword, sync_guid FROM keywords")}
@@ -1197,6 +1230,55 @@ def test_restore_search_shortcuts_preserves_stored_guid_and_updates_preferences(
     # Preferences is updated to point at the default engine's stored guid.
     prefs = json.loads(prefs_path.read_text(encoding="utf-8"))
     assert prefs["default_search_provider"]["guid"] == "old-guid"
+
+
+def test_restore_search_shortcuts_updates_mirrored_template_url_data(tmp_path: Path) -> None:
+    shortcuts_json = tmp_path / "search_shortcuts.json"
+    shortcuts_json.write_text(
+        json.dumps([
+            {
+                "keyword": "gru", "short_name": "Google RU",
+                "url": "https://g.ru/?q={searchTerms}",
+                "favicon_url": "https://g.ru/favicon.ico",
+                "suggest_url": "",
+                "sync_guid": "test-guid-gru",
+                "is_default": True,
+                "date_created": 1234567890,
+                "last_modified": 9876543210,
+                "prepopulate_id": 0,
+                "is_active": 1,
+                "safe_for_autoreplace": 0,
+                "alternate_urls": "[]",
+            },
+        ]),
+        encoding="utf-8",
+    )
+    profile = tmp_path / "profile"
+    _make_web_data(profile / "Web Data", [])
+    prefs_path = profile / "Preferences"
+    prefs_path.write_text(
+        json.dumps({"default_search_provider": {"guid": "old-guid"}}),
+        encoding="utf-8",
+    )
+
+    engine = _make_engine(tmp_path)
+    with patch.object(SyncEngine, "_load_oscrypt_key", return_value=_make_aesgcm()):
+        engine._restore_search_shortcuts(profile, tmp_path)
+
+    prefs = json.loads(prefs_path.read_text(encoding="utf-8"))
+    mirror = prefs.get("default_search_provider_data", {}).get("mirrored_template_url_data", {})
+    assert mirror["synced_guid"] == "test-guid-gru"
+    assert mirror["keyword"] == "gru"
+    assert mirror["short_name"] == "Google RU"
+    assert mirror["url"] == "https://g.ru/?q={searchTerms}"
+    assert mirror["favicon_url"] == "https://g.ru/favicon.ico"
+    assert mirror["date_created"] == "1234567890"
+    assert mirror["last_modified"] == "9876543210"
+    assert mirror["alternate_urls"] == []
+    assert mirror["prepopulate_id"] == 0
+    assert mirror["is_active"] == 1
+    # id must be the string row_id (1 since table was empty)
+    assert mirror["id"] == "1"
 
 
 def test_make_url_hash_returns_valid_64_byte_blob() -> None:
@@ -1278,7 +1360,8 @@ def test_restore_search_shortcuts_url_hash_encodes_correct_id_and_url(tmp_path: 
 
 
 def test_restore_search_shortcuts_null_url_hash_without_key(tmp_path: Path) -> None:
-    """url_hash stays NULL when no OSCrypt key is available (non-Windows or error)."""
+    """On non-Windows: url_hash stays NULL when no key available.
+    On Windows: restore is skipped entirely to avoid inserting rows Chromium will drop."""
     shortcuts_json = tmp_path / "search_shortcuts.json"
     shortcuts_json.write_text(
         json.dumps([{"keyword": "yt", "short_name": "YouTube",
@@ -1293,9 +1376,92 @@ def test_restore_search_shortcuts_null_url_hash_without_key(tmp_path: Path) -> N
         engine._restore_search_shortcuts(profile, tmp_path)
 
     conn = sqlite3.connect(str(profile / "Web Data"))
-    blob = conn.execute("SELECT url_hash FROM keywords WHERE keyword='yt'").fetchone()[0]
+    row = conn.execute("SELECT url_hash FROM keywords WHERE keyword='yt'").fetchone()
     conn.close()
-    assert blob is None
+    if platform.system() == "Windows":
+        # On Windows, restore is skipped when the key is unavailable.
+        assert row is None
+    else:
+        assert row is not None
+        assert row[0] is None
+
+
+def test_restore_search_shortcuts_default_engine_empty_guid_generates_uuid(
+    tmp_path: Path,
+) -> None:
+    """If is_default=True but sync_guid is empty, a UUID is generated so Preferences can be set."""
+    shortcuts_json = tmp_path / "search_shortcuts.json"
+    shortcuts_json.write_text(
+        json.dumps([{
+            "keyword": "gru", "short_name": "Google RU",
+            "url": "https://g.ru/?q={searchTerms}",
+            "sync_guid": "", "is_default": True,
+        }]),
+        encoding="utf-8",
+    )
+    profile = tmp_path / "profile"
+    _make_web_data(profile / "Web Data", [])
+    prefs_path = profile / "Preferences"
+    prefs_path.write_text(json.dumps({"default_search_provider": {"guid": ""}}), encoding="utf-8")
+
+    engine = _make_engine(tmp_path)
+    with patch.object(SyncEngine, "_load_oscrypt_key", return_value=_make_aesgcm()):
+        engine._restore_search_shortcuts(profile, tmp_path)
+
+    conn = sqlite3.connect(str(profile / "Web Data"))
+    row = conn.execute("SELECT sync_guid FROM keywords WHERE keyword='gru'").fetchone()
+    conn.close()
+    assert row is not None
+    generated_guid = row[0]
+    assert generated_guid  # non-empty UUID was generated
+
+    prefs = json.loads(prefs_path.read_text(encoding="utf-8"))
+    assert prefs["default_search_provider"]["guid"] == generated_guid
+
+
+def test_restore_search_shortcuts_updates_keywords_metadata(tmp_path: Path) -> None:
+    """After restore, keywords_metadata must point to the new default engine ID
+    and the encrypted backup must be deleted so it cannot override our Preferences guid."""
+    profile = tmp_path / "profile"
+    _make_web_data(
+        profile / "Web Data",
+        [],
+        metadata={
+            "Default Search Provider ID": "999",  # stale — points to deleted old engine
+            "Default Search Provider Backup": "someblob",  # must be deleted
+        },
+    )
+    shortcuts_json = tmp_path / "search_shortcuts.json"
+    shortcuts_json.write_text(
+        json.dumps([{
+            "keyword": "gru", "short_name": "GRU",
+            "url": "https://gru.com/?q={searchTerms}",
+            "sync_guid": "gru-guid", "is_default": True, "prepopulate_id": 0,
+            "is_active": 1, "date_created": 0, "last_modified": 0,
+            "safe_for_autoreplace": 0, "input_encodings": "UTF-8",
+            "alternate_urls": "[]", "favicon_url": "", "suggest_url": "",
+        }]),
+        encoding="utf-8",
+    )
+    prefs_path = profile / "Preferences"
+    prefs_path.write_text(
+        json.dumps({"default_search_provider": {"guid": ""}}), encoding="utf-8"
+    )
+
+    engine = _make_engine(tmp_path)
+    with patch.object(SyncEngine, "_load_oscrypt_key", return_value=_make_aesgcm()):
+        engine._restore_search_shortcuts(profile, tmp_path)
+
+    conn = sqlite3.connect(str(profile / "Web Data"))
+    inserted_id = conn.execute("SELECT id FROM keywords WHERE keyword='gru'").fetchone()[0]
+    meta = {
+        r[0]: r[1]
+        for r in conn.execute("SELECT key, value FROM keywords_metadata").fetchall()
+    }
+    conn.close()
+
+    assert meta.get("Default Search Provider ID") == str(inserted_id)
+    assert "Default Search Provider Backup" not in meta
 
 
 # ---------------------------------------------------------------------------

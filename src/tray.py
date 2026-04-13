@@ -123,8 +123,9 @@ class TrayApp(QSystemTrayIcon):
         self._watcher: QFileSystemWatcher | None = None
         self._watcher_paused: bool = False
         self._settings_dialog: SettingsDialog | None = None
-        self._last_sync: str = ""
+        self._last_sync: str = self._config.get_last_sync()
         self._last_error: str = ""
+        self._last_tar_mtime: float | None = None
 
         installed_browsers = [b for b in ALL_BROWSERS if b.is_installed()]
         self._browser_monitor = BrowserMonitor(installed_browsers, parent=self)
@@ -235,18 +236,9 @@ class TrayApp(QSystemTrayIcon):
 
     def _setup_watcher(self, sync_folder: Path) -> None:
         self._watcher = QFileSystemWatcher(self)
-        paths_to_watch: list[str] = []
-
         if sync_folder.exists():
-            paths_to_watch.append(str(sync_folder))
-
-        meta = sync_folder / "metadata.json"
-        if meta.exists():
-            paths_to_watch.append(str(meta))
-
-        if paths_to_watch:
-            self._watcher.addPaths(paths_to_watch)
-            logger.debug("Watching paths: %s", paths_to_watch)
+            self._watcher.addPaths([str(sync_folder)])
+            logger.debug("Watching: %s", sync_folder)
         else:
             logger.debug("Sync folder %s does not exist yet — watcher idle", sync_folder)
 
@@ -270,6 +262,17 @@ class TrayApp(QSystemTrayIcon):
         logger.debug("Debounce timer reset (2s)")
 
     def _on_debounce_fired(self) -> None:
+        if self._last_tar_mtime is not None:
+            sync_folder = self._config.get_sync_folder()
+            if sync_folder is not None:
+                tar = sync_folder / "current.tar"
+                if tar.exists():
+                    try:
+                        if tar.stat().st_mtime == self._last_tar_mtime:
+                            logger.debug("Watcher fired but current.tar unchanged — skipping")
+                            return
+                    except OSError:
+                        pass
         logger.info("Debounce fired — triggering sync (remote change detected)")
         self._trigger_sync()
 
@@ -424,6 +427,15 @@ class TrayApp(QSystemTrayIcon):
         self._worker = None
         self._last_error = ""
         self._last_sync = last_sync
+
+        sync_folder = self._config.get_sync_folder()
+        if sync_folder is not None:
+            tar = sync_folder / "current.tar"
+            try:
+                self._last_tar_mtime = tar.stat().st_mtime if tar.exists() else None
+            except OSError:
+                self._last_tar_mtime = None
+            self._config.set_last_sync(last_sync)
 
         if is_first_sync:
             logger.info("Initial sync finished at %s", last_sync)

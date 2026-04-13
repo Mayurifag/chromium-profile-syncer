@@ -16,8 +16,12 @@ class Helium(BrowserBase):
         return True
 
     @property
-    def process_names(self) -> list[str]:
-        return ["helium", "helium.exe"]
+    def unix_process_names(self) -> list[str]:
+        return ["helium"]
+
+    @property
+    def windows_exe_substr(self) -> str:
+        return "\\imput\\helium\\application"
 
     def _windows_path(self) -> Path:
         return Path(os.environ.get("LOCALAPPDATA", "")) / "imput" / "Helium" / "User Data"
@@ -27,3 +31,10 @@ class Helium(BrowserBase):
 
     def _linux_path(self) -> Path:
         return Path.home() / ".config" / "net.imput.helium"
+
+    def windows_extensions_registry_key(self) -> str | None:
+        return r"SOFTWARE\Chromium\Extensions"
+
+    def windows_force_list_registry_key(self) -> str | None:
+        return r"SOFTWARE\Policies\Chromium\ExtensionInstallForcelist"
+

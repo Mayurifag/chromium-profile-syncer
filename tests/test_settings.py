@@ -192,6 +192,7 @@ def test_settings_dialog_profile_states_populated(qapp, tmp_path):
 
     sync_folder = tmp_path / "sync"
     sync_folder.mkdir()
+    (sync_folder / "current.tar").touch()
     config_module.set_sync_folder(sync_folder)
 
     mock = _MockBrowser("Chrome", profiles=["Default", "Profile 1", "Profile 2"])
@@ -265,7 +266,7 @@ def test_initial_upload_only_one_profile_enabled(qapp, tmp_path):
     engine = SyncEngine(sync_folder)
     sync_profile_path = sync_folder / "current"
     engine.sync_browser_profile(default, sync_profile_path, direction="push")
-    engine.update_metadata()
+
 
     # Save Default profile to config (this is what initial upload dialog does)
     config_module.set_enabled_profiles({"Chrome": ["Default"]})
@@ -346,7 +347,7 @@ def test_clean_then_upload_clears_old_profiles(qapp, tmp_path):
 
     # Now upload only Default profile (simulating initial upload after clean)
     engine.sync_browser_profile(default, sync_path, direction="push")
-    engine.update_metadata()
+
 
     # Save Default to config (simulating initial upload dialog)
     config_module.set_enabled_profiles({"Chrome": ["Default"]})
@@ -363,4 +364,48 @@ def test_clean_then_upload_clears_old_profiles(qapp, tmp_path):
     assert states["Default"] is True, "Default should be enabled (just uploaded)"
     assert states["Profile 1"] is False, "Profile 1 should NOT be enabled (was cleaned)"
 
+    dlg.close()
+
+
+def test_load_current_settings_empty_folder_triggers_initial_upload(qapp, tmp_path):
+    """Startup with a configured but empty sync folder must show the initial upload dialog,
+    not skip straight to rebuild_profiles."""
+    from unittest.mock import patch
+
+    from src.settings import SettingsDialog
+
+    sync_folder = tmp_path / "sync"
+    sync_folder.mkdir()
+    config_module.set_sync_folder(sync_folder)
+
+    mock = _MockBrowser("Chrome", profiles=["Default"])
+    picked = []
+
+    def _fake_pick(self):
+        picked.append(True)
+        return None  # simulate user cancelling — avoids any blocking dialog
+
+    with patch.object(SettingsDialog, "_pick_initial_upload_profile", _fake_pick):
+        dlg = SettingsDialog(browsers_list=[mock])
+
+    assert picked, "_pick_initial_upload_profile was not called for empty sync folder"
+    # _rebuild_profiles was not called, so _profile_states stays empty.
+    assert "Chrome" not in dlg._profile_states
+    dlg.close()
+
+
+def test_load_current_settings_with_data_calls_rebuild_not_upload(qapp, tmp_path):
+    """Startup with a configured folder that has data must call rebuild_profiles,
+    not the initial upload dialog."""
+    from src.settings import SettingsDialog
+
+    sync_folder = tmp_path / "sync"
+    sync_folder.mkdir()
+    (sync_folder / "current.tar").touch()
+    config_module.set_sync_folder(sync_folder)
+
+    mock = _MockBrowser("Chrome", profiles=["Default"])
+    dlg = SettingsDialog(browsers_list=[mock])
+    # _rebuild_profiles populates _profile_states; initial-upload path does not.
+    assert "Chrome" in dlg._profile_states, "_rebuild_profiles was not called for folder with data"
     dlg.close()

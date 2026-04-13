@@ -72,7 +72,7 @@ All profile data is packed into a single `current.tar` before syncing:
 
 ### Search Shortcuts Sync
 
-Extracts user-created search engines (`prepopulate_id = 0`) from `Web Data` SQLite and stores as `search_shortcuts.json` at the sync folder root.
+Extracts user-created search engines (`prepopulate_id = 0`) from `Web Data` SQLite and stores as `search_shortcuts.json` inside the tar archive (at the root of `work_dir`).
 
 **Windows-specific — url_hash is mandatory:**
 - Every inserted keywords row must have a valid 64-byte `url_hash` BLOB
@@ -97,7 +97,7 @@ Extracts user-created search engines (`prepopulate_id = 0`) from `Web Data` SQLi
 ### Clean Button (Settings Window)
 
 - Visible only when sync folder contains data (`current.tar` exists or `current/` directory exists)
-- Deletes all synced data: `current.tar`, `current/` (legacy), `metadata.json`, `search_shortcuts.json`
+- Deletes all synced data: `current.tar`, `current/` (legacy), `metadata.json` (`search_shortcuts.json` is inside the tar, deleted along with it)
 - Clears enabled profiles and browsers from config
 - Shows confirmation dialog before deletion
 - After cleaning, triggers initial upload dialog to start fresh

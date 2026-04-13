@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import platform
 import re
+import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -15,7 +16,19 @@ class BrowserBase(ABC):
 
     @property
     @abstractmethod
-    def process_names(self) -> list[str]: ...
+    def unix_process_names(self) -> list[str]:
+        """Process names used for detection on macOS and Linux."""
+        ...
+
+    @property
+    @abstractmethod
+    def windows_exe_substr(self) -> str:
+        """Lowercase path fragment unique to this browser's exe directory on Windows.
+
+        Matched against the lowercased full exe path of each running process, e.g.
+        ``\\\\google\\\\chrome\\\\application``.
+        """
+        ...
 
     @property
     def ungoogled(self) -> bool:
@@ -124,12 +137,27 @@ class BrowserBase(ABC):
 
         return profile_dir_name
 
-    def is_running(self) -> bool:
-        names_lower = {n.lower() for n in self.process_names}
-        for proc in psutil.process_iter(["name"]):
+    def is_running(self, running_procs: set[str] | None = None) -> bool:
+        on_windows = sys.platform == "win32"
+        if running_procs is None:
+            running_procs = self._scan_procs(on_windows)
+        return self._matches(running_procs, on_windows)
+
+    @staticmethod
+    def _scan_procs(on_windows: bool) -> set[str]:
+        """Scan running processes and return exe paths (Windows) or names (macOS/Linux)."""
+        results: set[str] = set()
+        attr = "exe" if on_windows else "name"
+        for proc in psutil.process_iter([attr]):
             try:
-                if proc.info["name"] and proc.info["name"].lower() in names_lower:
-                    return True
+                val = proc.info.get(attr)
+                if val:
+                    results.add(val.lower())
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
-        return False
+        return results
+
+    def _matches(self, running_procs: set[str], on_windows: bool) -> bool:
+        if on_windows:
+            return any(self.windows_exe_substr in p for p in running_procs)
+        return bool({n.lower() for n in self.unix_process_names} & running_procs)

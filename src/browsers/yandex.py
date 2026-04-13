@@ -12,8 +12,12 @@ class Yandex(BrowserBase):
         return "Yandex"
 
     @property
-    def process_names(self) -> list[str]:
-        return ["yandex", "yandex browser", "yandex.exe"]
+    def unix_process_names(self) -> list[str]:
+        return ["yandex browser", "yandex-browser"]
+
+    @property
+    def windows_exe_substr(self) -> str:
+        return "\\yandex\\yandexbrowser\\application"
 
     def _windows_path(self) -> Path:
         return Path(os.environ.get("LOCALAPPDATA", "")) / "Yandex" / "YandexBrowser" / "User Data"

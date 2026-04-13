@@ -11,8 +11,12 @@ class Chrome(BrowserBase):
         return "Chrome"
 
     @property
-    def process_names(self) -> list[str]:
-        return ["google chrome", "chrome", "chrome.exe"]
+    def unix_process_names(self) -> list[str]:
+        return ["chrome", "google chrome"]
+
+    @property
+    def windows_exe_substr(self) -> str:
+        return "\\google\\chrome\\application"
 
     def _windows_path(self) -> Path:
         import os

@@ -12,8 +12,12 @@ class Thorium(BrowserBase):
         return "Thorium"
 
     @property
-    def process_names(self) -> list[str]:
-        return ["thorium", "thorium-browser", "thorium.exe"]
+    def unix_process_names(self) -> list[str]:
+        return ["thorium", "thorium-browser"]
+
+    @property
+    def windows_exe_substr(self) -> str:
+        return "\\thorium\\application"
 
     def _windows_path(self) -> Path:
         return Path(os.environ.get("LOCALAPPDATA", "")) / "Thorium" / "User Data"

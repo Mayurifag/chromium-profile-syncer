@@ -107,6 +107,17 @@ extensions will also install to all used profiles of Chrome.
 For Windows extensions installed via registry keys, Linux/MacOS via external
 extensions `.json` files (no other ways to manage those).
 
+#### Archive integrity guard
+
+Before packing `current.tar` and placing it in the cloud folder, the sync
+engine validates that the staging directory contains at least one expected data
+type: extensions, bookmarks, preferences, or search shortcuts. If none are
+present, the pack step is skipped and an error is logged instead of overwriting
+a valid cloud archive with an empty or corrupted snapshot (which could happen if
+profile discovery fails entirely). This is a conservative safety check — it is
+not exhaustive, but catches the worst-case scenario where something went wrong
+before any profile data was synced.
+
 #### Ungoogled browsers and extension exclusions
 
 Some browsers are marked as **ungoogled** in their definition (currently: Helium).
@@ -132,3 +143,11 @@ During restore and extension registration, these IDs are silently skipped for
 non-ungoogled browsers. The backup archive always contains the extension settings
 (they are sourced from whichever ungoogled browser is being synced), so the data
 is preserved — it just is not applied to browsers that don't need it.
+
+# TODO
+
+- helium - extensions dont install. internal ublock origin was not deleted
+- search shortcut gru by default - needs to check fix
+- stylus styles arent applied (find culprit) - perhaps fixed via indexeddb
+- Extensions to cut their backup size i.e. ublock compiled rules
+- bug on active browser - better process name handling required. also every 5sec fine

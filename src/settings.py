@@ -82,13 +82,6 @@ def _sync_folder_has_data(folder: Path) -> bool:
     return any(entry.is_dir() for entry in current.iterdir())
 
 
-def _sync_folder_is_broken(folder: Path) -> bool:
-    metadata = folder / "metadata.json"
-    if not metadata.exists():
-        return False
-    return not (folder / "current.tar").is_file() and not (folder / "current").is_dir()
-
-
 def _sync_folder_has_profile(folder: Path) -> bool:
     if (folder / "current.tar").is_file():
         return True
@@ -288,26 +281,6 @@ class SettingsDialog(QDialog):
                 self._clean_btn.setVisible(False)
             return
 
-        # Check for broken state
-        if _sync_folder_is_broken(folder):
-            from PySide6.QtWidgets import QMessageBox
-            reply = QMessageBox.warning(
-                self,
-                "Broken Sync Folder",
-                f"Sync folder is in broken state:\n{folder}\n\n"
-                "Found metadata.json but no current/ folder.\n"
-                "Clean and start fresh?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                self._clean_sync_folder(skip_confirmation=True)
-            else:
-                self._hide_profiles()
-                if self._clean_btn:
-                    self._clean_btn.setVisible(False)
-            return
-
         config_module.set_sync_folder(folder)
         self.settings_saved.emit()
 
@@ -494,7 +467,6 @@ class SettingsDialog(QDialog):
                     engine._pack_to_archive(work_dir, folder / "current.tar")
                 finally:
                     _shutil.rmtree(work_dir)
-                engine.update_metadata()
                 self.done.emit()
 
         self._upload_worker = _Worker(profile_path)
@@ -885,10 +857,7 @@ class SettingsDialog(QDialog):
         from src.sync_engine import clean_external_extensions
         clean_external_extensions(ALL_BROWSERS)
 
-        for path in [
-            "current", "current.tar",
-            "metadata.json", "search_shortcuts.json",
-        ]:
+        for path in ["current", "current.tar"]:
             target = folder / path
             try:
                 if target.is_dir():
@@ -908,44 +877,46 @@ class SettingsDialog(QDialog):
             self._folder_edit.textChanged.emit(folder_text)
 
     def _open_shortcuts_editor(self) -> None:
-        from PySide6.QtWidgets import QMessageBox
+        import shutil
+        import tarfile
+        import tempfile
+
+        from PySide6.QtWidgets import QDialog, QMessageBox
 
         sync_folder = config_module.get_sync_folder()
         if not sync_folder or not sync_folder.exists():
-            QMessageBox.warning(
-                self,
-                "No Sync Folder",
-                "Please configure a sync folder first.",
+            QMessageBox.warning(self, "No Sync Folder", "Please configure a sync folder first.")
+            return
+
+        archive = sync_folder / "current.tar"
+        if not archive.exists():
+            QMessageBox.information(
+                self, "No Backup",
+                "No backup archive found.\n\nRun a sync first to create the backup.",
             )
             return
 
-        shortcuts_json_path = sync_folder / "search_shortcuts.json"
-        if not shortcuts_json_path.exists():
-            has_data = _sync_folder_has_data(sync_folder)
+        work_dir = Path(tempfile.mkdtemp(prefix="cps-edit-"))
+        try:
+            with tarfile.open(str(archive)) as tf:
+                tf.extractall(str(work_dir), filter="data")
 
-            if has_data:
-                reply = QMessageBox.warning(
-                    self,
-                    "Corrupted Backup",
-                    "Search shortcuts backup file is missing.\n\n"
-                    "This indicates the backup is corrupted.\n"
-                    "Clean the sync folder and start fresh?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.Yes,
-                )
-                if reply == QMessageBox.StandardButton.Yes:
-                    self._clean_sync_folder(skip_confirmation=True)
-            else:
+            shortcuts_json_path = work_dir / "search_shortcuts.json"
+            if not shortcuts_json_path.exists():
                 QMessageBox.information(
-                    self,
-                    "No Shortcuts Yet",
+                    self, "No Shortcuts Yet",
                     "Search shortcuts haven't been extracted yet.\n\n"
                     "They will be created on the next sync.",
                 )
-            return
+                return
 
-        editor = ShortcutsEditorDialog(self, shortcuts_json_path=shortcuts_json_path)
-        editor.exec()
+            editor = ShortcutsEditorDialog(self, shortcuts_json_path=shortcuts_json_path)
+            if editor.exec() == QDialog.DialogCode.Accepted:
+                from src.sync_engine import SyncEngine
+                engine = SyncEngine(sync_folder)
+                engine._pack_to_archive(work_dir, archive)
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._log_handler is not None:
@@ -965,27 +936,16 @@ class SettingsDialog(QDialog):
             self._folder_edit.setText(str(sync_folder))
             self._folder_edit.blockSignals(False)
             if sync_folder.is_dir():
-                if _sync_folder_is_broken(sync_folder):
-                    from PySide6.QtWidgets import QMessageBox
-                    reply = QMessageBox.warning(
-                        self,
-                        "Broken Sync Folder",
-                        f"Sync folder is in broken state:\n{sync_folder}\n\n"
-                        "Found metadata.json but no current/ folder.\n"
-                        "Clean and start fresh?",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                        QMessageBox.StandardButton.Yes,
-                    )
-                    if reply == QMessageBox.StandardButton.Yes:
-                        self._clean_sync_folder(skip_confirmation=True)
-                    else:
+                has_data = _sync_folder_has_data(sync_folder)
+                if self._clean_btn:
+                    self._clean_btn.setVisible(has_data)
+                if not has_data:
+                    initial = self._pick_initial_upload_profile()
+                    if initial is None:
                         self._hide_profiles()
-                        if self._clean_btn:
-                            self._clean_btn.setVisible(False)
+                    else:
+                        self._do_initial_upload(sync_folder, initial)
                 else:
-                    has_data = _sync_folder_has_data(sync_folder)
-                    if self._clean_btn:
-                        self._clean_btn.setVisible(has_data)
                     self._rebuild_profiles(sync_folder)
             else:
                 self._hide_profiles()

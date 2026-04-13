@@ -14,9 +14,9 @@ import sys
 import tarfile
 import tempfile
 import time
+import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -104,8 +104,6 @@ PREFERENCES_KEYS: tuple[str, ...] = (
     "partition.per_host_zoom_levels",
     # Protocol handlers
     "custom_handlers",
-    # Print settings
-    "printing",
     # Per-site permission grants (exclude engagement/metadata noise)
     "profile.content_settings.exceptions.geolocation",
     "profile.content_settings.exceptions.notifications",
@@ -516,7 +514,12 @@ class SyncEngine:
     # ------------------------------------------------------------------
 
     def _sync_leveldb_dir(
-        self, profile_dir: Path, sync_dir: Path, subpath: str, direction: str = "both"
+        self,
+        profile_dir: Path,
+        sync_dir: Path,
+        subpath: str,
+        direction: str = "both",
+        name_filter: Callable[[str], bool] | None = None,
     ) -> None:
         """For each LevelDB unit under *subpath*, copy according to direction atomically."""
         profile_base = profile_dir / subpath
@@ -527,6 +530,8 @@ class SyncEngine:
             unit_names.update(d.name for d in profile_base.iterdir() if d.is_dir())
         if sync_base.exists():
             unit_names.update(d.name for d in sync_base.iterdir() if d.is_dir())
+        if name_filter is not None:
+            unit_names = {n for n in unit_names if name_filter(n)}
 
         def _sync_unit(name: str) -> None:
             profile_unit = profile_base / name
@@ -569,6 +574,58 @@ class SyncEngine:
     # ------------------------------------------------------------------
     # Archive helpers
     # ------------------------------------------------------------------
+
+    def _validate_archive_content(self, work_dir: Path) -> bool:
+        """Check each expected data type independently and log per-item status.
+
+        Returns False only when the staging directory contains no meaningful
+        content at all (i.e. profile discovery failed entirely), to prevent
+        overwriting the cloud archive with empty data.  Missing individual items
+        are logged as warnings so silent partial-backup failures are visible.
+        """
+        def _dir_nonempty(p: Path) -> bool:
+            return p.is_dir() and any(p.iterdir())
+
+        checks: dict[str, bool] = {
+            "extensions (unpacked)": _dir_nonempty(work_dir / "Extensions"),
+            "extensions (webstore manifest)": (work_dir / "webstore_extensions.json").is_file(),
+            "local_extension_settings": _dir_nonempty(work_dir / "Local Extension Settings"),
+            "indexed_db (extensions)": (work_dir / "IndexedDB").is_dir() and any(
+                d for d in (work_dir / "IndexedDB").iterdir()
+                if d.is_dir() and d.name.startswith("chrome-extension_")
+            ),
+            "local_storage": _dir_nonempty(work_dir / "Local Storage" / "leveldb"),
+            "bookmarks": (work_dir / "Bookmarks").is_file(),
+            "custom_dictionary": (work_dir / "Custom Dictionary.txt").is_file(),
+            "preferences": (work_dir / "preferences.json").is_file(),
+            "search_shortcuts": (work_dir / "search_shortcuts.json").is_file(),
+        }
+
+        for item, present in checks.items():
+            if present:
+                self.logger.debug("Archive check OK: %s", item)
+            else:
+                self.logger.warning("Archive check MISSING: %s", item)
+
+        present_items = [k for k, v in checks.items() if v]
+        missing_items = [k for k, v in checks.items() if not v]
+
+        if missing_items:
+            self.logger.warning(
+                "Archive integrity: %d/%d items present, missing: %s",
+                len(present_items),
+                len(checks),
+                ", ".join(missing_items),
+            )
+
+        if not present_items:
+            self.logger.error(
+                "Archive integrity check failed: no expected items found in staging dir "
+                "— skipping pack to avoid overwriting cloud archive with empty data"
+            )
+            return False
+
+        return True
 
     def _pack_to_archive(self, src_dir: Path, dst_archive: Path) -> None:
         """Pack src_dir into an uncompressed tar archive at dst_archive.
@@ -652,6 +709,15 @@ class SyncEngine:
             force_key = browser.windows_force_list_registry_key() if on_windows else None
             if force_key:
                 self._install_extensions_via_force_list(ext_ids, force_key, update_url)
+            # Clean up any file-based stubs that may have been written before switching
+            # to the registry path, so the browser doesn't process them a second time.
+            ext_dir = browser.external_extensions_dir()
+            if ext_dir is not None and ext_dir.exists():
+                for stub in ext_dir.glob("*.json"):
+                    stub.unlink(missing_ok=True)
+                    self.logger.info(
+                        "Removed orphaned extension stub (now using registry): %s", stub.stem
+                    )
         else:
             ext_dir = browser.external_extensions_dir()
             if ext_dir is not None:
@@ -660,8 +726,33 @@ class SyncEngine:
     def _install_extensions_via_registry(
         self, ext_ids: list[str], reg_subkey: str, update_url: str
     ) -> None:
-        """Write HKCU registry entries for Web Store extension auto-install on Windows."""
+        """Write HKCU registry entries for Web Store extension auto-install on Windows.
+
+        Also removes stale entries for IDs no longer in the manifest so a restore
+        does not re-install extensions that were dropped from the backup.
+        """
         import winreg  # Windows-only stdlib module
+
+        ext_id_set = set(ext_ids)
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_subkey) as base:
+                existing = []
+                i = 0
+                while True:
+                    try:
+                        existing.append(winreg.EnumKey(base, i))
+                        i += 1
+                    except OSError:
+                        break
+            for old_id in existing:
+                if old_id not in ext_id_set:
+                    try:
+                        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, rf"{reg_subkey}\{old_id}")
+                        self.logger.info("Removed stale registry extension: %s", old_id)
+                    except OSError:
+                        self.logger.warning("Failed to remove stale registry extension: %s", old_id)
+        except FileNotFoundError:
+            pass
 
         for ext_id in ext_ids:
             key_path = rf"{reg_subkey}\{ext_id}"
@@ -675,11 +766,24 @@ class SyncEngine:
     def _install_extensions_via_force_list(
         self, ext_ids: list[str], force_key: str, update_url: str
     ) -> None:
-        """Write HKCU ExtensionInstallForcelist policy entries so extensions auto-enable."""
+        """Write HKCU ExtensionInstallForcelist policy entries so extensions auto-enable.
+
+        Clears existing entries before writing so stale IDs don't persist.
+        """
         import winreg  # Windows-only stdlib module
 
         try:
             with winreg.CreateKey(winreg.HKEY_CURRENT_USER, force_key) as key:
+                value_names = []
+                i = 0
+                while True:
+                    try:
+                        value_names.append(winreg.EnumValue(key, i)[0])
+                        i += 1
+                    except OSError:
+                        break
+                for name in value_names:
+                    winreg.DeleteValue(key, name)
                 for i, ext_id in enumerate(ext_ids, start=1):
                     winreg.SetValueEx(key, str(i), 0, winreg.REG_SZ, f"{ext_id};{update_url}")
             self.logger.info("Wrote ExtensionInstallForcelist with %d entries", len(ext_ids))
@@ -689,9 +793,18 @@ class SyncEngine:
     def _install_extensions_via_stubs(
         self, ext_ids: list[str], ext_dir: Path, update_url: str
     ) -> None:
-        """Write JSON stub files to the External Extensions directory."""
+        """Write JSON stub files to the External Extensions directory.
+
+        Also removes stale stubs for IDs no longer in the manifest.
+        """
         ext_dir.mkdir(parents=True, exist_ok=True)
         payload = json.dumps({"external_update_url": update_url})
+        ext_id_set = set(ext_ids)
+
+        for stub in ext_dir.glob("*.json"):
+            if stub.stem not in ext_id_set:
+                stub.unlink(missing_ok=True)
+                self.logger.info("Removed stale extension stub: %s", stub.stem)
 
         for ext_id in ext_ids:
             stub = ext_dir / f"{ext_id}.json"
@@ -741,6 +854,11 @@ class SyncEngine:
             items_to_delete.append(profile_path / "Sync Extension Settings")
             items_to_delete.append(profile_path / "Extension State")
             items_to_delete.append(profile_path / "Extension Rules")
+            indexed_db = profile_path / "IndexedDB"
+            if indexed_db.exists():
+                for entry in indexed_db.iterdir():
+                    if entry.is_dir() and entry.name.startswith("chrome-extension_"):
+                        items_to_delete.append(entry)
 
         if dt.get("local_storage", True):
             items_to_delete.append(profile_path / "Local Storage")
@@ -783,6 +901,7 @@ class SyncEngine:
             for ext_id in excluded_ext_ids:
                 cmd += ["--exclude", f"Extensions/{ext_id}/**"]
                 cmd += ["--exclude", f"Local Extension Settings/{ext_id}/**"]
+                cmd += ["--exclude", f"IndexedDB/chrome-extension_{ext_id}_*/**"]
 
             self.logger.debug("Executing restore: %s", " ".join(cmd))
 
@@ -816,12 +935,19 @@ class SyncEngine:
         if json_path.exists() and prefs_path.exists():
             saved = json.loads(json_path.read_bytes())
             prefs = json.loads(prefs_path.read_bytes())
+            if dt.get("extensions", True):
+                # Clear the browser's pre-existing extension registry so that
+                # browser-bundled extensions (e.g. Helium's built-in uBlock)
+                # don't survive the restore.  Extensions in the backup manifest
+                # will be re-registered via registry/stubs and Chromium will
+                # re-populate extensions.settings on next launch.
+                prefs.get("extensions", {}).pop("settings", None)
             _merge_prefs(prefs, saved)
             prefs_path.write_bytes(json.dumps(prefs, separators=(",", ":")).encode())
             self.logger.info("Merged preferences.json into %s", prefs_path)
 
         if dt.get("search_shortcuts", True):
-            self._restore_search_shortcuts(profile_path, self.sync_folder)
+            self._restore_search_shortcuts(profile_path, sync_profile_path)
 
         self.logger.info("Profile restore complete: %s", profile_path.name)
 
@@ -944,6 +1070,9 @@ class SyncEngine:
                         # adopt the known guid so it survives round-trip through the JSON.
                         sync_guid = default_guid
                         is_default = True
+                elif default_engine_url and row[2] == default_engine_url:
+                    # default_guid is empty in Preferences; match by URL only.
+                    is_default = True
                 shortcuts.append(
                     {
                         "keyword": row[0],
@@ -979,9 +1108,11 @@ class SyncEngine:
     def _restore_search_shortcuts(self, profile_path: Path, sync_folder_root: Path) -> None:
         """Restore search shortcuts from global JSON file to Web Data database (overwrite mode).
 
-        Reads search_shortcuts.json from sync folder root and replaces all user-created
-        (prepopulate_id = 0) keywords in the Web Data database.  Prepopulated built-ins
-        are left untouched to avoid triggering Chromium's keyword-table re-initialisation.
+        Wipes all keyword rows (including built-ins) then inserts only user shortcuts from
+        the JSON.  Chromium re-adds its built-ins on next launch, but to prevent it from
+        also overriding default_search_provider.guid via choice-screen re-initialization,
+        choice_screen_completion_program is set to a non-zero sentinel if not already
+        present in Preferences.
 
         If any shortcut is flagged is_default, Preferences is updated so Chromium uses it
         as the default search engine after the next launch.
@@ -1009,11 +1140,18 @@ class SyncEngine:
             # whose hash doesn't match Pickle(id, url).  Load the OSCrypt key
             # once so we can compute a valid blob for every inserted row.
             aesgcm = self._load_oscrypt_key(profile_path.parent)
+            if platform.system() == "Windows" and aesgcm is None:
+                self.logger.warning(
+                    "Cannot restore search shortcuts to %s: OSCrypt key unavailable "
+                    "(launch the browser once to initialize Local State, then apply backup again)",
+                    profile_path.name,
+                )
+                return
 
             conn = sqlite3.connect(str(web_data_dst))
             cursor = conn.cursor()
 
-            cursor.execute("DELETE FROM keywords WHERE prepopulate_id = 0")
+            cursor.execute("DELETE FROM keywords")
 
             # Predict the auto-increment ids so they match the url_hash computation.
             next_id = (
@@ -1021,12 +1159,18 @@ class SyncEngine:
             )
 
             restored_default_guid: str | None = None
+            default_shortcut: dict | None = None
+            default_row_id: int | None = None
 
             for i, shortcut in enumerate(shortcuts):
                 row_id = next_id + i
                 sync_guid = shortcut.get("sync_guid") or ""
                 if shortcut.get("is_default"):
-                    restored_default_guid = sync_guid or None
+                    if not sync_guid:
+                        sync_guid = str(uuid.uuid4())
+                    restored_default_guid = sync_guid
+                    default_shortcut = shortcut
+                    default_row_id = row_id
 
                 url_hash_blob: bytes | None = None
                 if aesgcm is not None:
@@ -1076,12 +1220,88 @@ class SyncEngine:
                     ),
                 )
 
+            # Sync the default-engine pointer in keywords_metadata so Chromium finds
+            # our inserted engine when it validates the default on startup — otherwise
+            # the stale ID causes Chromium to fall into its built-in repopulation path
+            # and reset the default to DuckDuckGo / its own choice.
+            # Also delete the encrypted backup blob: it anchors the old default and
+            # Chromium will use it to overwrite our Preferences guid if it exists.
+            if default_row_id is not None:
+                try:
+                    updated = cursor.execute(
+                        "UPDATE keywords_metadata SET value = ? "
+                        "WHERE key = 'Default Search Provider ID'",
+                        (str(default_row_id),),
+                    ).rowcount
+                    if updated == 0:
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO keywords_metadata (key, value) VALUES (?, ?)",
+                            ("Default Search Provider ID", str(default_row_id)),
+                        )
+                    cursor.execute(
+                        "DELETE FROM keywords_metadata "
+                        "WHERE key = 'Default Search Provider Backup'",
+                    )
+                except sqlite3.OperationalError:
+                    self.logger.debug("keywords_metadata unavailable — skipping ID sync")
+
             conn.commit()
             conn.close()
 
             # Point Preferences at the restored default engine so Chromium picks it up.
+            # Also clear reset_occurred so Chromium doesn't override our choice on next launch.
             if restored_default_guid and prefs is not None:
-                prefs.setdefault("default_search_provider", {})["guid"] = restored_default_guid
+                dsp = prefs.setdefault("default_search_provider", {})
+                dsp["guid"] = restored_default_guid
+                dsp.pop("reset_occurred", None)
+                dsp.pop("reset_time", None)
+
+                if default_shortcut is not None and default_row_id is not None:
+                    alt_urls_raw = default_shortcut.get("alternate_urls", "[]")
+                    try:
+                        alt_urls = (
+                            json.loads(alt_urls_raw)
+                            if isinstance(alt_urls_raw, str)
+                            else alt_urls_raw
+                        )
+                    except (json.JSONDecodeError, TypeError):
+                        alt_urls = []
+                    mirror = {
+                        "alternate_urls": alt_urls,
+                        "contextual_search_url": "",
+                        "created_from_play_api": False,
+                        "date_created": str(default_shortcut.get("date_created", 0)),
+                        "favicon_url": default_shortcut.get("favicon_url", ""),
+                        "id": str(default_row_id),
+                        "image_search_branding_label": "",
+                        "image_search_post_params": "",
+                        "image_translate_source_language_param_key": "",
+                        "image_translate_source_language_param_value": "",
+                        "image_translate_target_language_param_key": "",
+                        "image_url": "",
+                        "image_url_post_params": "",
+                        "is_active": default_shortcut.get("is_active", 1),
+                        "keyword": default_shortcut.get("keyword", ""),
+                        "last_modified": str(default_shortcut.get("last_modified", 0)),
+                        "logo_url": "",
+                        "new_tab_url": "",
+                        "policy_origin": "",
+                        "prepopulate_id": default_shortcut.get("prepopulate_id", 0),
+                        "safe_for_autoreplace": bool(
+                            default_shortcut.get("safe_for_autoreplace", False)
+                        ),
+                        "search_intent_params": [],
+                        "short_name": default_shortcut.get("short_name", ""),
+                        "side_image_search_param": "",
+                        "suggestions_url": default_shortcut.get("suggest_url", ""),
+                        "synced_guid": restored_default_guid,
+                        "url": default_shortcut.get("url", ""),
+                        "visual_url": "",
+                    }
+                    prefs.setdefault("default_search_provider_data", {})[
+                        "mirrored_template_url_data"
+                    ] = mirror
+
                 prefs_path.write_text(json.dumps(prefs), encoding="utf-8")
 
             self._report("search shortcuts restored")
@@ -1156,9 +1376,30 @@ class SyncEngine:
         self.logger.info("Syncing profile: %s ↔ %s", profile_path, sync_profile_path)
 
         if dt.get("extensions", True):
+            from src import config as _config
+
+            excluded_ext_ids = set(_config.get_excluded_ext_settings_ids())
             self._sync_extensions(profile_path, sync_profile_path, direction)
-            for subpath in ("Local Extension Settings", "Sync Extension Settings"):
-                self._sync_leveldb_dir(profile_path, sync_profile_path, subpath, direction)
+            # Local Extension Settings: skip excluded IDs (they contain auto-regenerated cache).
+            # Sync Extension Settings: always sync fully — it holds the user-configured subset
+            # and is small by design (chrome.storage.sync quota is 100 KB).
+            self._sync_leveldb_dir(
+                profile_path, sync_profile_path, "Local Extension Settings", direction,
+                name_filter=lambda n, ex=excluded_ext_ids: n not in ex,
+            )
+            self._sync_leveldb_dir(
+                profile_path, sync_profile_path, "Sync Extension Settings", direction,
+            )
+            self._sync_leveldb_dir(
+                profile_path,
+                sync_profile_path,
+                "IndexedDB",
+                direction,
+                name_filter=lambda n, ex=excluded_ext_ids: (
+                    n.startswith("chrome-extension_")
+                    and not any(n.startswith(f"chrome-extension_{e}_") for e in ex)
+                ),
+            )
 
         if dt.get("local_storage", True):
             self._sync_leveldb_dir(
@@ -1181,9 +1422,9 @@ class SyncEngine:
 
         if dt.get("search_shortcuts", True):
             if direction == "push":
-                self._extract_search_shortcuts(profile_path, self.sync_folder)
+                self._extract_search_shortcuts(profile_path, sync_profile_path)
             if direction in ("pull", "both"):
-                self._restore_search_shortcuts(profile_path, self.sync_folder)
+                self._restore_search_shortcuts(profile_path, sync_profile_path)
 
         self.logger.info("Profile sync complete: %s", profile_path.name)
 
@@ -1214,9 +1455,7 @@ class SyncEngine:
         profiles_needing_restore = _config.get_profiles_needing_restore()
         data_types = DEFAULT_DATA_TYPES
 
-        # Detect first-time sync (no metadata.json exists yet)
-        meta_path = self.sync_folder / "metadata.json"
-        is_first_sync = not meta_path.exists()
+        is_first_sync = not (self.sync_folder / "current.tar").exists()
 
         # Reset sync statistics
         self._synced_count = 0
@@ -1259,6 +1498,21 @@ class SyncEngine:
             if current_archive.exists():
                 self._report("Unpacking...")
                 self._unpack_archive(current_archive, work_dir)
+
+            # Prune excluded extension settings from the unpacked work dir so they
+            # disappear from the next tar even if the old archive still contained them.
+            excluded_ext_ids = _config.get_excluded_ext_settings_ids()
+            for ext_id in excluded_ext_ids:
+                stale = work_dir / "Local Extension Settings" / ext_id
+                if stale.exists():
+                    shutil.rmtree(stale)
+                    self.logger.info("Pruned excluded ext settings: %s", ext_id)
+                indexed_db = work_dir / "IndexedDB"
+                if indexed_db.exists():
+                    for entry in indexed_db.iterdir():
+                        if entry.is_dir() and entry.name.startswith(f"chrome-extension_{ext_id}_"):
+                            shutil.rmtree(entry)
+                            self.logger.info("Pruned excluded ext IndexedDB: %s", entry.name)
 
             for browser in browsers_to_sync:
                 if enabled_browsers.get(browser.name) is False:
@@ -1343,11 +1597,10 @@ class SyncEngine:
             # Skipping when synced_count == 0 prevents the file-watcher from seeing
             # an updated archive mtime and immediately triggering another no-op sync.
             if success and self._synced_count > 0 and any(work_dir.iterdir()):
-                self._report("Packing...")
-                self._pack_to_archive(work_dir, current_archive)
+                if self._validate_archive_content(work_dir):
+                    self._report("Packing...")
+                    self._pack_to_archive(work_dir, current_archive)
             shutil.rmtree(work_dir)
-
-        self.update_metadata()
 
         # Log summary
         summary = (
@@ -1360,17 +1613,6 @@ class SyncEngine:
             self.logger.info("Sync complete — %s", summary)
 
         return {"is_first_sync": is_first_sync, "skipped_running": skipped_running}
-
-    def update_metadata(self) -> None:
-        """Write metadata.json to the sync folder."""
-        metadata = {
-            "last_sync": datetime.now(tz=UTC).isoformat(),
-            "version": 1,
-        }
-        meta_path = self.sync_folder / "metadata.json"
-        meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-        self.logger.info("Metadata updated: %s", meta_path)
-
 
 _clean_logger = logging.getLogger(__name__ + ".clean")
 

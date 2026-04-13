@@ -184,6 +184,18 @@ def set_profile_sync_enabled(browser: str, profile: str, enabled: bool) -> None:
         _LOG.info("Auto-sync enabled for %s/%s", browser, profile)
 
 
+def get_last_sync() -> str:
+    """Return ISO timestamp of the last successful sync, or empty string."""
+    return load().get("last_sync", "")
+
+
+def set_last_sync(ts: str) -> None:
+    """Persist the last sync timestamp."""
+    data = load()
+    data["last_sync"] = ts
+    save(data)
+
+
 def get_ungoogled_only_extensions() -> list[str]:
     """Return extension IDs that should only be installed in ungoogled browsers.
 
@@ -200,5 +212,39 @@ def set_ungoogled_only_extensions(ext_ids: list[str]) -> None:
     data["ungoogled_only_extensions"] = ext_ids
     save(data)
     _LOG.info("ungoogled_only_extensions updated: %s", ext_ids)
+
+
+# Extensions whose Local Extension Settings LevelDB is dominated by auto-regenerated cache
+# and not worth backing up. Sync Extension Settings is never excluded — it is small by
+# design (chrome.storage.sync quota) and contains the user-configured subset.
+#
+# uBlock Origin:  ~25 MB of compiled filter-list caches (re-downloaded on every launch)
+# Dark Reader:     ~3 MB of "Newsmaker" in-app news-feed cache; user theme lives in Sync
+# Twitter helper:  ~96 KB of twitter_location_cache (re-fetched on profile visits)
+_DEFAULT_EXCLUDED_EXT_SETTINGS: list[str] = [
+    "cjpalhdlnbpafiamejdnhcphjbkeiagm",  # uBlock Origin
+    "eimadpbcbfnmbkopoojfekhnkhdbieeh",  # Dark Reader (Newsmaker cache; theme in Sync)
+    "jnpglhiolmmfchhpoipnknmffmpmogmc",  # Twitter location cache helper
+]
+
+
+def get_excluded_ext_settings_ids() -> list[str]:
+    """Return extension IDs whose Local Extension Settings / IndexedDB are excluded from backup.
+
+    These are extensions whose settings LevelDB is dominated by auto-regenerated cache
+    (e.g. compiled filter lists) and not worth syncing.
+    """
+    cfg = load()
+    if "excluded_ext_settings_ids" not in cfg:
+        return list(_DEFAULT_EXCLUDED_EXT_SETTINGS)
+    return cfg["excluded_ext_settings_ids"]
+
+
+def set_excluded_ext_settings_ids(ext_ids: list[str]) -> None:
+    """Persist the list of extension IDs to exclude from Local Extension Settings backup."""
+    data = load()
+    data["excluded_ext_settings_ids"] = ext_ids
+    save(data)
+    _LOG.info("excluded_ext_settings_ids updated: %s", ext_ids)
 
 
