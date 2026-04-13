@@ -1,42 +1,53 @@
  # chromium-profile-syncer
 
-A cross-platform PySide6 system tray application that syncs Chromium browser profiles between machines via a shared folder (e.g. Syncthing, Dropbox, or a network share).
+Highly vibecoded! Unstable! Proof of concept! Dont use (yet)!
 
-**Smart syncing:** Only syncs unpacked/developer extensions (full code). Web Store extensions are registered by ID and auto-download fresh on new machines — saves ~1.1GB (80% space reduction).
+Cross-platform (Windows/MacOS/Linux) Chromium-based browsers bidirectional
+profiles sync system to use with cloud folders (I use selfhosted OpenCloud).
 
 ## Supported Browsers
 
-- **Helium** — Chromium-based browser by imput
+- **Thorium**
+- **Helium**
+- **Chrome**
+- **Yandex**
 
-The architecture supports adding more Chromium-derived browsers with minimal changes (one file per browser).
+The architecture supports adding more Chromium-derived browsers with minimal
+changes (one file per browser).
 
 ## What Gets Synced
 
-| Data                       | Synced                                                |
-| -------------------------- | ----------------------------------------------------- |
-| Bookmarks                  | Yes                                                   |
-| Extensions (unpacked)      | Yes — full code synced                                |
-| Extensions (Web Store)     | ID only — auto-downloads from Chrome Web Store        |
-| Extension settings/storage | Yes                        |
-| Local Storage              | Yes                        |
-| Preferences                | Yes                        |
-| Custom Dictionary          | Yes                        |
-| Web Data (search engines)  | No (skipped for v1)        |
+| Data                             | Synced                                   |
+| -------------------------------- | ---------------------------------------- |
+| Bookmarks                        | Yes                                      |
+| Extensions (unpacked)            | Yes — full code synced                   |
+| Extensions (Web Store)           | IDs only — with autoinstall              |
+| Extension settings/storage/cache | Yes (not 100% sure works for everything) |
+| Local Storage                    | Yes                                      |
+| Preferences                      | Yes — unencrypted ones                   |
+| Custom Dictionary                | Yes                                      |
+| Search Shortcuts                 | Yes — user-created engines only          |
+| Themes                           | Yes — only active one                    |
 
-### Smart Extension Syncing
+### Search Shortcuts
 
-**Web Store extensions** (e.g., uBlock Origin, React DevTools):
-- Only extension ID is saved to `webstore_extensions.json`
-- Browser auto-downloads from Chrome Web Store on next launch
-- **Saves ~1.1GB** across current + 2 backups (80% space reduction)
+User-created search engines (custom shortcuts in the omnibox) are extracted from
+the browser's `Web Data` SQLite database and stored as `search_shortcuts.json`
+in the sync folder root. This file is shared across all browsers syncing to the
+same folder.
 
-**Unpacked/developer extensions:**
-- Full code is synced (can't be re-downloaded)
-- Detected by absence of `_metadata/verified_contents.json`
+Built-in engines (Google, Bing, etc.) are never backed up.
 
 ### What Does NOT Sync
 
-Passwords, cookies, payment data, and browsing history are **intentionally excluded**. These are protected by OS-level encryption (e.g. macOS Keychain, Windows DPAPI) that ties the data to a specific machine. Copying them as-is to another machine would either fail to decrypt or cause data corruption.
+Passwords, cookies, payment data, and browsing history are
+**intentionally excluded**. These are protected by OS-level encryption (e.g.
+macOS Keychain, Windows DPAPI) that ties the data to a specific machine.
+
+Sessions, autofill data/profiles, omnibox shortcuts - no need, annoying for my
+use cases.
+
+Favicons - not worth syncing.
 
 ### Trash Files Excluded
 
@@ -45,64 +56,13 @@ Files automatically excluded from sync (waste space, no value):
 
 ## Installation
 
-### Requirements
-
-**Runtime dependency:** [rclone](https://rclone.org/) — Fast file sync tool
-- **macOS:** `brew install rclone`
-- **Linux:** `sudo apt install rclone` or `sudo pacman -S rclone`
-- **Windows:** Download from [rclone.org/downloads](https://rclone.org/downloads/)
-
-### Download Pre-built Binary
-
-Download the latest release for your platform from the [Releases](../../releases) page.
-
-> **Note:** PyInstaller `.app` bundles the entire PySide6 runtime and are typically **80–120 MB**. Each platform (macOS, Windows, Linux) requires its own native build — cross-compilation is not supported.
-
-#### macOS
-
-1. Install rclone: `brew install rclone`
-2. Download `chromium-profile-syncer.app`
-3. Move to `/Applications` or `~/Applications`
-4. Right-click → **Open** → confirm (Gatekeeper warning on first launch)
-
-Or remove quarantine flag:
-~~~sh
-xattr -cr chromium-profile-syncer.app
-~~~
-
 ### Build from Source
 
 Requirements: **Python 3.12+**, **[uv](https://docs.astral.sh/uv/)**, **rclone**
 
 ~~~sh
-git clone <repo-url>
-cd chromium-profile-syncer
-
-# Install rclone first (choose your platform)
-brew install rclone              # macOS
-sudo apt install rclone          # Linux (Debian/Ubuntu)
-sudo pacman -S rclone            # Linux (Arch)
-# Windows: Download from https://rclone.org/downloads/
-~~~
-
-~~~sh
-# Build and install (all platforms)
 make install
-
-# Or manual build
-uv sync --group dev
-uv run python build.py --install
 ~~~
-
-**Build output locations:**
-- **macOS:** `dist/chromium-profile-syncer.app`
-- **Windows:** `dist/chromium-profile-syncer.exe`
-- **Linux:** `dist/chromium-profile-syncer`
-
-**Install locations:**
-- **macOS:** `~/Applications/chromium-profile-syncer.app`
-- **Windows:** `%LOCALAPPDATA%\Programs\chromium-profile-syncer\chromium-profile-syncer.exe`
-- **Linux:** `~/.local/bin/chromium-profile-syncer`
 
 **What `install` does:**
 1. Builds the executable/bundle
@@ -111,117 +71,38 @@ uv run python build.py --install
 4. Launches the app
 5. **(macOS only)** Removes Gatekeeper quarantine
 
-## Usage
-
-1. Launch the executable — the app appears in the system tray.
-2. On first run, the Settings dialog opens automatically.
-3. Configure the **sync folder** (the shared directory that holds synced profile data).
-4. Enable the browsers you want to sync.
-5. Use the tray icon menu to trigger a manual sync or open Settings.
-
-The app can optionally start at login (configure in Settings).
-
-### Starting Fresh
-
-If you want to clear all synced data and start over:
-1. Open **Settings**
-2. Click the **Clean** button (appears next to Browse when sync folder has data)
-3. Confirm deletion
-4. All synced data (current/, backup-1/, backup-2/, metadata.json) will be deleted
-5. You can then choose a new profile to upload
-
-### Tray Menu
-
-- **Sync Now** — Manually trigger sync
-- **Settings** — Configure browsers, sync folder, data types
-- **Status line** — Shows last sync timestamp or current operation
-- **Quit** — Exit the app
-
-### Progress Display
-
-The tray menu and icon show real-time sync status:
-- Icon color changes (gray → blue → gray/orange/red)
-- "Sync Now" button shows current operation during sync
-- Status line updates with file/folder names being synced
-- rclone progress percentages: "Creating backup (45%)"
-
-### Tray Icon States
-
-- **Gray** — Idle
-- **Blue** — Syncing
-- **Orange** — Waiting for browser to close
-- **Red** — Error
-
-## Development
-
-~~~sh
-# Install all dependencies including dev tools
-uv sync --group dev
-
-# Run tests + linting (CI)
-make ci
-
-# Run tests only
-uv run pytest
-
-# Lint only
-uv run ruff check src tests
-
-# Build and install
-make install
-
-# Run from source
-uv run python -m src.main
-~~~
-
-### Test Coverage
-
-119 passing tests across:
-- `test_sync_engine.py` — 58 tests (core sync logic, smart extension detection)
-- `test_browsers.py` — 13 tests (browser detection, profile discovery)
-- `test_settings.py` — 20 tests (config persistence, UI)
-- `test_config.py` — 8 tests (JSON config read/write)
-- `test_autostart.py` — 12 tests (platform-specific autostart)
-- `test_tray.py` — 15 tests (tray app orchestration)
-
-## Architecture
+### Sync Folder Layout
 
 ~~~
-src/
-├── main.py              # Entry point, single-instance check
-├── tray.py              # System tray app, menu, sync orchestration
-├── sync_engine.py       # Core sync logic, smart extension detection
-├── settings.py          # Settings dialog UI (with Clean button)
-├── config.py            # Config persistence (JSON)
-├── autostart.py         # Platform-specific autostart registration
-├── single_instance.py   # File-based locking
-└── browsers/
-    ├── base.py          # Abstract BrowserBase class
-    ├── helium.py        # Helium browser implementation
-    └── __init__.py      # ALL_BROWSERS list
+sync-folder/
+├── current.tar              # Compressed tar archive of all synced profile data
+├── metadata.json            # Sync timestamps and version info
+└── search_shortcuts.json    # Custom search engines (shared across browsers)
 ~~~
 
 ### Key Design Decisions
 
-**Smart extension syncing:**
-- Detects Web Store extensions via `_metadata/verified_contents.json` signature
-- Only syncs unpacked/developer extensions (full code)
-- Web Store extensions registered by ID in manifest, auto-download on new machines
+#### Search shortcuts
 
-**Backup rotation:**
-- Uses rclone for fast parallel file transfer (8 parallel transfers)
-- Parses `--stats-one-line` for real-time progress percentages
-- Automatic trash file exclusion via `--exclude "._*"`
+Extracts user-created search engines from `Web Data` SQLite
+(`prepopulate_id = 0` only). On Windows, computes mandatory `url_hash` BLOB
+(AES-256-GCM over SHA-256 of a Chromium Pickle); rows without a valid hash are
+silently dropped at startup. See
+[docs/search-shortcuts.md](./docs/search-shortcuts.md) for full implementation
+details.
 
-**First-sync detection:**
-- Checks for `metadata.json` existence
-- First sync shows "Initial setup complete" (no timestamp spam)
-- Subsequent syncs show "Last sync: [ISO timestamp]"
+#### Profile saved into single file archive
 
-**Config locations:**
-- **macOS/Linux:** `~/.config/chromium-profile-syncer/config.json`
-- **Windows:** `%APPDATA%\chromium-profile-syncer\config.json`
+Profile intentionally saved in `.tar` archive to compress files and operate only
+one file, so there will be less `inotify` events in clouds (in other words
+clouds prefer one big file, than thousands small ones).
 
-**Lock file:**
-- **macOS/Linux:** `~/.config/chromium-profile-syncer/app.lock`
-- **Windows:** `%APPDATA%\chromium-profile-syncer\app.lock`
+#### Extensions installation system
+
+It's impossible to have identically working extensions installing system across
+all browsers and it also may conflict. For example, Thorium and Chrome use the
+same registry paths to look for extensions, so if you start managing Thorium,
+extensions will also install to all used profiles of Chrome.
+
+For Windows extensions installed via registry keys, Linux/MacOS via external
+extensions `.json` files (no other ways to manage those).

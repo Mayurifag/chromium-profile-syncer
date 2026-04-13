@@ -1232,14 +1232,15 @@ def test_find_rclone_from_path() -> None:
         find_rclone.cache_clear()
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="Tests macOS/Linux-specific fallback paths")
 def test_find_rclone_fallback() -> None:
     find_rclone.cache_clear()
+    fake_path = Path("/fake/rclone")
     try:
         with patch("shutil.which", return_value=None), \
-             patch.object(Path, "exists", lambda self: str(self) == "/opt/homebrew/bin/rclone"):
+             patch("src.sync_engine._FALLBACK_PATHS", [fake_path]), \
+             patch.object(Path, "exists", lambda self: self == fake_path):
             result = find_rclone()
-        assert result == Path("/opt/homebrew/bin/rclone")
+        assert result == fake_path
     finally:
         find_rclone.cache_clear()
 

@@ -83,7 +83,7 @@ def _linux(enabled: bool) -> None:
     desktop_path = Path(xdg_config) / "autostart" / f"{APP_NAME}.desktop"
     if enabled:
         args = _exe_args()
-        exec_cmd = " ".join(args)
+        exec_cmd = " ".join(f'"{a}"' if " " in a else a for a in args)
         desktop_content = f"""[Desktop Entry]
 Type=Application
 Name={APP_NAME}

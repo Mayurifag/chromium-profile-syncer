@@ -3,7 +3,7 @@
 ## Overview
 
 Cross-platform PySide6 system tray application that syncs Chromium browser profiles
-(extensions, settings, bookmarks) across machines via a shared folder.
+(extensions, settings, bookmarks, search shortcuts) across machines via a shared folder.
 
 ## Tech Stack
 
@@ -12,27 +12,33 @@ Cross-platform PySide6 system tray application that syncs Chromium browser profi
 - **ruff** for linting
 - **pytest** for tests
 - **PyInstaller** for single-file executables
-- Can use system-installed **ripgrep** for fast file scanning
 
 ## Core Principle
 
-Keep code minimal. This is v1 — no edge case handling unless obvious. Simple, readable, works.
+Keep code minimal. Simple, readable, works.
 
 ## Architecture
 
 ~~~
 chromium-profile-syncer/
 ├── src/
-│   ├── main.py           # Entry point, tray app
-│   ├── sync_engine.py    # Core sync logic
-│   ├── settings.py       # Settings UI + persistence
-│   ├── watcher.py        # File watcher for sync folder
-│   ├── browsers/         # One file per browser
-│   │   ├── base.py       # Abstract browser class
-│   │   ├── thorium.py
-│   │   ├── helium.py
-│   │   └── ...           # Easy to add more
-│   └── icons/            # Tray icons for states
+│   ├── main.py               # Entry point, single-instance check
+│   ├── tray.py               # System tray app, menu, sync orchestration
+│   ├── sync_engine.py        # Core sync logic, tar archive, extension detection
+│   ├── settings.py           # Settings dialog UI (with Clean button)
+│   ├── config.py             # Config persistence (JSON)
+│   ├── autostart.py          # Platform-specific autostart registration
+│   ├── single_instance.py    # File-based locking
+│   ├── log_viewer.py         # GUI log handler
+│   ├── shortcuts_editor.py   # Search shortcuts editing dialog
+│   ├── dracula.py            # Dark theme stylesheet
+│   └── browsers/             # One file per browser
+│       ├── base.py           # Abstract browser class
+│       ├── thorium.py
+│       ├── helium.py
+│       ├── chrome.py
+│       ├── yandex.py
+│       └── __init__.py       # ALL_BROWSERS list
 ├── tests/
 ├── pyproject.toml
 └── README.md
@@ -48,7 +54,7 @@ Each browser file defines:
 
 Base class handles the actual sync operations (shared logic).
 
-## Supported Browsers (at launch)
+## Supported Browsers
 
 ### Thorium
 - **Windows:** `%LOCALAPPDATA%\Thorium\User Data`
@@ -60,7 +66,17 @@ Base class handles the actual sync operations (shared logic).
 - **macOS:** `~/Library/Application Support/net.imput.helium`
 - **Linux:** `~/.config/net.imput.helium`
 
-More browsers can be added later via the plugin pattern (one file per browser).
+### Chrome
+- **Windows:** `%LOCALAPPDATA%\Google\Chrome\User Data`
+- **macOS:** `~/Library/Application Support/Google/Chrome`
+- **Linux:** `~/.config/google-chrome`
+
+### Yandex
+- **Windows:** `%LOCALAPPDATA%\Yandex\YandexBrowser\User Data`
+- **macOS:** `~/Library/Application Support/Yandex/YandexBrowser`
+- **Linux:** `~/.config/yandex-browser`
+
+More browsers can be added via the plugin pattern (one file per browser).
 
 ## Chromium Profile Structure — Research Findings
 
@@ -95,11 +111,11 @@ User Data/
 | Extensions (unpacked)  | `Extensions/<id>/<version>/`     | Files        | YES (only developer/unpacked extensions)            |
 | Extensions (Web Store) | `Extensions/<id>/<version>/`     | Files        | ID ONLY (auto-download from Chrome Web Store)       |
 | Extension settings     | `Local Extension Settings/<id>/` | LevelDB      | YES                                                 |
-| Extension sync storage | `Extension Settings/<id>/`       | LevelDB      | YES (renamed to "Sync Extension Settings")          |
-| Bookmarks              | `Bookmarks`                      | JSON         | YES                                |
-| Custom dictionary      | `Custom Dictionary.txt`          | Plain text   | YES                                |
-| Local Storage          | `Local Storage/leveldb/`         | LevelDB      | YES                                |
-| Search engines         | `Web Data` (keywords table)      | SQLite       | NO (skipped for v1)                |
+| Extension sync storage | `Extension Settings/<id>/`       | LevelDB      | YES                                                 |
+| Bookmarks              | `Bookmarks`                      | JSON         | YES                                                 |
+| Custom dictionary      | `Custom Dictionary.txt`          | Plain text   | YES                                                 |
+| Local Storage          | `Local Storage/leveldb/`         | LevelDB      | YES                                                 |
+| Search shortcuts       | `Web Data` (keywords table)      | SQLite → JSON | YES (user-created engines only; extracted to search_shortcuts.json) |
 
 ### What NOT to Sync (encrypted / sensitive)
 
@@ -116,8 +132,8 @@ User Data/
   will reset tampered values on launch. This is fine — the browser recovers gracefully,
   but it means some settings may not transfer perfectly.
 - **Web Data** is a shared SQLite file containing both search engines (`keywords` table)
-  and encrypted credit card data. To sync search engines, we need to extract/import only
-  the `keywords` table via SQL, not copy the whole file.
+  and encrypted credit card data. Only user-created search engines (`prepopulate_id = 0`)
+  are extracted and stored in `search_shortcuts.json`; the file itself is never copied.
 - **LevelDB directories** must be copied as complete directories (all files together) or
   not at all. Partial copies corrupt the database.
 - **Extension code** uses manifest.json with a `"version"` field that can be compared for
@@ -126,7 +142,7 @@ User Data/
 ### Smart Extension Syncing (Space Optimization)
 
 **Problem:** Syncing full extension code wastes massive space:
-- Web Store extensions can be re-downloaded (477MB × 3 backups = 1.4GB wasted)
+- Web Store extensions can be re-downloaded
 - Only unpacked/developer extensions can't be re-downloaded
 
 **Solution:**
@@ -140,7 +156,7 @@ User Data/
    - Generate External Extensions JSON stubs from manifest
    - Browser auto-downloads Web Store extensions on next launch
 
-**Space savings:** ~1.1GB (80% reduction) — backups shrink from 1.6GB → 300MB
+**Space savings:** ~1.1GB (80% reduction)
 
 ### Trash File Exclusion
 
@@ -154,8 +170,8 @@ Files excluded from sync (waste space, no value):
 ## Settings Window
 
 - Sync folder path + browse button + clean button
-  - **Clean button:** Visible only when sync folder has data. Deletes all synced data 
-    (current/, backup-1/, backup-2/, metadata.json) and clears config to start fresh.
+  - **Clean button:** Visible only when sync folder has data. Deletes all synced data
+    (`current.tar`, `metadata.json`, `search_shortcuts.json`) and clears config to start fresh.
     Shows confirmation dialog before deletion.
 - List of detected browsers with checkboxes
   - If browser has multiple profiles: expandable list with profile checkboxes
@@ -200,7 +216,6 @@ Progress shown in tray menu (no separate window):
 - Icon color changes during sync
 - "Sync Now" button shows current operation: "⏳ [truncated filename]"
 - Status line shows full operation: "Syncing: [full filename/path]"
-- rclone percentages shown inline: "Creating backup (45%)"
 
 ### Button States During Sync
 
@@ -213,12 +228,12 @@ Progress shown in tray menu (no separate window):
 ### Triggers
 
 1. File watcher on sync folder (detects incoming changes from other PCs)
-2. Every 15 minutes (periodic)
+2. Periodic timer (configurable: 1, 5, 10, 15, 30 min, 1 hour; default 15 min)
 3. Manual "Sync Now" click
 
 ### Direction
 
-Bidirectional.
+Bidirectional ("both"), push-only, or pull-only — configurable per profile.
 
 ### Browser Running Check
 
@@ -234,36 +249,38 @@ If a browser is running: skip that browser, update tray status to
 | Bookmarks          | Last-write-wins                              |
 | Everything else    | Last-write-wins by file mtime                |
 
-### Backups
-
-Keep last 2 sync states in the sync folder. User can manually restore if needed.
-Structure:
+### Sync Folder Layout
 
 ~~~
 sync-folder/
-├── current/                     # Active sync state
-│   ├── <Browser>/
-│   │   └── <Profile>/
-│   │       ├── Extensions/      # Only unpacked extensions (Web Store ones excluded)
-│   │       ├── Local Extension Settings/
-│   │       ├── Sync Extension Settings/
-│   │       ├── Bookmarks
-│   │       ├── Preferences
-│   │       └── webstore_extensions.json  # List of Web Store extension IDs
-├── backup-1/                    # Previous state
-├── backup-2/                    # State before that
-└── metadata.json                # Timestamps, version info, first-sync flag
+├── current.tar              # Single tar archive of all synced profile data
+├── metadata.json            # Timestamps, version info, first-sync flag
+└── search_shortcuts.json    # Custom search engines (shared across browsers)
 ~~~
 
-**Backup rotation uses rclone:**
-- Fast parallel file transfer (8 parallel transfers, 16 checkers)
-- Real-time progress reporting parsed from `--stats-one-line` output
-- Automatic exclusion of trash files via `--exclude "._*"`
-- Only copies changed files (incremental)
+All profile data is packed into `current.tar` before syncing. Cloud sync clients
+(Syncthing, Dropbox) only ever see one file change per sync cycle, preventing partial syncs.
+
+**Packing:** Writes to a temp file outside the sync folder, then moves atomically.
+**Unpacking:** Extracts to a system temp directory; cloud client never sees individual profile files.
 
 **First-sync detection:**
-- If `metadata.json` doesn't exist → first-time setup (quiet, shows "Initial setup complete")
+- If `metadata.json` doesn't exist → first-time setup (shows "Initial setup complete")
 - If `metadata.json` exists → regular sync (shows "Last sync: timestamp")
+
+## Search Shortcuts
+
+Custom search engines are extracted from `Web Data` (SQLite, `keywords` table) and stored
+as `search_shortcuts.json` at the sync folder root. Only `prepopulate_id = 0` rows
+(user-created) are saved. Built-in engines are reinstalled by the browser.
+
+**Windows-specific:** Chromium validates a `url_hash` BLOB for every keywords row on startup.
+Missing or invalid hash → row silently dropped. The hash is AES-256-GCM encrypted using the
+OSCrypt key from `Local State`. See `docs/search-shortcuts.md` for full formula and implementation.
+
+**sync_guid rules:**
+- Default search engine: `sync_guid` must match `Preferences["default_search_provider"]["guid"]`
+- All other user engines: `sync_guid = ""` (local-only; Chrome deletes unknown UUIDs during sync reconciliation)
 
 ## First Run
 
@@ -274,7 +291,7 @@ sync-folder/
 
 ## Theming
 
-- **Windows/macOS:** Force dark theme
+- **Windows/macOS:** Force dark theme (Dracula)
 - **Linux:** Use system Qt theme
 
 ## Autostart
@@ -282,16 +299,18 @@ sync-folder/
 Register app to start on login. On by default, toggleable in settings.
 
 Platform-specific implementation:
-- **Windows:** Registry key or Startup folder shortcut
-- **macOS:** LaunchAgent plist or Login Items
+- **Windows:** Registry key (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`)
+- **macOS:** LaunchAgent plist at `~/Library/LaunchAgents/`
 - **Linux:** XDG autostart `.desktop` file in `~/.config/autostart/`
 
 ## Platform Paths Summary
 
-| Browser | Windows                                 | macOS                                            | Linux                        |
-| ------- | --------------------------------------- | ------------------------------------------------ | ---------------------------- |
-| Thorium | `%LOCALAPPDATA%\Thorium\User Data`      | `~/Library/Application Support/Thorium`          | `~/.config/thorium`          |
-| Helium  | `%LOCALAPPDATA%\imput\Helium\User Data` | `~/Library/Application Support/net.imput.helium` | `~/.config/net.imput.helium` |
+| Browser | Windows                                        | macOS                                            | Linux                           |
+| ------- | ---------------------------------------------- | ------------------------------------------------ | ------------------------------- |
+| Thorium | `%LOCALAPPDATA%\Thorium\User Data`             | `~/Library/Application Support/Thorium`          | `~/.config/thorium`             |
+| Helium  | `%LOCALAPPDATA%\imput\Helium\User Data`        | `~/Library/Application Support/net.imput.helium` | `~/.config/net.imput.helium`    |
+| Chrome  | `%LOCALAPPDATA%\Google\Chrome\User Data`       | `~/Library/Application Support/Google/Chrome`    | `~/.config/google-chrome`       |
+| Yandex  | `%LOCALAPPDATA%\Yandex\YandexBrowser\User Data`| `~/Library/Application Support/Yandex/YandexBrowser` | `~/.config/yandex-browser`  |
 
 ## Deliverables
 
@@ -299,58 +318,41 @@ Platform-specific implementation:
 ✅ 119 passing tests for sync logic, browsers, config, settings
 ✅ README with usage instructions
 ✅ `pyproject.toml` with uv/ruff configured
-✅ `build.py` script with `--install` flag for macOS (PyInstaller)
+✅ `build.py` script with `--install` flag (PyInstaller)
 ✅ `Makefile` with `install` and `ci` targets
 ✅ `CLAUDE.md` with lockfile rules and project conventions
 ✅ Smart extension syncing (Web Store vs unpacked)
-✅ rclone integration for fast parallel backups
+✅ Tar archive syncing (single `current.tar`, no backup rotation folders)
 ✅ Real-time progress in tray menu (no separate window)
 ✅ First-sync detection (no spam on clean slate)
-✅ Trash file exclusion (._* macOS metadata)
-✅ Space optimization: 1.6GB → 300MB (80% reduction)
+✅ Trash file exclusion (`._*` macOS metadata)
+✅ Space optimization: ~80% reduction
 ✅ Clean button to start fresh (deletes all synced data)
-
-## Open Design Questions (for implementer to decide)
-
-These were not resolved during discussion. Implementer should make pragmatic v1 choices:
-
-1. **Search engines sync** — The `Web Data` SQLite file contains both search engines
-   (`keywords` table) and encrypted credit cards. Recommended approach: extract via SQL
-   (read/write only the `keywords` table). Alternative: skip for v1.
-
-2. **Additional browsers** — Only Thorium and Helium confirmed. The architecture supports
-   adding more (Chrome, Brave, Edge, Ungoogled Chromium) via one-file modules. Implementer
-   can add more if it's low effort, or ship with just two.
-
-3. **Sync folder suggestions** — Unclear whether to detect cloud sync folders (Dropbox,
-   OneDrive, Syncthing) and offer them as suggestions, or just treat it as a plain path
-   picker. Recommended: plain path picker for v1.
+✅ Search shortcuts sync with Windows url_hash support
 
 ## Implementation Notes
 
-- **PySide6** (not PyQt6) — user explicitly corrected this
+- **PySide6** (not PyQt6) — binding explicitly required
 - LevelDB directories must be copied atomically (all files or none)
   - Uses `shutil.copytree` with atomic rename via `.tmp` staging directory
   - Ignores `._*` files via `ignore_patterns()`
 - Browser detection: check if the profile directory exists on disk
 - Running detection: uses `psutil` to check process list for browser executable name
-- Settings persistence: JSON config file at `~/.config/chromium-profile-syncer/config.json`
+- Settings persistence: JSON config file at platform-specific config directory
 - The sync folder is the user's responsibility to set up (NAS, Dropbox, Syncthing, etc.)
 - The app just reads/writes to a local path
-- **rclone dependency:** Must be installed (`brew install rclone` on macOS)
-  - Used for fast parallel backup rotation
-  - Parses `--stats-one-line` output for progress percentages
-  - Excludes trash files automatically
 
-## Tech Stack Additions
+## Tech Stack
 
 **Runtime dependencies:**
-- `rclone` — Fast file sync tool (via Homebrew on macOS)
-- `psutil` — Cross-platform process detection
+- `PySide6 >= 6.7` — Qt6 bindings
+- `psutil >= 5.9` — Cross-platform process detection
+- `cryptography >= 46.0.7` — Search shortcuts url_hash computation (Windows)
+- `rclone` — System binary, required for progress reporting
 
 **Single-instance enforcement:**
 - Uses file locking to prevent multiple app instances
-- Lock file: `~/.config/chromium-profile-syncer/app.lock`
+- Lock file at platform config directory
 
 ## File Structure (Actual Implementation)
 
@@ -359,14 +361,20 @@ chromium-profile-syncer/
 ├── src/
 │   ├── main.py              # Entry point, single instance check
 │   ├── tray.py              # System tray app, menu, sync orchestration
-│   ├── sync_engine.py       # Core sync logic, smart extension detection
+│   ├── sync_engine.py       # Core sync logic, tar archive, extension detection
 │   ├── settings.py          # Settings dialog UI (with Clean button)
 │   ├── config.py            # Config persistence (JSON)
 │   ├── autostart.py         # Platform-specific autostart registration
 │   ├── single_instance.py   # File-based locking
+│   ├── log_viewer.py        # GUI log handler
+│   ├── shortcuts_editor.py  # Search shortcuts editing dialog
+│   ├── dracula.py           # Dark theme stylesheet
 │   └── browsers/
 │       ├── base.py          # Abstract BrowserBase class
+│       ├── thorium.py       # Thorium browser implementation
 │       ├── helium.py        # Helium browser implementation
+│       ├── chrome.py        # Chrome browser implementation
+│       ├── yandex.py        # Yandex browser implementation
 │       └── __init__.py      # ALL_BROWSERS list
 ├── tests/
 │   ├── test_sync_engine.py  # 58 tests
@@ -380,5 +388,7 @@ chromium-profile-syncer/
 ├── pyproject.toml           # uv deps, ruff config, pytest config
 ├── DESIGN.md                # This file
 ├── CLAUDE.md                # Project conventions for AI assistants
+├── docs/
+│   └── search-shortcuts.md  # Deep dive: Windows url_hash, sync_guid rules
 └── README.md                # Usage instructions
 ~~~

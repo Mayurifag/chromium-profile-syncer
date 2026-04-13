@@ -787,19 +787,21 @@ class SyncEngine:
                 default_engine_url = dspd.get("url", "")
 
             conn = sqlite3.connect(f"file:{web_data_src}?mode=ro&immutable=1", uri=True)
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT keyword, short_name, url, favicon_url, suggest_url,
-                       prepopulate_id, is_active, date_created, last_modified,
-                       sync_guid, safe_for_autoreplace, input_encodings, alternate_urls
-                FROM keywords
-                WHERE prepopulate_id = 0
-                ORDER BY keyword
-                """
-            )
-            rows = cursor.fetchall()
-            conn.close()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT keyword, short_name, url, favicon_url, suggest_url,
+                           prepopulate_id, is_active, date_created, last_modified,
+                           sync_guid, safe_for_autoreplace, input_encodings, alternate_urls
+                    FROM keywords
+                    WHERE prepopulate_id = 0
+                    ORDER BY keyword
+                    """
+                )
+                rows = cursor.fetchall()
+            finally:
+                conn.close()
 
             shortcuts = []
             for row in rows:
@@ -1060,6 +1062,7 @@ class SyncEngine:
         current_archive = self.sync_folder / "current.tar"
         work_dir = Path(tempfile.mkdtemp(prefix="cps-work-"))
 
+        success = False
         try:
             if current_archive.exists():
                 self._report("Unpacking...")
@@ -1136,9 +1139,11 @@ class SyncEngine:
                         )
                         if needs_restore:
                             raise
+            success = True
         finally:
-            # Repack temp work dir back to archive, then clean up.
-            if any(work_dir.iterdir()):
+            # Only repack if sync completed without an unhandled exception; otherwise
+            # packing a partial work_dir would corrupt the archive.
+            if success and any(work_dir.iterdir()):
                 self._report("Packing...")
                 self._pack_to_archive(work_dir, current_archive)
             shutil.rmtree(work_dir)

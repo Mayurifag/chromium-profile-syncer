@@ -4,6 +4,7 @@ import json
 import logging
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -30,14 +31,16 @@ class ShortcutsEditorDialog(QDialog):
         layout = QVBoxLayout(self)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["Keyword", "Name", "URL"])
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["Keyword", "Name", "URL", "Default"])
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setAlternatingRowColors(True)
+        self.table.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self.table)
 
         button_box = QDialogButtonBox()
@@ -87,12 +90,37 @@ class ShortcutsEditorDialog(QDialog):
                 f"Failed to load search shortcuts:\n{exc}"
             )
 
+    def _make_default_item(self, is_default: bool) -> QTableWidgetItem:
+        item = QTableWidgetItem()
+        item.setFlags(
+            Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsUserCheckable
+            | Qt.ItemFlag.ItemIsSelectable
+        )
+        item.setCheckState(Qt.CheckState.Checked if is_default else Qt.CheckState.Unchecked)
+        return item
+
     def _populate_table(self) -> None:
         self.table.setRowCount(len(self.shortcuts))
         for i, shortcut in enumerate(self.shortcuts):
             self.table.setItem(i, 0, QTableWidgetItem(shortcut["keyword"]))
             self.table.setItem(i, 1, QTableWidgetItem(shortcut["short_name"]))
             self.table.setItem(i, 2, QTableWidgetItem(shortcut["url"]))
+            self.table.setItem(i, 3, self._make_default_item(shortcut.get("is_default", False)))
+
+    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        if item.column() != 3:
+            return
+        if item.checkState() != Qt.CheckState.Checked:
+            return
+        # Uncheck all other rows — only one default allowed.
+        self.table.blockSignals(True)
+        for row in range(self.table.rowCount()):
+            if row != item.row():
+                other = self.table.item(row, 3)
+                if other:
+                    other.setCheckState(Qt.CheckState.Unchecked)
+        self.table.blockSignals(False)
 
     def _add_row(self) -> None:
         row = self.table.rowCount()
@@ -100,6 +128,7 @@ class ShortcutsEditorDialog(QDialog):
         self.table.setItem(row, 0, QTableWidgetItem(""))
         self.table.setItem(row, 1, QTableWidgetItem(""))
         self.table.setItem(row, 2, QTableWidgetItem(""))
+        self.table.setItem(row, 3, self._make_default_item(False))
         self.table.scrollToBottom()
         self.table.setCurrentCell(row, 0)
         self.table.editItem(self.table.item(row, 0))
@@ -131,6 +160,11 @@ class ShortcutsEditorDialog(QDialog):
                 continue
 
             old_shortcut = self.shortcuts[i] if i < len(self.shortcuts) else {}
+            default_item = self.table.item(i, 3)
+            is_default = (
+                default_item is not None
+                and default_item.checkState() == Qt.CheckState.Checked
+            )
             shortcuts.append({
                 "keyword": keyword,
                 "short_name": name,
@@ -145,7 +179,7 @@ class ShortcutsEditorDialog(QDialog):
                 "safe_for_autoreplace": old_shortcut.get("safe_for_autoreplace", 0),
                 "input_encodings": old_shortcut.get("input_encodings", "UTF-8"),
                 "alternate_urls": old_shortcut.get("alternate_urls", "[]"),
-                "is_default": old_shortcut.get("is_default", False),
+                "is_default": is_default,
             })
 
         try:

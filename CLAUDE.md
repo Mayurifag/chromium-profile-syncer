@@ -29,7 +29,7 @@ This builds the app, kills the running instance, installs, and launches automati
 
 - **PySide6** — do not substitute PyQt6 or any other binding.
 - **Python 3.12+** — do not use syntax or stdlib features unavailable in 3.12.
-- **rclone** — required runtime dependency for fast backup rotation (must be installed via system package manager).
+- **rclone** — required runtime dependency for progress reporting during sync (must be installed via system package manager).
 
 ## Project Structure
 
@@ -63,12 +63,29 @@ Files excluded from sync:
 - rclone: `--exclude "._*"`
 - shutil.copytree: `ignore=shutil.ignore_patterns("._*")`
 
-### Backup Rotation
+### Tar Archive Sync
 
-Uses rclone for fast parallel backup rotation:
-- Parses `--stats-one-line` output for progress percentages
-- Runs with `--transfers 8 --checkers 16` for parallelism
-- Reports progress via callback to show in UI
+All profile data is packed into a single `current.tar` before syncing:
+- Written to a temp file outside the sync folder, then moved atomically
+- Unpacked to a system temp directory during restore; cloud client only sees `current.tar` change
+- No backup rotation folders (`backup-1/`, `backup-2/`)
+
+### Search Shortcuts Sync
+
+Extracts user-created search engines (`prepopulate_id = 0`) from `Web Data` SQLite and stores as `search_shortcuts.json` at the sync folder root.
+
+**Windows-specific — url_hash is mandatory:**
+- Every inserted keywords row must have a valid 64-byte `url_hash` BLOB
+- Formula: `b'v10' + nonce(12) + AES-256-GCM(key, nonce, b'\x01' + SHA256(Pickle(id, url))) + tag(16)`
+- AES key from `Local State` → `os_crypt.encrypted_key` (strip 5-byte `DPAPI` prefix, then DPAPI-decrypt)
+- Rows with missing/invalid hash are silently dropped at Chromium startup
+- See `docs/search-shortcuts.md` for the full formula and Python implementation
+
+**sync_guid rules:**
+- Default engine: `sync_guid` must match `Preferences["default_search_provider"]["guid"]`
+- All other engines: `sync_guid = ""` (local-only; Chrome deletes unknown UUIDs on reconciliation)
+
+**Restore scope:** `DELETE FROM keywords WHERE prepopulate_id = 0` — never touch built-ins.
 
 ### First-Sync Detection
 
@@ -79,8 +96,8 @@ Uses rclone for fast parallel backup rotation:
 
 ### Clean Button (Settings Window)
 
-- Visible only when sync folder contains data (`current/` directory exists)
-- Deletes all synced data: `current/`, `backup-1/`, `backup-2/`, `metadata.json`
+- Visible only when sync folder contains data (`current.tar` exists or `current/` directory exists)
+- Deletes all synced data: `current.tar`, `current/` (legacy), `metadata.json`, `search_shortcuts.json`
 - Clears enabled profiles and browsers from config
 - Shows confirmation dialog before deletion
 - After cleaning, triggers initial upload dialog to start fresh
