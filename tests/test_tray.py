@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -159,7 +159,7 @@ def test_open_settings_creates_dialog(qapp, tmp_path):
     with patch("src.tray.SettingsDialog", return_value=mock_dialog) as mock_cls:
         tray.open_settings()
 
-    mock_cls.assert_called_once_with(parent=None)
+    mock_cls.assert_called_once_with(browser_monitor=ANY, parent=None)
     mock_dialog.settings_saved.connect.assert_called_once_with(tray._on_settings_saved)
     mock_dialog.exec.assert_called_once()
 
@@ -336,8 +336,6 @@ def test_open_settings_warns_rclone_missing(qapp, tmp_path):
     mock_dialog.settings_saved.connect = MagicMock()
     mock_dialog.sync_requested = MagicMock()
     mock_dialog.sync_requested.connect = MagicMock()
-    mock_dialog.sync_interval_changed = MagicMock()
-    mock_dialog.sync_interval_changed.connect = MagicMock()
     mock_dialog.finished = MagicMock()
     mock_dialog.finished.connect = MagicMock()
 

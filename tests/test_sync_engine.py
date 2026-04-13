@@ -499,14 +499,21 @@ def test_sync_browser_profile_syncs_plain_files(tmp_path: Path) -> None:
     profile.mkdir()
 
     _write_file(profile / "Bookmarks", '{"roots":{}}', mtime=2000.0)
-    _write_file(profile / "Preferences", '{"settings":{}}', mtime=2000.0)
+    _write_file(
+        profile / "Preferences",
+        '{"enable_do_not_track":true,"settings":{}}',
+        mtime=2000.0,
+    )
     _write_file(profile / "Custom Dictionary.txt", "word1\nword2", mtime=2000.0)
 
     engine = _make_engine(tmp_path)
     engine.sync_browser_profile(profile, sync_profile)
 
     assert (sync_profile / "Bookmarks").read_text() == '{"roots":{}}'
-    assert (sync_profile / "Preferences").read_text() == '{"settings":{}}'
+    saved = json.loads((sync_profile / "preferences.json").read_bytes())
+    assert saved.get("enable_do_not_track") is True
+    assert "settings" not in saved  # not in PREFERENCES_KEYS — must not be copied
+    assert not (sync_profile / "Preferences").exists()  # raw file replaced by preferences.json
     assert (sync_profile / "Custom Dictionary.txt").read_text() == "word1\nword2"
 
 
@@ -556,7 +563,7 @@ def test_sync_browser_profile_data_types_bookmarks_disabled(tmp_path: Path) -> N
     engine.sync_browser_profile(profile, sync_profile, {"bookmarks": False})
 
     assert not (sync_profile / "Bookmarks").exists()
-    assert (sync_profile / "Preferences").exists()  # always synced
+    assert (sync_profile / "preferences.json").exists()  # always synced
 
 
 def test_sync_browser_profile_preferences_always_synced(tmp_path: Path) -> None:
@@ -566,14 +573,14 @@ def test_sync_browser_profile_preferences_always_synced(tmp_path: Path) -> None:
     _write_file(profile / "Preferences", "{}", mtime=2000.0)
 
     engine = _make_engine(tmp_path)
-    # Even with everything disabled, Preferences must be synced
+    # Even with everything disabled, preferences.json must be written
     engine.sync_browser_profile(
         profile, sync_profile,
         {"extensions": False, "bookmarks": False, "custom_dictionary": False,
          "local_storage": False},
     )
 
-    assert (sync_profile / "Preferences").exists()
+    assert (sync_profile / "preferences.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -662,7 +669,7 @@ def test_sync_all_filters_profiles(tmp_path: Path) -> None:
     with patch("src.config.get_enabled_profiles", return_value={"TB": ["Default"]}):
         engine.sync_all()
 
-    assert _file_in_archive(sync_folder / "current.tar", "Preferences")
+    assert _file_in_archive(sync_folder / "current.tar", "preferences.json")
 
 
 # ---------------------------------------------------------------------------
@@ -1079,6 +1086,80 @@ def test_extract_search_shortcuts_adopts_prefs_guid_when_db_guid_empty(tmp_path:
     # Non-default engine stays without a guid.
     assert by_keyword["yt"]["sync_guid"] == ""
     assert by_keyword["yt"]["is_default"] is False
+
+
+def test_extract_search_shortcuts_no_webdata_preserves_existing_json(tmp_path: Path) -> None:
+    """Missing Web Data does not wipe the existing search_shortcuts.json."""
+    existing = [{"keyword": "gru", "short_name": "Google Russia", "url": "https://gru.com",
+                 "is_default": True, "sync_guid": "gru-guid", "prepopulate_id": 0,
+                 "is_active": 1, "date_created": 0, "last_modified": 0,
+                 "safe_for_autoreplace": 0, "input_encodings": "UTF-8",
+                 "alternate_urls": "[]", "favicon_url": "", "suggest_url": ""}]
+    (tmp_path / "search_shortcuts.json").write_text(json.dumps(existing), encoding="utf-8")
+
+    profile = tmp_path / "profile_no_webdata"  # no Web Data file here
+    engine = _make_engine(tmp_path)
+    engine._extract_search_shortcuts(profile, tmp_path)
+
+    data = json.loads((tmp_path / "search_shortcuts.json").read_text())
+    assert len(data) == 1
+    assert data[0]["keyword"] == "gru", "existing JSON must be untouched when Web Data is missing"
+
+
+def test_sync_browser_profile_both_direction_does_not_extract_shortcuts(tmp_path: Path) -> None:
+    """In 'both' direction the JSON is treated as the master and is never overwritten."""
+    sf = tmp_path / "sync"
+    sf.mkdir()
+    existing = [{"keyword": "gru", "short_name": "GRU", "url": "https://gru.com",
+                 "is_default": True, "sync_guid": "gru-guid", "prepopulate_id": 0,
+                 "is_active": 1, "date_created": 0, "last_modified": 0,
+                 "safe_for_autoreplace": 0, "input_encodings": "UTF-8",
+                 "alternate_urls": "[]", "favicon_url": "", "suggest_url": ""}]
+    (sf / "search_shortcuts.json").write_text(json.dumps(existing), encoding="utf-8")
+
+    profile = tmp_path / "profile"
+    _make_web_data(
+        profile / "Web Data",
+        [{"keyword": "bing", "short_name": "Bing", "url": "https://bing.com/?q={searchTerms}"}],
+    )
+    (profile / "Preferences").write_text("{}", encoding="utf-8")
+
+    engine = _make_engine(sf)
+    engine.sync_browser_profile(profile, tmp_path / "sync_profile", direction="both")
+
+    data = json.loads((sf / "search_shortcuts.json").read_text())
+    keywords = {s["keyword"] for s in data}
+    assert "gru" in keywords, "master JSON shortcut must survive a 'both' sync"
+    assert "bing" not in keywords, "local-only shortcut must not be pushed in 'both' direction"
+
+
+def test_sync_browser_profile_push_direction_does_extract_shortcuts(tmp_path: Path) -> None:
+    """In 'push' direction the local browser's shortcuts overwrite the JSON."""
+    sf = tmp_path / "sync"
+    sf.mkdir()
+    (sf / "search_shortcuts.json").write_text(
+        json.dumps([{"keyword": "old", "short_name": "Old", "url": "https://old.com",
+                     "is_default": False, "sync_guid": "", "prepopulate_id": 0,
+                     "is_active": 1, "date_created": 0, "last_modified": 0,
+                     "safe_for_autoreplace": 0, "input_encodings": "UTF-8",
+                     "alternate_urls": "[]", "favicon_url": "", "suggest_url": ""}]),
+        encoding="utf-8",
+    )
+
+    profile = tmp_path / "profile"
+    _make_web_data(
+        profile / "Web Data",
+        [{"keyword": "new", "short_name": "New", "url": "https://new.com/?q={searchTerms}"}],
+    )
+    (profile / "Preferences").write_text("{}", encoding="utf-8")
+
+    engine = _make_engine(sf)
+    engine.sync_browser_profile(profile, tmp_path / "sync_profile", direction="push")
+
+    data = json.loads((sf / "search_shortcuts.json").read_text())
+    keywords = {s["keyword"] for s in data}
+    assert "new" in keywords
+    assert "old" not in keywords, "push must overwrite JSON with local shortcuts"
 
 
 def test_restore_search_shortcuts_preserves_stored_guid_and_updates_preferences(

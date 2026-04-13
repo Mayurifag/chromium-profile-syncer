@@ -161,6 +161,29 @@ def clear_restore_flag(browser: str, profile: str) -> None:
         _LOG.info("Cleared restore flag for %s/%s", browser, profile)
 
 
+def is_profile_sync_enabled(browser: str, profile: str) -> bool:
+    """Return whether auto-sync on browser-close is enabled for this profile. Defaults to True."""
+    disabled = load().get("profile_sync_disabled", {})
+    return profile not in disabled.get(browser, [])
+
+
+def set_profile_sync_enabled(browser: str, profile: str, enabled: bool) -> None:
+    """Enable or disable auto-sync on browser-close for a specific profile."""
+    data = load()
+    disabled = data.setdefault("profile_sync_disabled", {})
+    profiles: list = disabled.setdefault(browser, [])
+    if not enabled and profile not in profiles:
+        profiles.append(profile)
+        save(data)
+        _LOG.info("Auto-sync disabled for %s/%s", browser, profile)
+    elif enabled and profile in profiles:
+        profiles.remove(profile)
+        if not profiles:
+            del disabled[browser]
+        save(data)
+        _LOG.info("Auto-sync enabled for %s/%s", browser, profile)
+
+
 def get_ungoogled_only_extensions() -> list[str]:
     """Return extension IDs that should only be installed in ungoogled browsers.
 

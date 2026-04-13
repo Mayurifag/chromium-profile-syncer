@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -12,6 +11,7 @@ from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from src import autostart
+from src.browser_monitor import BrowserMonitor
 from src.browsers import ALL_BROWSERS
 from src.dracula import ICON_COLORS
 from src.settings import SettingsDialog
@@ -24,15 +24,24 @@ logger = logging.getLogger(__name__)
 
 
 class SyncWorker(QThread):
-    finished = Signal(str, bool, list)  # timestamp, is_first_sync, skipped_running
+    finished = Signal(str, bool, list, str)  # ts, is_first_sync, skipped_running, triggered_browser
     error = Signal(str)
     progress = Signal(str)  # type: ignore[assignment]
     profile_progress = Signal(str, str, str, int, float)  # browser, profile, dir, count, elapsed
 
-    def __init__(self, engine: SyncEngine) -> None:
+    def __init__(
+        self,
+        engine: SyncEngine,
+        only_browser: str | None = None,
+        only_profile: str | None = None,
+        force_direction: str | None = None,
+    ) -> None:
         super().__init__()
         self._engine = engine
-        self._current_profile: tuple[str, str, str] | None = None  # (browser, profile, direction)
+        self._only_browser = only_browser
+        self._only_profile = only_profile
+        self._force_direction = force_direction
+        self._current_profile: tuple[str, str, str] | None = None
         self._profile_count = 0
         self._profile_start = 0.0
 
@@ -76,12 +85,16 @@ class SyncWorker(QThread):
                         self._last_emit = elapsed
 
             self._engine._progress_cb = _progress_handler
-            result = self._engine.sync_all()
+            result = self._engine.sync_all(
+                only_browser=self._only_browser,
+                only_profile=self._only_profile,
+                force_direction=self._force_direction,
+            )
             ts = datetime.now(tz=UTC).isoformat()
             is_first_sync = result.get("is_first_sync", False)
             skipped_running = result.get("skipped_running", [])
             logger.info("SyncWorker: sync finished at %s", ts)
-            self.finished.emit(ts, is_first_sync, skipped_running)
+            self.finished.emit(ts, is_first_sync, skipped_running, self._only_browser or "")
         except Exception as exc:
             logger.exception("SyncWorker: sync error")
             self.error.emit(str(exc))
@@ -91,6 +104,8 @@ class SyncWorker(QThread):
 
 
 class TrayApp(QSystemTrayIcon):
+    sync_completed = Signal(bool)  # True = success, False = error
+
     def __init__(
         self,
         engine: SyncEngine,
@@ -108,24 +123,21 @@ class TrayApp(QSystemTrayIcon):
         self._watcher: QFileSystemWatcher | None = None
         self._watcher_paused: bool = False
         self._settings_dialog: SettingsDialog | None = None
-        self._next_sync_time: float = 0.0
-        self._countdown_timer: QTimer | None = None
+        self._last_sync: str = ""
+        self._last_error: str = ""
+
+        installed_browsers = [b for b in ALL_BROWSERS if b.is_installed()]
+        self._browser_monitor = BrowserMonitor(installed_browsers, parent=self)
+        self._browser_monitor.browser_closed.connect(self._on_browser_closed)
+        self._browser_monitor.state_changed.connect(self._on_browser_state_changed)
 
         self.setIcon(self._make_icon("idle"))
-        self.setToolTip("Chromium Profile Syncer")
+        self._update_tooltip()
 
         self._menu = QMenu()
 
-        self._action_sync = self._menu.addAction("Sync Now")
-        self._action_sync.triggered.connect(self._trigger_sync)
-
         self._action_settings = self._menu.addAction("Settings")
         self._action_settings.triggered.connect(self.open_settings)
-
-        self._menu.addSeparator()
-
-        self._action_status = self._menu.addAction("Idle")
-        self._action_status.setEnabled(False)
 
         self._menu.addSeparator()
 
@@ -133,9 +145,6 @@ class TrayApp(QSystemTrayIcon):
         self._action_quit.triggered.connect(QApplication.quit)
 
         self.setContextMenu(self._menu)
-
-        self._setup_timer()
-        self._setup_countdown_timer()
 
         sync_folder = self._config.get_sync_folder()
         if sync_folder is not None:
@@ -178,38 +187,50 @@ class TrayApp(QSystemTrayIcon):
             QSystemTrayIcon.MessageIcon.Warning,
         )
 
-    # ------------------------------------------------------------------
-    # Timer
-    # ------------------------------------------------------------------
-
-    def _setup_timer(self) -> None:
-        interval_minutes = self._config.get_sync_interval()
-        self._timer = QTimer(self)
-        self._timer.setInterval(interval_minutes * 60 * 1000)
-        self._timer.timeout.connect(self._on_timer)
-        self._timer.start()
-        self._next_sync_time = time.time() + (interval_minutes * 60)
-        logger.debug("Periodic sync timer armed (%d min)", interval_minutes)
-
-    def _setup_countdown_timer(self) -> None:
-        self._countdown_timer = QTimer(self)
-        self._countdown_timer.setInterval(1000)
-        self._countdown_timer.timeout.connect(self._update_countdown)
-        self._countdown_timer.start()
-
-    def _update_countdown(self) -> None:
-        if self._settings_dialog is not None:
-            remaining = int(self._next_sync_time - time.time())
-            self._settings_dialog.update_next_sync_time(max(0, remaining))
-
-    def _on_timer(self) -> None:
-        logger.info("Periodic timer fired — triggering sync")
-        self._trigger_sync()
-        interval_minutes = self._config.get_sync_interval()
-        self._next_sync_time = time.time() + (interval_minutes * 60)
+    def _update_tooltip(self) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            tip = "Syncing..."
+        elif self._last_error:
+            tip = f"Error: {self._last_error}"
+        elif self._browser_monitor.any_running():
+            names = ", ".join(self._browser_monitor.running_names())
+            tip = f"{names} running — syncs on close"
+        elif self._last_sync:
+            dt = datetime.fromisoformat(self._last_sync)
+            tip = f"Last sync: {dt.strftime('%d %b %H:%M')}"
+        else:
+            tip = "No sync yet"
+        self.setToolTip(f"Chromium Profile Syncer\n{tip}")
 
     # ------------------------------------------------------------------
-    # File watcher
+    # Browser monitoring
+    # ------------------------------------------------------------------
+
+    def _on_browser_closed(self, browser_name: str) -> None:
+        from src import config as _config
+
+        enabled_profiles = _config.get_enabled_profiles()
+        profiles = enabled_profiles.get(browser_name, [])
+        if not profiles:
+            return
+        if not any(_config.is_profile_sync_enabled(browser_name, p) for p in profiles):
+            logger.debug("Browser %s closed but auto-sync disabled for all profiles", browser_name)
+            return
+
+        logger.info("Browser %s closed — triggering sync", browser_name)
+        self._trigger_sync(only_browser=browser_name)
+
+    def _on_browser_state_changed(self, browser_name: str, is_running: bool) -> None:
+        logger.debug("Browser state: %s running=%s", browser_name, is_running)
+        if self._worker is None or not self._worker.isRunning():
+            state = "waiting" if self._browser_monitor.any_running() else (
+                "error" if self._last_error else "idle"
+            )
+            self.setIcon(self._make_icon(state))
+        self._update_tooltip()
+
+    # ------------------------------------------------------------------
+    # File watcher (for cross-machine sync detection)
     # ------------------------------------------------------------------
 
     def _setup_watcher(self, sync_folder: Path) -> None:
@@ -249,7 +270,7 @@ class TrayApp(QSystemTrayIcon):
         logger.debug("Debounce timer reset (2s)")
 
     def _on_debounce_fired(self) -> None:
-        logger.info("Debounce fired — triggering sync")
+        logger.info("Debounce fired — triggering sync (remote change detected)")
         self._trigger_sync()
 
     def _resume_watcher(self) -> None:
@@ -267,10 +288,11 @@ class TrayApp(QSystemTrayIcon):
             self._settings_dialog.activateWindow()
             return
 
-        dialog = SettingsDialog(parent=None)
+        dialog = SettingsDialog(browser_monitor=self._browser_monitor, parent=None)
         dialog.settings_saved.connect(self._on_settings_saved)
         dialog.sync_requested.connect(self._trigger_sync)
-        dialog.sync_interval_changed.connect(self._on_sync_interval_changed)
+        dialog.apply_backup_requested.connect(self._trigger_apply_backup)
+        self.sync_completed.connect(dialog.on_sync_completed)
         dialog.finished.connect(lambda: self._on_settings_closed())
 
         self._settings_dialog = dialog
@@ -287,15 +309,9 @@ class TrayApp(QSystemTrayIcon):
     def _on_settings_closed(self) -> None:
         self._settings_dialog = None
 
-    def _on_sync_interval_changed(self, minutes: int) -> None:
-        if self._timer is not None:
-            self._timer.stop()
-            self._timer.setInterval(minutes * 60 * 1000)
-            self._timer.start()
-            self._next_sync_time = time.time() + (minutes * 60)
-            logger.info("Sync interval updated to %d minutes", minutes)
-
     def _on_settings_saved(self) -> None:
+        self._debounce_timer.stop()
+
         sync_folder = self._config.get_sync_folder()
         if sync_folder is None:
             logger.warning("Settings saved but no sync folder chosen — keeping existing engine")
@@ -333,7 +349,12 @@ class TrayApp(QSystemTrayIcon):
     def _check_sync_folder_permissions(path: Path) -> bool:
         return os.access(path, os.R_OK | os.W_OK)
 
-    def _trigger_sync(self) -> None:
+    def _trigger_sync(
+        self,
+        only_browser: str | None = None,
+        only_profile: str | None = None,
+        force_direction: str | None = None,
+    ) -> None:
         if self._worker is not None and self._worker.isRunning():
             logger.info("Sync already in progress — skipping")
             return
@@ -357,14 +378,11 @@ class TrayApp(QSystemTrayIcon):
             )
             return
 
-        logger.info("Starting sync worker")
-        interval_minutes = self._config.get_sync_interval()
-        self._next_sync_time = time.time() + (interval_minutes * 60)
-        if self._timer is not None:
-            self._timer.stop()
-            self._timer.start()
-
-        self._worker = SyncWorker(self._engine)
+        logger.info(
+            "Starting sync worker (only_browser=%s, only_profile=%s, force_direction=%s)",
+            only_browser, only_profile, force_direction,
+        )
+        self._worker = SyncWorker(self._engine, only_browser, only_profile, force_direction)
         self._worker.started.connect(self._on_sync_started)
         self._worker.finished.connect(self._on_sync_finished)
         self._worker.finished.connect(self._worker.deleteLater)
@@ -373,21 +391,20 @@ class TrayApp(QSystemTrayIcon):
         self._worker.profile_progress.connect(self._on_profile_progress)
         self._worker.start()
 
+    def _trigger_apply_backup(self, browser: str, profile: str) -> None:
+        logger.info("Apply backup requested for %s/%s", browser, profile)
+        self._trigger_sync(only_browser=browser, only_profile=profile, force_direction="pull")
+
     def _on_sync_started(self) -> None:
         logger.debug("Sync started signal received")
         self.setIcon(self._make_icon("syncing"))
-        self._action_sync.setText("⏳ Starting sync...")
-        self._action_status.setText("Syncing...")
-        self._action_sync.setEnabled(False)
         self._action_settings.setEnabled(False)
-
         self._watcher_paused = True
         logger.debug("File watcher paused during sync")
+        self._update_tooltip()
 
     def _on_sync_progress(self, description: str) -> None:
-        truncated = description[:50] + "..." if len(description) > 50 else description
-        self._action_sync.setText(f"⏳ {truncated}")
-        self._action_status.setText(f"Syncing: {description}")
+        pass  # tooltip not updated per-item for performance
 
     def _on_profile_progress(
         self, browser: str, profile: str, direction: str, count: int, elapsed: float
@@ -397,8 +414,17 @@ class TrayApp(QSystemTrayIcon):
                 browser, profile, direction, count, elapsed
             )
 
-    def _on_sync_finished(self, last_sync: str, is_first_sync: bool, skipped_running: list) -> None:
+    def _on_sync_finished(
+        self,
+        last_sync: str,
+        is_first_sync: bool,
+        skipped_running: list,
+        triggered_browser: str,
+    ) -> None:
         self._worker = None
+        self._last_error = ""
+        self._last_sync = last_sync
+
         if is_first_sync:
             logger.info("Initial sync finished at %s", last_sync)
         else:
@@ -414,36 +440,35 @@ class TrayApp(QSystemTrayIcon):
         QTimer.singleShot(5000, self._resume_watcher)
         logger.debug("File watcher will resume in 5s")
 
-        any_running = any(b.is_running() for b in ALL_BROWSERS)
-        state = "waiting" if any_running else "idle"
+        state = "waiting" if self._browser_monitor.any_running() else "idle"
         self.setIcon(self._make_icon(state))
-        self._action_sync.setText("Sync Now")
+        self._action_settings.setEnabled(True)
+        self._update_tooltip()
+        self.sync_completed.emit(True)
 
         if skipped_running:
             names = ", ".join(skipped_running)
-            self._action_status.setText(f"Waiting — close {names} to sync")
             self.showMessage(
                 "Chromium Profile Syncer",
                 f"{names} is running — close it completely to allow sync.",
                 QSystemTrayIcon.MessageIcon.Warning,
             )
-        elif is_first_sync:
-            self._action_status.setText("Initial setup complete")
-        else:
-            self._action_status.setText(f"Last sync: {last_sync}")
-
-        self._action_sync.setEnabled(True)
-        self._action_settings.setEnabled(True)
+        elif triggered_browser and not is_first_sync:
+            self.showMessage(
+                "Chromium Profile Syncer",
+                f"{triggered_browser} synced",
+                QSystemTrayIcon.MessageIcon.NoIcon,
+                2000,
+            )
 
     def _on_sync_error(self, msg: str) -> None:
         self._worker = None
+        self._last_error = msg
         logger.error("Sync error: %s", msg)
         self.setIcon(self._make_icon("error"))
-        self._action_sync.setText("Sync Now")
-        self._action_status.setText(f"Error: {msg}")
+        self._action_settings.setEnabled(True)
+        self._update_tooltip()
+        self.sync_completed.emit(False)
 
         QTimer.singleShot(5000, self._resume_watcher)
         logger.debug("File watcher will resume in 5s (after error)")
-
-        self._action_sync.setEnabled(True)
-        self._action_settings.setEnabled(True)

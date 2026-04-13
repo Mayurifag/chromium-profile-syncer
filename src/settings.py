@@ -5,7 +5,7 @@ import platform
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 import src.config as config_module
+from src.browser_monitor import BrowserMonitor
 from src.browsers import ALL_BROWSERS
 from src.dracula import (
     DEFAULT_LOG_COLOR,
@@ -98,9 +99,10 @@ def _sync_folder_has_profile(folder: Path) -> bool:
 class SettingsDialog(QDialog):
     settings_saved = Signal()
     sync_requested = Signal()
-    sync_interval_changed = Signal(int)  # minutes
+    apply_backup_requested = Signal(str, str)  # browser, profile
 
-    def __init__(self, parent=None, *, browsers_list: list | None = None):
+    def __init__(self, parent=None, *, browsers_list: list | None = None,
+                 browser_monitor: BrowserMonitor | None = None):
         super().__init__(parent)
         self.setWindowTitle("Chromium Profile Syncer — Settings")
         self.setMinimumWidth(400)
@@ -110,6 +112,7 @@ class SettingsDialog(QDialog):
             browsers_list if browsers_list is not None
             else [b for b in ALL_BROWSERS if b.is_installed()]
         )
+        self._browser_monitor = browser_monitor
 
         # {browser_name: {profile_name: bool}}
         self._profile_states: dict[str, dict[str, bool]] = {}
@@ -126,16 +129,14 @@ class SettingsDialog(QDialog):
         self._clear_log_btn: QPushButton | None = None
         self._log_signaler: LogSignaler | None = None
         self._log_handler: GUILogHandler | None = None
-        self._sync_interval_combo: QComboBox | None = None
-        self._next_sync_label: QLabel | None = None
-        self._next_sync_timer: QTimer | None = None
         self._browser_status_indicators: dict[str, QLabel] = {}
-        self._browser_buttons: dict[tuple[str, str], QPushButton] = {}
-        self._browser_status_timer: QTimer | None = None
+        self._apply_backup_buttons: dict[tuple[str, str], QPushButton] = {}
+        self._sync_toggle_buttons: dict[tuple[str, str], QPushButton] = {}
+        self._syncing: bool = False
 
         self._build_ui()
         self._load_current_settings()
-        self._setup_browser_status_timer()
+        self._connect_browser_monitor()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -165,41 +166,6 @@ class SettingsDialog(QDialog):
         self._profiles_scroll_layout.setSpacing(1)
 
         root.addWidget(self._profiles_group)
-
-        sync_interval_group = QGroupBox("Automatic Sync")
-        sync_interval_layout = QVBoxLayout(sync_interval_group)
-
-        interval_row = QWidget()
-        interval_row_layout = QHBoxLayout(interval_row)
-        interval_row_layout.setContentsMargins(0, 0, 0, 0)
-        interval_row_layout.setSpacing(6)
-
-        trigger_sync_btn = QPushButton("Sync now")
-        trigger_sync_btn.clicked.connect(lambda: self.sync_requested.emit())
-        interval_row_layout.addWidget(trigger_sync_btn)
-
-        interval_row_layout.addWidget(QLabel("Sync every:"))
-        self._sync_interval_combo = QComboBox()
-        self._sync_interval_combo.addItem("1 minute", 1)
-        self._sync_interval_combo.addItem("5 minutes", 5)
-        self._sync_interval_combo.addItem("10 minutes", 10)
-        self._sync_interval_combo.addItem("15 minutes", 15)
-        self._sync_interval_combo.addItem("30 minutes", 30)
-        self._sync_interval_combo.addItem("1 hour", 60)
-        self._sync_interval_combo.currentIndexChanged.connect(self._on_sync_interval_changed)
-        interval_row_layout.addWidget(self._sync_interval_combo)
-
-        self._next_sync_label = QLabel("Next in: calculating...")
-        self._next_sync_label.setStyleSheet(SMALL_MUTED)
-        interval_row_layout.addWidget(self._next_sync_label)
-
-        interval_row_layout.addStretch()
-
-        sync_interval_layout.addWidget(interval_row)
-
-        sync_interval_group.setVisible(False)
-        root.addWidget(sync_interval_group)
-        self._sync_interval_group = sync_interval_group
 
         selects_row = QWidget()
         selects_layout = QHBoxLayout(selects_row)
@@ -259,6 +225,55 @@ class SettingsDialog(QDialog):
         self._activity_log_widget.setVisible(False)
         root.addWidget(self._activity_log_widget)
 
+    def _connect_browser_monitor(self) -> None:
+        if self._browser_monitor is not None:
+            self._browser_monitor.state_changed.connect(self._on_browser_state_changed)
+
+    def _on_browser_state_changed(self, browser_name: str, is_running: bool) -> None:
+        indicator = self._browser_status_indicators.get(browser_name)
+        if indicator is not None:
+            pixmap = QPixmap(12, 12)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+            if is_running:
+                painter.setBrush(QColor(*RUNNING_GLOW))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawEllipse(0, 0, 12, 12)
+                painter.setBrush(QColor(*RUNNING_DOT))
+                painter.drawEllipse(2, 2, 8, 8)
+                indicator.setToolTip(_CLOSE_BROWSER_HINT)
+            else:
+                painter.setBrush(QColor(*NOT_RUNNING_DOT))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawEllipse(2, 2, 8, 8)
+                indicator.setToolTip("Browser is not running")
+
+            painter.end()
+            indicator.setPixmap(pixmap)
+
+        self._refresh_apply_backup_enabled()
+
+    def _refresh_apply_backup_enabled(self) -> None:
+        """Enable/disable Apply Backup buttons based on browser running state and sync state."""
+        for (browser_name, profile_name), btn in self._apply_backup_buttons.items():
+            is_running = (
+                self._browser_monitor.is_running(browser_name)
+                if self._browser_monitor else False
+            )
+            btn.setEnabled(not is_running and not self._syncing)
+            if is_running:
+                btn.setToolTip(_CLOSE_BROWSER_HINT)
+            elif self._syncing:
+                btn.setToolTip("Sync in progress")
+            else:
+                btn.setToolTip("")
+
+    def on_sync_completed(self, success: bool) -> None:
+        self._syncing = False
+        self._refresh_apply_backup_enabled()
+
     def _on_folder_changed(self, text: str) -> None:
         folder_text = text.strip()
         if not folder_text:
@@ -313,79 +328,9 @@ class SettingsDialog(QDialog):
             self._profiles_group.setVisible(False)
         if hasattr(self, "_selects_row"):
             self._selects_row.setVisible(False)
-        if hasattr(self, "_sync_interval_group"):
-            self._sync_interval_group.setVisible(False)
         if self._activity_log_widget:
             self._activity_log_widget.setVisible(False)
         self.adjustSize()
-
-    def _setup_browser_status_timer(self) -> None:
-        self._browser_status_timer = QTimer(self)
-        self._browser_status_timer.setInterval(2000)
-        self._browser_status_timer.timeout.connect(self._update_browser_status_indicators)
-        self._browser_status_timer.start()
-
-    def _update_browser_status_indicators(self) -> None:
-        for browser in self._browsers:
-            indicator = self._browser_status_indicators.get(browser.name)
-            if indicator is None:
-                continue
-
-            is_running = browser.is_running()
-
-            pixmap = QPixmap(12, 12)
-            pixmap.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(pixmap)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-            if is_running:
-                painter.setBrush(QColor(*RUNNING_GLOW))
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.drawEllipse(0, 0, 12, 12)
-
-                painter.setBrush(QColor(*RUNNING_DOT))
-                painter.drawEllipse(2, 2, 8, 8)
-                indicator.setToolTip(_CLOSE_BROWSER_HINT)
-            else:
-                painter.setBrush(QColor(*NOT_RUNNING_DOT))
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.drawEllipse(2, 2, 8, 8)
-                indicator.setToolTip("Browser is not running")
-
-            painter.end()
-            indicator.setPixmap(pixmap)
-
-            for (btn_browser, btn_profile), btn in self._browser_buttons.items():
-                if btn_browser == browser.name:
-                    btn.setEnabled(not is_running)
-                    if is_running:
-                        btn.setToolTip(_CLOSE_BROWSER_HINT)
-                    else:
-                        btn.setToolTip("")
-
-    def _on_sync_interval_changed(self) -> None:
-        if self._sync_interval_combo is None:
-            return
-        minutes = self._sync_interval_combo.currentData()
-        config_module.set_sync_interval(minutes)
-        self.sync_interval_changed.emit(minutes)
-        _LOG.info("Sync interval changed to %d minutes", minutes)
-
-    def update_next_sync_time(self, next_sync_seconds: int) -> None:
-        if self._next_sync_label is None:
-            return
-
-        if next_sync_seconds <= 0:
-            self._next_sync_label.setText("Next in: now")
-            return
-
-        minutes = next_sync_seconds // 60
-        seconds = next_sync_seconds % 60
-
-        if minutes > 0:
-            self._next_sync_label.setText(f"Next in: {minutes}m {seconds}s")
-        else:
-            self._next_sync_label.setText(f"Next in: {seconds}s")
 
     def _on_activity_log_changed(self, index: int) -> None:
         checked = self._activity_log_select.currentData() if self._activity_log_select else True
@@ -423,11 +368,9 @@ class SettingsDialog(QDialog):
 
         color = LOG_COLORS.get(level, DEFAULT_LOG_COLOR)
 
-        # Insert colored text
         cursor = self._activity_log_text.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
 
-        # Apply color
         fmt = cursor.charFormat()
         fmt.setForeground(QColor(color))
         cursor.setCharFormat(fmt)
@@ -577,6 +520,7 @@ class SettingsDialog(QDialog):
             if self._clean_btn:
                 self._clean_btn.setVisible(_sync_folder_has_data(folder))
             self._rebuild_profiles(folder)
+            self.settings_saved.emit()
 
         self._upload_worker.step.connect(_on_step)
         self._upload_worker.done.connect(_on_done)
@@ -591,7 +535,8 @@ class SettingsDialog(QDialog):
         self._profile_states.clear()
         self._profile_progress.clear()
         self._browser_status_indicators.clear()
-        self._browser_buttons.clear()
+        self._apply_backup_buttons.clear()
+        self._sync_toggle_buttons.clear()
 
         saved_profiles = config_module.get_enabled_profiles()
 
@@ -605,6 +550,10 @@ class SettingsDialog(QDialog):
 
             self._profile_states[browser.name] = {}
             browser_saved = set(saved_profiles.get(browser.name, []))
+            is_running = (
+                self._browser_monitor.is_running(browser.name)
+                if self._browser_monitor else browser.is_running()
+            )
 
             if len(profiles) == 1:
                 profile_path = profiles[0]
@@ -624,42 +573,29 @@ class SettingsDialog(QDialog):
                 top_layout.setContentsMargins(0, 0, 0, 0)
                 top_layout.setSpacing(4)
 
-                is_running = browser.is_running()
                 indicator = _make_status_indicator(is_running)
                 self._browser_status_indicators[browser.name] = indicator
                 top_layout.addWidget(indicator)
 
                 name_lbl = QLabel(f"<b>{browser.name}</b>")
-                btn = QPushButton("Stop manage" if is_enabled else "Manage")
-                btn.setFixedWidth(100)
-                if is_running:
-                    btn.setEnabled(False)
-                    btn.setToolTip(_CLOSE_BROWSER_HINT)
-
-                self._browser_buttons[(browser.name, profile_name)] = btn
-
-                def _make_handler(bn: str, pn: str, b: QPushButton) -> None:
-                    def _clicked() -> None:
-                        currently = self._profile_states[bn][pn]
-                        self._profile_states[bn][pn] = not currently
-                        b.setText("Stop manage" if not currently else "Manage")
-
-                        # If enabling profile, check if backup exists and mark for restore
-                        if not currently and folder is not None:
-                            if _sync_folder_has_profile(folder):
-                                config_module.mark_profile_for_restore(bn, pn)
-                                _LOG.info("Profile %s/%s marked for initial restore", bn, pn)
-
-                        self._save_profiles_config()
-                        if not currently:
-                            self.sync_requested.emit()
-                    b.clicked.connect(_clicked)
-
-                _make_handler(browser.name, profile_name, btn)
-
                 top_layout.addWidget(name_lbl)
                 top_layout.addStretch()
-                top_layout.addWidget(btn)
+
+                sync_toggle_btn = QPushButton()
+                sync_toggle_btn.setFixedWidth(110)
+                sync_enabled = config_module.is_profile_sync_enabled(browser.name, profile_name)
+                sync_toggle_btn.setText("Auto-sync: ON" if sync_enabled else "Auto-sync: OFF")
+                sync_toggle_btn.setVisible(is_enabled)
+                self._sync_toggle_buttons[(browser.name, profile_name)] = sync_toggle_btn
+                top_layout.addWidget(sync_toggle_btn)
+
+                apply_btn = QPushButton("Apply Backup")
+                apply_btn.setFixedWidth(100)
+                apply_btn.setEnabled(not is_running and not self._syncing)
+                if is_running:
+                    apply_btn.setToolTip(_CLOSE_BROWSER_HINT)
+                self._apply_backup_buttons[(browser.name, profile_name)] = apply_btn
+                top_layout.addWidget(apply_btn)
 
                 progress_bar = QProgressBar()
                 progress_bar.setMaximumHeight(8)
@@ -677,9 +613,50 @@ class SettingsDialog(QDialog):
                 row_layout.addWidget(info_label)
 
                 layout.addWidget(row)
-            else:
-                is_running = browser.is_running()
 
+                def _make_sync_toggle_handler(bn: str, pn: str, btn: QPushButton) -> None:
+                    def _clicked() -> None:
+                        enabled = config_module.is_profile_sync_enabled(bn, pn)
+                        config_module.set_profile_sync_enabled(bn, pn, not enabled)
+                        btn.setText("Auto-sync: ON" if not enabled else "Auto-sync: OFF")
+                    btn.clicked.connect(_clicked)
+
+                _make_sync_toggle_handler(browser.name, profile_name, sync_toggle_btn)
+
+                def _make_apply_handler(
+                    bn: str, pn: str, btn: QPushButton, s_btn: QPushButton
+                ) -> None:
+                    def _clicked() -> None:
+                        currently = self._profile_states[bn][pn]
+                        if not currently:
+                            self._profile_states[bn][pn] = True
+                            s_btn.setVisible(True)
+                            if folder is not None and _sync_folder_has_profile(folder):
+                                config_module.mark_profile_for_restore(bn, pn)
+                                _LOG.info("Profile %s/%s marked for initial restore", bn, pn)
+                            self._save_profiles_config()
+                            self._syncing = True
+                            self._refresh_apply_backup_enabled()
+                            self.apply_backup_requested.emit(bn, pn)
+                        else:
+                            from PySide6.QtWidgets import QMessageBox
+                            reply = QMessageBox.question(
+                                self,
+                                "Apply Backup",
+                                f"Overwrite local {bn} profile with backup?\n\n"
+                                "This will replace local data with the synced backup.",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                QMessageBox.StandardButton.No,
+                            )
+                            if reply == QMessageBox.StandardButton.Yes:
+                                self._syncing = True
+                                self._refresh_apply_backup_enabled()
+                                self.apply_backup_requested.emit(bn, pn)
+                    btn.clicked.connect(_clicked)
+
+                _make_apply_handler(browser.name, profile_name, apply_btn, sync_toggle_btn)
+
+            else:
                 header_row = QWidget()
                 header_row.setObjectName("profile_row")
                 header_row.setStyleSheet(PROFILE_ROW_STYLE)
@@ -725,37 +702,26 @@ class SettingsDialog(QDialog):
                     top_layout.addWidget(spacer)
 
                     name_lbl = QLabel(f"• {display}")
-                    btn = QPushButton("Stop manage" if is_enabled else "Manage")
-                    btn.setFixedWidth(100)
-                    if is_running:
-                        btn.setEnabled(False)
-                        btn.setToolTip(_CLOSE_BROWSER_HINT)
-
-                    self._browser_buttons[(browser.name, profile_name)] = btn
-
-                    def _make_handler(bn: str, pn: str, b: QPushButton) -> None:
-                        def _clicked() -> None:
-                            currently = self._profile_states[bn][pn]
-                            self._profile_states[bn][pn] = not currently
-                            b.setText("Stop manage" if not currently else "Manage")
-
-                            if not currently and folder is not None:
-                                if _sync_folder_has_profile(folder):
-                                    config_module.mark_profile_for_restore(bn, pn)
-                                    _LOG.info(
-                                        "Profile %s/%s marked for initial restore", bn, pn
-                                    )
-
-                            self._save_profiles_config()
-                            if not currently:
-                                self.sync_requested.emit()
-                        b.clicked.connect(_clicked)
-
-                    _make_handler(browser.name, profile_name, btn)
-
                     top_layout.addWidget(name_lbl)
                     top_layout.addStretch()
-                    top_layout.addWidget(btn)
+
+                    sync_toggle_btn = QPushButton()
+                    sync_toggle_btn.setFixedWidth(110)
+                    sync_enabled = config_module.is_profile_sync_enabled(
+                        browser.name, profile_name
+                    )
+                    sync_toggle_btn.setText("Auto-sync: ON" if sync_enabled else "Auto-sync: OFF")
+                    sync_toggle_btn.setVisible(is_enabled)
+                    self._sync_toggle_buttons[(browser.name, profile_name)] = sync_toggle_btn
+                    top_layout.addWidget(sync_toggle_btn)
+
+                    apply_btn = QPushButton("Apply Backup")
+                    apply_btn.setFixedWidth(100)
+                    apply_btn.setEnabled(not is_running and not self._syncing)
+                    if is_running:
+                        apply_btn.setToolTip(_CLOSE_BROWSER_HINT)
+                    self._apply_backup_buttons[(browser.name, profile_name)] = apply_btn
+                    top_layout.addWidget(apply_btn)
 
                     progress_bar = QProgressBar()
                     progress_bar.setMaximumHeight(8)
@@ -777,6 +743,50 @@ class SettingsDialog(QDialog):
 
                     layout.addWidget(row)
 
+                    def _make_sync_toggle_handler(bn: str, pn: str, btn: QPushButton) -> None:
+                        def _clicked() -> None:
+                            enabled = config_module.is_profile_sync_enabled(bn, pn)
+                            config_module.set_profile_sync_enabled(bn, pn, not enabled)
+                            btn.setText("Auto-sync: ON" if not enabled else "Auto-sync: OFF")
+                        btn.clicked.connect(_clicked)
+
+                    _make_sync_toggle_handler(browser.name, profile_name, sync_toggle_btn)
+
+                    def _make_apply_handler(
+                        bn: str, pn: str, btn: QPushButton, s_btn: QPushButton
+                    ) -> None:
+                        def _clicked() -> None:
+                            currently = self._profile_states[bn][pn]
+                            if not currently:
+                                self._profile_states[bn][pn] = True
+                                s_btn.setVisible(True)
+                                if folder is not None and _sync_folder_has_profile(folder):
+                                    config_module.mark_profile_for_restore(bn, pn)
+                                    _LOG.info(
+                                        "Profile %s/%s marked for initial restore", bn, pn
+                                    )
+                                self._save_profiles_config()
+                                self._syncing = True
+                                self._refresh_apply_backup_enabled()
+                                self.apply_backup_requested.emit(bn, pn)
+                            else:
+                                from PySide6.QtWidgets import QMessageBox
+                                reply = QMessageBox.question(
+                                    self,
+                                    "Apply Backup",
+                                    f"Overwrite local {bn} profile with backup?\n\n"
+                                    "This will replace local data with the synced backup.",
+                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                    QMessageBox.StandardButton.No,
+                                )
+                                if reply == QMessageBox.StandardButton.Yes:
+                                    self._syncing = True
+                                    self._refresh_apply_backup_enabled()
+                                    self.apply_backup_requested.emit(bn, pn)
+                        btn.clicked.connect(_clicked)
+
+                    _make_apply_handler(browser.name, profile_name, apply_btn, sync_toggle_btn)
+
         if not found_any:
             layout.addWidget(QLabel("No supported browsers detected."))
 
@@ -786,8 +796,6 @@ class SettingsDialog(QDialog):
             self._profiles_group.setVisible(True)
         if hasattr(self, "_selects_row"):
             self._selects_row.setVisible(True)
-        if hasattr(self, "_sync_interval_group"):
-            self._sync_interval_group.setVisible(True)
         if self._activity_log_select:
             if self._activity_log_select.currentData():
                 if self._log_signaler is None:
@@ -943,22 +951,14 @@ class SettingsDialog(QDialog):
         if self._log_handler is not None:
             logging.getLogger().removeHandler(self._log_handler)
             self._log_handler = None
-        if self._next_sync_timer is not None:
-            self._next_sync_timer.stop()
-            self._next_sync_timer = None
-        if self._browser_status_timer is not None:
-            self._browser_status_timer.stop()
-            self._browser_status_timer = None
+        if self._browser_monitor is not None:
+            try:
+                self._browser_monitor.state_changed.disconnect(self._on_browser_state_changed)
+            except RuntimeError:
+                pass
         super().closeEvent(event)
 
     def _load_current_settings(self) -> None:
-        if self._sync_interval_combo is not None:
-            interval = config_module.get_sync_interval()
-            for i in range(self._sync_interval_combo.count()):
-                if self._sync_interval_combo.itemData(i) == interval:
-                    self._sync_interval_combo.setCurrentIndex(i)
-                    break
-
         sync_folder = config_module.get_sync_folder()
         if sync_folder and self._folder_edit:
             self._folder_edit.blockSignals(True)

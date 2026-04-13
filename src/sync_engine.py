@@ -68,6 +68,89 @@ DEFAULT_DATA_TYPES: dict[str, bool] = {
     "search_shortcuts": True,
 }
 
+# Dotted key paths extracted from Preferences and stored as preferences.json in the archive.
+# Only keys with actual data in the source profile are written; on restore, only keys that
+# already exist in the target Preferences are updated (never injected from scratch).
+PREFERENCES_KEYS: tuple[str, ...] = (
+    # Privacy & security
+    "enable_do_not_track",
+    "https_only_mode_enabled",
+    "safe_browsing",
+    "safebrowsing",
+    "net.network_prediction_options",
+    # Password manager
+    "credentials_enable_service",
+    "credentials_enable_autosignin",
+    # Language & input
+    "intl",
+    "spellcheck",
+    "translate_blocked_languages",
+    "translate_allowlists",
+    "translate_recent_target",
+    # Search & omnibox
+    "search",
+    "omnibox",
+    # UI chrome
+    "toolbar",
+    "bookmark_bar",
+    "browser.enable_spellchecking",
+    "browser.theme",
+    # File dialogs
+    "savefile",
+    "selectfile",
+    # DevTools layout
+    "devtools.preferences",
+    # Per-site zoom
+    "partition.per_host_zoom_levels",
+    # Protocol handlers
+    "custom_handlers",
+    # Print settings
+    "printing",
+    # Per-site permission grants (exclude engagement/metadata noise)
+    "profile.content_settings.exceptions.geolocation",
+    "profile.content_settings.exceptions.notifications",
+    "profile.content_settings.exceptions.media_stream_mic",
+    "profile.content_settings.exceptions.media_stream_camera",
+    "profile.content_settings.exceptions.popups",
+    "profile.content_settings.exceptions.http_allowed",
+    "profile.content_settings.exceptions.javascript",
+    "profile.content_settings.exceptions.cookies",
+    "profile.content_settings.exceptions.sound",
+    "profile.content_settings.exceptions.autoplay",
+    "profile.content_settings.exceptions.automatic_downloads",
+    "profile.content_settings.exceptions.window_placement",
+    "profile.content_settings.exceptions.hid_chooser_data",
+    "profile.content_settings.exceptions.ssl_cert_decisions",
+    "profile.content_settings.exceptions.fedcm_idp_signin",
+)
+
+
+def _get_nested(d: dict, keys: list[str]) -> tuple[bool, object]:
+    cur: object = d
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return False, None
+        cur = cur[k]
+    return True, cur
+
+
+def _set_nested(d: dict, keys: list[str], value: object) -> None:
+    for k in keys[:-1]:
+        d = d.setdefault(k, {})
+    d[keys[-1]] = value
+
+
+def _merge_prefs(target: dict, source: dict) -> None:
+    """Deep-merge *source* into *target*, updating only keys that already exist in *target*."""
+    for key, value in source.items():
+        if key not in target:
+            continue
+        if isinstance(value, dict) and isinstance(target[key], dict):
+            _merge_prefs(target[key], value)
+        else:
+            target[key] = value
+
+
 _LOG = logging.getLogger(__name__)
 
 
@@ -662,7 +745,6 @@ class SyncEngine:
         if dt.get("local_storage", True):
             items_to_delete.append(profile_path / "Local Storage")
 
-        items_to_delete.append(profile_path / "Preferences")
         if dt.get("bookmarks", True):
             items_to_delete.append(profile_path / "Bookmarks")
         if dt.get("custom_dictionary", True):
@@ -696,6 +778,7 @@ class SyncEngine:
                 "--transfers", "8",
                 "--checkers", "16",
                 "--exclude", "._*",
+                "--exclude", "preferences.json",
             ]
             for ext_id in excluded_ext_ids:
                 cmd += ["--exclude", f"Extensions/{ext_id}/**"]
@@ -727,6 +810,15 @@ class SyncEngine:
         except (subprocess.CalledProcessError, FileNotFoundError) as exc:
             self.logger.exception("Restore failed: %s", exc)
             raise OSError(f"Restore failed: {exc}") from exc
+
+        json_path = sync_profile_path / "preferences.json"
+        prefs_path = profile_path / "Preferences"
+        if json_path.exists() and prefs_path.exists():
+            saved = json.loads(json_path.read_bytes())
+            prefs = json.loads(prefs_path.read_bytes())
+            _merge_prefs(prefs, saved)
+            prefs_path.write_bytes(json.dumps(prefs, separators=(",", ":")).encode())
+            self.logger.info("Merged preferences.json into %s", prefs_path)
 
         if dt.get("search_shortcuts", True):
             self._restore_search_shortcuts(profile_path, self.sync_folder)
@@ -794,10 +886,11 @@ class SyncEngine:
     def _extract_search_shortcuts(self, profile_path: Path, sync_folder_root: Path) -> None:
         """Extract user-created search shortcuts from Web Data database to global JSON file.
 
-        Reads all user-created (prepopulate_id = 0) keywords from Web Data and exports to
-        search_shortcuts.json at the root of sync folder (shared across all browsers).
+        Reads all user-created (prepopulate_id = 0) keywords from Web Data and writes them
+        to search_shortcuts.json at the root of sync folder (shared across all browsers).
+        This is only called for browsers in push direction — the JSON acts as the master
+        and is consumed (but never overwritten) by browsers in both/pull direction.
         Uses read-only connection to avoid lock issues.
-        Always creates the file even if extraction fails (empty array).
 
         When the default engine has an empty sync_guid in the DB but its URL matches
         default_search_provider_data in Preferences, the Preferences guid is adopted so
@@ -807,8 +900,7 @@ class SyncEngine:
         shortcuts_json = sync_folder_root / "search_shortcuts.json"
 
         if not web_data_src.exists():
-            self.logger.debug("No Web Data database found at %s", web_data_src)
-            shortcuts_json.write_text("[]", encoding="utf-8")
+            self.logger.debug("No Web Data database found at %s — skipping extract", web_data_src)
             return
 
         try:
@@ -879,11 +971,10 @@ class SyncEngine:
 
         except sqlite3.Error as exc:
             self.logger.warning(
-                "Failed to extract search shortcuts from %s: %s (creating empty file)",
+                "Failed to extract search shortcuts from %s: %s",
                 web_data_src,
                 exc,
             )
-            shortcuts_json.write_text("[]", encoding="utf-8")
 
     def _restore_search_shortcuts(self, profile_path: Path, sync_folder_root: Path) -> None:
         """Restore search shortcuts from global JSON file to Web Data database (overwrite mode).
@@ -999,6 +1090,51 @@ class SyncEngine:
         except (sqlite3.Error, json.JSONDecodeError, KeyError) as exc:
             self.logger.warning("Failed to restore search shortcuts: %s", exc)
 
+    def _sync_preferences_json(
+        self,
+        profile_path: Path,
+        sync_profile_path: Path,
+        direction: str,
+    ) -> None:
+        """Extract/merge a curated subset of Preferences as preferences.json in the sync dir.
+
+        Push: reads profile Preferences, writes only PREFERENCES_KEYS to preferences.json.
+        Pull: reads preferences.json and deep-merges into profile Preferences, touching only
+              keys that already exist there (never injects foreign keys).
+        """
+        prefs_path = profile_path / "Preferences"
+        json_path = sync_profile_path / "preferences.json"
+
+        local_mtime = prefs_path.stat().st_mtime if prefs_path.exists() else 0.0
+        remote_mtime = json_path.stat().st_mtime if json_path.exists() else 0.0
+
+        do_push = direction == "push" or (direction == "both" and local_mtime > remote_mtime)
+        do_pull = direction == "pull" or (direction == "both" and remote_mtime > local_mtime)
+
+        if do_push and prefs_path.exists():
+            prefs = json.loads(prefs_path.read_bytes())
+            extracted: dict = {}
+            for dotted in PREFERENCES_KEYS:
+                keys = dotted.split(".")
+                found, value = _get_nested(prefs, keys)
+                if found:
+                    _set_nested(extracted, keys, value)
+            json_path.parent.mkdir(parents=True, exist_ok=True)
+            json_path.write_text(json.dumps(extracted), encoding="utf-8")
+            # Remove legacy raw Preferences from sync dir (replaced by preferences.json)
+            legacy = sync_profile_path / "Preferences"
+            if legacy.exists():
+                legacy.unlink()
+            self._report("preferences.json")
+            self._synced_count += 1
+        elif do_pull and json_path.exists() and prefs_path.exists():
+            saved = json.loads(json_path.read_bytes())
+            prefs = json.loads(prefs_path.read_bytes())
+            _merge_prefs(prefs, saved)
+            prefs_path.write_bytes(json.dumps(prefs, separators=(",", ":")).encode())
+            self._report("Preferences")
+            self._synced_count += 1
+
     def sync_browser_profile(
         self,
         profile_path: Path,
@@ -1029,8 +1165,9 @@ class SyncEngine:
                 profile_path, sync_profile_path, "Local Storage/leveldb", direction
             )
 
+        self._sync_preferences_json(profile_path, sync_profile_path, direction)
+
         plain_files: list[tuple[str, str | None]] = [
-            ("Preferences", None),
             ("Bookmarks", "bookmarks"),
             ("Custom Dictionary.txt", "custom_dictionary"),
         ]
@@ -1043,7 +1180,7 @@ class SyncEngine:
                 self._sync_file(src, dst, direction)
 
         if dt.get("search_shortcuts", True):
-            if direction in ("push", "both"):
+            if direction == "push":
                 self._extract_search_shortcuts(profile_path, self.sync_folder)
             if direction in ("pull", "both"):
                 self._restore_search_shortcuts(profile_path, self.sync_folder)
@@ -1054,8 +1191,18 @@ class SyncEngine:
     # Top-level orchestration
     # ------------------------------------------------------------------
 
-    def sync_all(self) -> dict[str, bool]:
-        """Sync all installed, non-running browsers, respecting saved config.
+    def sync_all(
+        self,
+        only_browser: str | None = None,
+        only_profile: str | None = None,
+        force_direction: str | None = None,
+    ) -> dict[str, bool]:
+        """Sync installed, non-running browsers respecting saved config.
+
+        *only_browser*: restrict sync to a single browser by name.
+        *only_profile*: further restrict to a single profile directory name.
+        *force_direction*: override per-profile direction ("push"/"pull"/"both").
+          When "pull", uses restore_profile_from_backup for a clean overwrite.
 
         Returns a dict with 'is_first_sync' to indicate if this was initial setup.
         """
@@ -1079,17 +1226,25 @@ class SyncEngine:
         if is_first_sync:
             self.logger.info("Starting initial sync (first-time setup)")
         else:
-            self.logger.info("Starting sync_all")
+            self.logger.info(
+                "Starting sync_all (only_browser=%s, only_profile=%s, force_direction=%s)",
+                only_browser, only_profile, force_direction,
+            )
 
-        # Skip entirely if every installed, non-disabled browser is running.
-        manageable = [
+        browsers_to_sync = [
             b for b in self.browsers
+            if only_browser is None or b.name == only_browser
+        ]
+
+        # Skip entirely if every targeted, non-disabled browser is running.
+        manageable = [
+            b for b in browsers_to_sync
             if enabled_browsers.get(b.name) is not False and b.is_installed()
         ]
         if manageable and all(b.is_running() for b in manageable):
             running_names = [b.name for b in manageable]
             self.logger.warning(
-                "All managed browsers running (%s) — skipping sync",
+                "All targeted browsers running (%s) — skipping sync",
                 ", ".join(running_names),
             )
             return {"is_first_sync": is_first_sync, "skipped_running": running_names}
@@ -1105,7 +1260,7 @@ class SyncEngine:
                 self._report("Unpacking...")
                 self._unpack_archive(current_archive, work_dir)
 
-            for browser in self.browsers:
+            for browser in browsers_to_sync:
                 if enabled_browsers.get(browser.name) is False:
                     self.logger.debug("Browser %s disabled in settings — skipping", browser.name)
                     continue
@@ -1133,16 +1288,20 @@ class SyncEngine:
                     continue
 
                 profiles = [p for p in profiles if p.name in allowed]
+                if only_profile:
+                    profiles = [p for p in profiles if p.name == only_profile]
                 if not profiles:
-                    self.logger.info("Browser %s: no enabled profiles — skipping", browser.name)
+                    self.logger.info("Browser %s: no matching profiles — skipping", browser.name)
                     continue
 
                 self.logger.info("Browser %s: syncing %d profile(s)", browser.name, len(profiles))
                 for profile_path in profiles:
                     self._report(f"{browser.name}/{profile_path.name}")
-                    direction = directions.get(browser.name, {}).get(profile_path.name, "both")
+                    direction = force_direction or directions.get(browser.name, {}).get(
+                        profile_path.name, "both"
+                    )
 
-                    needs_restore = (
+                    needs_restore = force_direction == "pull" or (
                         browser.name in profiles_needing_restore
                         and profile_path.name in profiles_needing_restore[browser.name]
                     )
@@ -1160,7 +1319,8 @@ class SyncEngine:
                                 on_progress=self._progress_cb,
                             )
                             self._install_external_extensions(work_dir, browser)
-                            _config.clear_restore_flag(browser.name, profile_path.name)
+                            if force_direction != "pull":
+                                _config.clear_restore_flag(browser.name, profile_path.name)
                         else:
                             self.sync_browser_profile(
                                 profile_path, work_dir, data_types,
@@ -1175,13 +1335,14 @@ class SyncEngine:
                             profile_path.name,
                             browser.name,
                         )
-                        if needs_restore:
+                        if needs_restore and force_direction != "pull":
                             raise
             success = True
         finally:
-            # Only repack if sync completed without an unhandled exception; otherwise
-            # packing a partial work_dir would corrupt the archive.
-            if success and any(work_dir.iterdir()):
+            # Repack only when sync completed and something actually changed.
+            # Skipping when synced_count == 0 prevents the file-watcher from seeing
+            # an updated archive mtime and immediately triggering another no-op sync.
+            if success and self._synced_count > 0 and any(work_dir.iterdir()):
                 self._report("Packing...")
                 self._pack_to_archive(work_dir, current_archive)
             shutil.rmtree(work_dir)
