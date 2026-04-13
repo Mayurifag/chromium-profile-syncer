@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import platform
 import time
 from pathlib import Path
 
@@ -38,6 +39,12 @@ from src.shortcuts_editor import ShortcutsEditorDialog
 
 _LOG = logging.getLogger(__name__)
 
+_CLOSE_BROWSER_HINT = (
+    "Close browser from the system tray to allow sync"
+    if platform.system() == "Windows"
+    else "Quit browser (Cmd+Q) to allow sync"
+)
+
 
 def _make_status_indicator(is_running: bool) -> QLabel:
     label = QLabel()
@@ -57,7 +64,7 @@ def _make_status_indicator(is_running: bool) -> QLabel:
         painter.end()
 
         label.setPixmap(pixmap)
-        label.setToolTip("Browser is running (quit with Cmd+Q to allow sync)")
+        label.setToolTip(_CLOSE_BROWSER_HINT)
     else:
         label.setFixedWidth(12)
         label.setToolTip("")
@@ -66,6 +73,8 @@ def _make_status_indicator(is_running: bool) -> QLabel:
 
 
 def _sync_folder_has_data(folder: Path) -> bool:
+    if (folder / "current.tar").is_file():
+        return True
     current = folder / "current"
     if not current.is_dir():
         return False
@@ -74,19 +83,16 @@ def _sync_folder_has_data(folder: Path) -> bool:
 
 def _sync_folder_is_broken(folder: Path) -> bool:
     metadata = folder / "metadata.json"
-    current = folder / "current"
-    return metadata.exists() and not current.is_dir()
+    if not metadata.exists():
+        return False
+    return not (folder / "current.tar").is_file() and not (folder / "current").is_dir()
 
 
-def _profiles_in_sync_folder(folder: Path) -> dict[str, set[str]]:
-    result: dict[str, set[str]] = {}
+def _sync_folder_has_profile(folder: Path) -> bool:
+    if (folder / "current.tar").is_file():
+        return True
     current = folder / "current"
-    if not current.is_dir():
-        return result
-    for browser_dir in current.iterdir():
-        if browser_dir.is_dir():
-            result[browser_dir.name] = {p.name for p in browser_dir.iterdir() if p.is_dir()}
-    return result
+    return current.is_dir() and any(current.iterdir())
 
 
 class SettingsDialog(QDialog):
@@ -339,7 +345,7 @@ class SettingsDialog(QDialog):
 
                 painter.setBrush(QColor(*RUNNING_DOT))
                 painter.drawEllipse(2, 2, 8, 8)
-                indicator.setToolTip("Browser is running (quit with Cmd+Q to allow sync)")
+                indicator.setToolTip(_CLOSE_BROWSER_HINT)
             else:
                 painter.setBrush(QColor(*NOT_RUNNING_DOT))
                 painter.setPen(Qt.PenStyle.NoPen)
@@ -353,7 +359,7 @@ class SettingsDialog(QDialog):
                 if btn_browser == browser.name:
                     btn.setEnabled(not is_running)
                     if is_running:
-                        btn.setToolTip("Quit browser first (Cmd+Q)")
+                        btn.setToolTip(_CLOSE_BROWSER_HINT)
                     else:
                         btn.setToolTip("")
 
@@ -499,8 +505,6 @@ class SettingsDialog(QDialog):
             self._rebuild_profiles(folder)
             return
 
-        sync_profile_path = folder / "current" / browser_name / profile_name
-
         dlg = QDialog(self)
         dlg.setWindowTitle("Uploading Profile")
         dlg.setMinimumWidth(420)
@@ -526,22 +530,31 @@ class SettingsDialog(QDialog):
             step = Signal(str)
             done = Signal()
 
-            def __init__(self, src: Path, dst: Path) -> None:
+            def __init__(self, src: Path) -> None:
                 super().__init__()
                 self._src = src
-                self._dst = dst
 
             def run(self) -> None:
+                import shutil as _shutil
+                import tempfile
+                from pathlib import Path as _Path
+
                 from src.sync_engine import SyncEngine
                 engine = SyncEngine(folder)
-                engine.sync_browser_profile(
-                    self._src, self._dst, direction="push",
-                    on_progress=lambda desc: self.step.emit(desc),
-                )
+                work_dir = _Path(tempfile.mkdtemp(prefix="cps-upload-"))
+                try:
+                    engine.sync_browser_profile(
+                        self._src, work_dir, direction="push",
+                        on_progress=lambda desc: self.step.emit(desc),
+                    )
+                    self.step.emit("Packing archive...")
+                    engine._pack_to_archive(work_dir, folder / "current.tar")
+                finally:
+                    _shutil.rmtree(work_dir)
                 engine.update_metadata()
                 self.done.emit()
 
-        self._upload_worker = _Worker(profile_path, sync_profile_path)
+        self._upload_worker = _Worker(profile_path)
         self._upload_count = 0
 
         def _on_step(description: str) -> None:
@@ -558,10 +571,11 @@ class SettingsDialog(QDialog):
             elapsed = time.monotonic() - start_time
             dlg.close()
             config_module.set_sync_folder(folder)
-            # Save the uploaded profile to config
             config_module.set_enabled_profiles({browser_name: [profile_name]})
             config_module.set_enabled_browsers({browser_name: True})
             _LOG.info("Initial upload done: %d items in %.1fs", self._upload_count, elapsed)
+            if self._clean_btn:
+                self._clean_btn.setVisible(_sync_folder_has_data(folder))
             self._rebuild_profiles(folder)
 
         self._upload_worker.step.connect(_on_step)
@@ -620,7 +634,7 @@ class SettingsDialog(QDialog):
                 btn.setFixedWidth(100)
                 if is_running:
                     btn.setEnabled(False)
-                    btn.setToolTip("Quit browser first (Cmd+Q)")
+                    btn.setToolTip(_CLOSE_BROWSER_HINT)
 
                 self._browser_buttons[(browser.name, profile_name)] = btn
 
@@ -632,8 +646,7 @@ class SettingsDialog(QDialog):
 
                         # If enabling profile, check if backup exists and mark for restore
                         if not currently and folder is not None:
-                            backup_path = folder / "current" / bn / pn
-                            if backup_path.exists():
+                            if _sync_folder_has_profile(folder):
                                 config_module.mark_profile_for_restore(bn, pn)
                                 _LOG.info("Profile %s/%s marked for initial restore", bn, pn)
 
@@ -716,7 +729,7 @@ class SettingsDialog(QDialog):
                     btn.setFixedWidth(100)
                     if is_running:
                         btn.setEnabled(False)
-                        btn.setToolTip("Quit browser first (Cmd+Q)")
+                        btn.setToolTip(_CLOSE_BROWSER_HINT)
 
                     self._browser_buttons[(browser.name, profile_name)] = btn
 
@@ -725,6 +738,14 @@ class SettingsDialog(QDialog):
                             currently = self._profile_states[bn][pn]
                             self._profile_states[bn][pn] = not currently
                             b.setText("Stop manage" if not currently else "Manage")
+
+                            if not currently and folder is not None:
+                                if _sync_folder_has_profile(folder):
+                                    config_module.mark_profile_for_restore(bn, pn)
+                                    _LOG.info(
+                                        "Profile %s/%s marked for initial restore", bn, pn
+                                    )
+
                             self._save_profiles_config()
                             if not currently:
                                 self.sync_requested.emit()
@@ -853,7 +874,13 @@ class SettingsDialog(QDialog):
 
         import shutil
 
-        for path in ["current", "backup-1", "backup-2", "metadata.json"]:
+        from src.sync_engine import clean_external_extensions
+        clean_external_extensions(ALL_BROWSERS)
+
+        for path in [
+            "current", "current.tar",
+            "metadata.json", "search_shortcuts.json",
+        ]:
             target = folder / path
             try:
                 if target.is_dir():

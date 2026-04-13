@@ -23,3 +23,10 @@ class Thorium(BrowserBase):
 
     def _linux_path(self) -> Path:
         return Path.home() / ".config" / "thorium"
+
+    def windows_extensions_registry_key(self) -> str | None:
+        # Thorium reads from Chrome's registry path, not its own
+        return r"SOFTWARE\Google\Chrome\Extensions"
+
+    def windows_force_list_registry_key(self) -> str | None:
+        return r"SOFTWARE\Policies\Google\Chrome\ExtensionInstallForcelist"

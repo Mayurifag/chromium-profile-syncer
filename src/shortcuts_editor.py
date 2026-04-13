@@ -141,6 +141,11 @@ class ShortcutsEditorDialog(QDialog):
                 "is_active": old_shortcut.get("is_active", 1),
                 "date_created": old_shortcut.get("date_created", 0),
                 "last_modified": old_shortcut.get("last_modified", 0),
+                "sync_guid": old_shortcut.get("sync_guid", ""),
+                "safe_for_autoreplace": old_shortcut.get("safe_for_autoreplace", 0),
+                "input_encodings": old_shortcut.get("input_encodings", "UTF-8"),
+                "alternate_urls": old_shortcut.get("alternate_urls", "[]"),
+                "is_default": old_shortcut.get("is_default", False),
             })
 
         try:

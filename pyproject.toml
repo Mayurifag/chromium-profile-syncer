@@ -5,6 +5,7 @@ description = "Cross-platform PySide6 system tray app to sync Chromium browser p
 requires-python = ">=3.12"
 dependencies = [
     "PySide6>=6.7",
+    "cryptography>=46.0.7",
     "psutil>=5.9",
 ]
 

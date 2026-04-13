@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class SyncWorker(QThread):
-    finished = Signal(str, bool)  # timestamp, is_first_sync
+    finished = Signal(str, bool, list)  # timestamp, is_first_sync, skipped_running
     error = Signal(str)
     progress = Signal(str)  # type: ignore[assignment]
     profile_progress = Signal(str, str, str, int, float)  # browser, profile, dir, count, elapsed
@@ -79,8 +79,9 @@ class SyncWorker(QThread):
             result = self._engine.sync_all()
             ts = datetime.now(tz=UTC).isoformat()
             is_first_sync = result.get("is_first_sync", False)
+            skipped_running = result.get("skipped_running", [])
             logger.info("SyncWorker: sync finished at %s", ts)
-            self.finished.emit(ts, is_first_sync)
+            self.finished.emit(ts, is_first_sync, skipped_running)
         except Exception as exc:
             logger.exception("SyncWorker: sync error")
             self.error.emit(str(exc))
@@ -396,7 +397,8 @@ class TrayApp(QSystemTrayIcon):
                 browser, profile, direction, count, elapsed
             )
 
-    def _on_sync_finished(self, last_sync: str, is_first_sync: bool) -> None:
+    def _on_sync_finished(self, last_sync: str, is_first_sync: bool, skipped_running: list) -> None:
+        self._worker = None
         if is_first_sync:
             logger.info("Initial sync finished at %s", last_sync)
         else:
@@ -417,7 +419,15 @@ class TrayApp(QSystemTrayIcon):
         self.setIcon(self._make_icon(state))
         self._action_sync.setText("Sync Now")
 
-        if is_first_sync:
+        if skipped_running:
+            names = ", ".join(skipped_running)
+            self._action_status.setText(f"Waiting — close {names} to sync")
+            self.showMessage(
+                "Chromium Profile Syncer",
+                f"{names} is running — close it completely to allow sync.",
+                QSystemTrayIcon.MessageIcon.Warning,
+            )
+        elif is_first_sync:
             self._action_status.setText("Initial setup complete")
         else:
             self._action_status.setText(f"Last sync: {last_sync}")
@@ -426,6 +436,7 @@ class TrayApp(QSystemTrayIcon):
         self._action_settings.setEnabled(True)
 
     def _on_sync_error(self, msg: str) -> None:
+        self._worker = None
         logger.error("Sync error: %s", msg)
         self.setIcon(self._make_icon("error"))
         self._action_sync.setText("Sync Now")

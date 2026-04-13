@@ -55,6 +55,23 @@ class BrowserBase(ABC):
         root = self.profile_root()
         return (root / "External Extensions") if root else None
 
+    def windows_extensions_registry_key(self) -> str | None:
+        """Return the HKCU registry subkey for external extension registration on Windows.
+
+        Chrome on Windows ignores the file-based External Extensions directory;
+        the Registry is the only supported mechanism. Other browsers may fall back
+        to the file-based approach, so return None by default.
+        """
+        return None
+
+    def windows_force_list_registry_key(self) -> str | None:
+        """Return the HKCU registry subkey for ExtensionInstallForcelist policy.
+
+        Force-listed extensions install and enable automatically with no user prompt.
+        Returns None by default; browsers that support this policy override it.
+        """
+        return None
+
     def get_profile_name(self, profile_path: Path) -> str:
         """Read display name from Local State or Preferences, fallback to directory name."""
         import json

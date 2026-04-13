@@ -206,7 +206,9 @@ def test_rebuild_profiles_synced_profile_enabled(qapp, tmp_path):
     from src.settings import SettingsDialog
 
     sync_folder = tmp_path / "sync"
-    (sync_folder / "current" / "Chrome" / "Default").mkdir(parents=True)
+    current = sync_folder / "current"
+    current.mkdir(parents=True)
+    (current / "Preferences").write_text("{}", encoding="utf-8")
 
     # Save Default profile to config (simulating user enabling it)
     config_module.set_enabled_profiles({"Chrome": ["Default"]})
@@ -237,7 +239,7 @@ def test_settings_dialog_accept_saves_config(qapp, monkeypatch):
 
 def test_initial_upload_only_one_profile_enabled(qapp, tmp_path):
     """After initial upload of ONE profile, only that profile should show as enabled."""
-    from src.settings import SettingsDialog, _profiles_in_sync_folder
+    from src.settings import SettingsDialog, _sync_folder_has_profile
     from src.sync_engine import SyncEngine
 
     # Setup: clean state
@@ -259,9 +261,9 @@ def test_initial_upload_only_one_profile_enabled(qapp, tmp_path):
         (p / "Preferences").write_text("{}", encoding="utf-8")
         (p / "Bookmarks").write_text('{"roots":{}}', encoding="utf-8")
 
-    # Simulate initial upload of ONLY Default profile
+    # Simulate initial upload of ONLY Default profile to the canonical current/
     engine = SyncEngine(sync_folder)
-    sync_profile_path = sync_folder / "current" / "Chrome" / "Default"
+    sync_profile_path = sync_folder / "current"
     engine.sync_browser_profile(default, sync_profile_path, direction="push")
     engine.update_metadata()
 
@@ -269,16 +271,8 @@ def test_initial_upload_only_one_profile_enabled(qapp, tmp_path):
     config_module.set_enabled_profiles({"Chrome": ["Default"]})
     config_module.set_enabled_browsers({"Chrome": True})
 
-    # Debug: list all directories created in sync folder
-    current = sync_folder / "current" / "Chrome"
-    if current.exists():
-        dirs = [d.name for d in current.iterdir() if d.is_dir()]
-        print(f"Directories in sync folder: {dirs}")
-
-    # Verify sync folder structure
-    synced = _profiles_in_sync_folder(sync_folder)
-    assert synced == {"Chrome": {"Default"}}, \
-        f"Expected only Default profile in sync folder, got: {synced}"
+    # Verify sync folder has data
+    assert _sync_folder_has_profile(sync_folder)
 
     # Create dialog with all 3 profiles
     mock = _MockBrowser("Chrome", profiles=["Default", "Profile 1", "Profile 2"])
@@ -294,35 +288,30 @@ def test_initial_upload_only_one_profile_enabled(qapp, tmp_path):
     dlg.close()
 
 
-def test_profiles_in_sync_folder_ignores_files(qapp, tmp_path):
-    """_profiles_in_sync_folder should only count directories, not files."""
-    from src.settings import _profiles_in_sync_folder
+def test_sync_folder_has_profile(qapp, tmp_path):
+    """_sync_folder_has_profile detects canonical profile data in current/."""
+    from src.settings import _sync_folder_has_profile
 
     sync_folder = tmp_path / "sync"
-    chrome_dir = sync_folder / "current" / "Chrome"
-    chrome_dir.mkdir(parents=True)
+    assert not _sync_folder_has_profile(sync_folder)
 
-    # Create profile directory
-    (chrome_dir / "Default").mkdir()
+    current = sync_folder / "current"
+    current.mkdir(parents=True)
+    assert not _sync_folder_has_profile(sync_folder)
 
-    # Create files that should be ignored
-    (chrome_dir / "webstore_extensions.json").write_text("[]", encoding="utf-8")
-    (chrome_dir / ".DS_Store").write_text("", encoding="utf-8")
-
-    synced = _profiles_in_sync_folder(sync_folder)
-    assert synced == {"Chrome": {"Default"}}, \
-        f"Should only detect Default directory, got: {synced}"
+    (current / "Preferences").write_text("{}", encoding="utf-8")
+    assert _sync_folder_has_profile(sync_folder)
 
 
 def test_clean_then_upload_clears_old_profiles(qapp, tmp_path):
     """After Clean, only the newly uploaded profile should show as enabled."""
-    from src.settings import SettingsDialog, _profiles_in_sync_folder
+    from src.settings import SettingsDialog, _sync_folder_has_profile
     from src.sync_engine import SyncEngine
 
     sync_folder = tmp_path / "sync"
     sync_folder.mkdir()
 
-    # Setup: simulate previously synced state with multiple profiles
+    # Setup: simulate previously synced state
     profiles_dir = tmp_path / "profiles"
     default = profiles_dir / "Default"
     profile1 = profiles_dir / "Profile 1"
@@ -331,23 +320,20 @@ def test_clean_then_upload_clears_old_profiles(qapp, tmp_path):
         p.mkdir(parents=True)
         (p / "Preferences").write_text("{}", encoding="utf-8")
 
-    # Sync both profiles initially
+    # Sync Default initially to canonical current/
     engine = SyncEngine(sync_folder)
-    for local_prof, name in [(default, "Default"), (profile1, "Profile 1")]:
-        sync_path = sync_folder / "current" / "Chrome" / name
-        engine.sync_browser_profile(local_prof, sync_path, direction="push")
+    sync_path = sync_folder / "current"
+    engine.sync_browser_profile(default, sync_path, direction="push")
 
     # Save to config
     config_module.set_enabled_profiles({"Chrome": ["Default", "Profile 1"]})
     config_module.set_enabled_browsers({"Chrome": True})
 
-    # Verify both are synced
-    synced = _profiles_in_sync_folder(sync_folder)
-    assert synced == {"Chrome": {"Default", "Profile 1"}}
+    assert _sync_folder_has_profile(sync_folder)
 
     # Simulate Clean button: delete sync data and clear config
     import shutil
-    for path in ["current", "backup-1", "backup-2"]:
+    for path in ["current"]:
         target = sync_folder / path
         if target.exists():
             shutil.rmtree(target)
@@ -356,10 +342,9 @@ def test_clean_then_upload_clears_old_profiles(qapp, tmp_path):
 
     # Verify config is cleared
     assert config_module.get_enabled_profiles() == {}
-    assert config_module.get_enabled_browsers() == {}
+    assert not _sync_folder_has_profile(sync_folder)
 
     # Now upload only Default profile (simulating initial upload after clean)
-    sync_path = sync_folder / "current" / "Chrome" / "Default"
     engine.sync_browser_profile(default, sync_path, direction="push")
     engine.update_metadata()
 
@@ -367,10 +352,7 @@ def test_clean_then_upload_clears_old_profiles(qapp, tmp_path):
     config_module.set_enabled_profiles({"Chrome": ["Default"]})
     config_module.set_enabled_browsers({"Chrome": True})
 
-    # Verify only Default is in sync folder
-    synced = _profiles_in_sync_folder(sync_folder)
-    assert synced == {"Chrome": {"Default"}}, \
-        f"After clean and re-upload, expected only Default, got: {synced}"
+    assert _sync_folder_has_profile(sync_folder)
 
     # Build UI and verify only Default shows as enabled
     mock = _MockBrowser("Chrome", profiles=["Default", "Profile 1"])

@@ -1,18 +1,27 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
+import platform
 import re
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
+import tarfile
+import tempfile
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 if TYPE_CHECKING:
     from src.browsers.base import BrowserBase
@@ -475,40 +484,50 @@ class SyncEngine:
                 fut.result()
 
     # ------------------------------------------------------------------
-    # Backup rotation
+    # Archive helpers
     # ------------------------------------------------------------------
 
-    def _rotate_backups(self) -> None:
-        """Rotate backup-1 → backup-2 (evicting backup-2) and current → backup-1."""
-        backup2 = self.sync_folder / "backup-2"
-        backup1 = self.sync_folder / "backup-1"
-        current = self.sync_folder / "current"
+    def _pack_to_archive(self, src_dir: Path, dst_archive: Path) -> None:
+        """Pack src_dir into an uncompressed tar archive at dst_archive.
 
-        if backup2.exists():
-            self._report("Removing old backup-2...")
-            shutil.rmtree(backup2)
-            self.logger.debug("Evicted backup-2")
+        Writes to a system temp file first (outside the sync folder) to avoid
+        triggering cloud-sync clients mid-write, then moves into place.
+        Tarfile preserves file modification times exactly (float precision), which
+        is essential for the mtime-based sync comparisons used elsewhere.
+        """
+        with tempfile.NamedTemporaryFile(suffix=".tar.tmp", delete=False) as ntf:
+            tmp = Path(ntf.name)
+        try:
+            with tarfile.open(str(tmp), "w:") as tf:
+                tf.add(str(src_dir), arcname=".")
+            for attempt in range(20):
+                try:
+                    shutil.copy2(str(tmp), dst_archive)
+                    break
+                except PermissionError:
+                    if attempt == 19:
+                        raise
+                    time.sleep(0.5)
+        finally:
+            tmp.unlink(missing_ok=True)
 
-        if backup1.exists():
-            self._report("Rotating backup-1 → backup-2...")
-            shutil.move(str(backup1), backup2)
-            self.logger.debug("Renamed backup-1 → backup-2")
-
-        if current.exists():
-            # Use rclone for fast parallel copy with progress
-            self._rclone_sync(current, backup1, "Creating backup")
-            self.logger.debug("Copied current → backup-1")
+    def _unpack_archive(self, src_archive: Path, dst_dir: Path) -> None:
+        """Unpack a tar archive into dst_dir, restoring file modification times."""
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(str(src_archive)) as tf:
+            tf.extractall(str(dst_dir), filter="data")
 
     # ------------------------------------------------------------------
     # External Extensions registration
     # ------------------------------------------------------------------
 
-    def _install_external_extensions(self, sync_profile_path: Path, ext_dir: Path) -> None:
-        """Write External Extensions JSON stubs for Web Store extensions from manifest.
+    def _install_external_extensions(self, sync_profile_path: Path, browser: object) -> None:
+        """Register Web Store extensions from manifest for the given browser.
 
-        Reads webstore_extensions.json manifest to find which extensions to register.
-        Each stub tells the browser to install the extension from the Chrome Web Store
-        on next launch. Unpacked extensions are synced directly via file copy.
+        On Windows, Chrome ignores the file-based External Extensions directory and
+        only reads from the Registry. Browsers that provide windows_extensions_registry_key()
+        use HKCU registry entries; others fall back to file-based JSON stubs (works on
+        macOS, Linux, and non-Chrome browsers that honour the directory).
         """
         manifest_path = sync_profile_path / "webstore_extensions.json"
         if not manifest_path.exists():
@@ -523,16 +542,61 @@ class SyncEngine:
         if not ext_ids:
             return
 
+        update_url = "https://clients2.google.com/service/update2/crx"
+
+        on_windows = platform.system() == "Windows"
+        reg_key = browser.windows_extensions_registry_key() if on_windows else None
+        if reg_key:
+            self._install_extensions_via_registry(ext_ids, reg_key, update_url)
+            force_key = browser.windows_force_list_registry_key() if on_windows else None
+            if force_key:
+                self._install_extensions_via_force_list(ext_ids, force_key, update_url)
+        else:
+            ext_dir = browser.external_extensions_dir()
+            if ext_dir is not None:
+                self._install_extensions_via_stubs(ext_ids, ext_dir, update_url)
+
+    def _install_extensions_via_registry(
+        self, ext_ids: list[str], reg_subkey: str, update_url: str
+    ) -> None:
+        """Write HKCU registry entries for Web Store extension auto-install on Windows."""
+        import winreg  # Windows-only stdlib module
+
+        for ext_id in ext_ids:
+            key_path = rf"{reg_subkey}\{ext_id}"
+            try:
+                with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+                    winreg.SetValueEx(key, "update_url", 0, winreg.REG_SZ, update_url)
+                self.logger.info("Registered Web Store extension via registry: %s", ext_id)
+            except OSError:
+                self.logger.warning("Failed to register extension in registry: %s", ext_id)
+
+    def _install_extensions_via_force_list(
+        self, ext_ids: list[str], force_key: str, update_url: str
+    ) -> None:
+        """Write HKCU ExtensionInstallForcelist policy entries so extensions auto-enable."""
+        import winreg  # Windows-only stdlib module
+
+        try:
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, force_key) as key:
+                for i, ext_id in enumerate(ext_ids, start=1):
+                    winreg.SetValueEx(key, str(i), 0, winreg.REG_SZ, f"{ext_id};{update_url}")
+            self.logger.info("Wrote ExtensionInstallForcelist with %d entries", len(ext_ids))
+        except OSError:
+            self.logger.warning("Failed to write ExtensionInstallForcelist")
+
+    def _install_extensions_via_stubs(
+        self, ext_ids: list[str], ext_dir: Path, update_url: str
+    ) -> None:
+        """Write JSON stub files to the External Extensions directory."""
         ext_dir.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(
-            {"external_update_url": "https://clients2.google.com/service/update2/crx"}
-        )
+        payload = json.dumps({"external_update_url": update_url})
 
         for ext_id in ext_ids:
             stub = ext_dir / f"{ext_id}.json"
             if not stub.exists():
                 stub.write_text(payload, encoding="utf-8")
-                self.logger.info("Registered Web Store extension: %s", ext_id)
+                self.logger.info("Registered Web Store extension via stub: %s", ext_id)
 
     # ------------------------------------------------------------------
     # Per-profile orchestration
@@ -587,7 +651,7 @@ class SyncEngine:
                     item.unlink()
                 self._synced_count += 1
 
-        # Copy everything from backup using rclone for efficiency
+        # Copy everything from backup using rclone (skips unchanged files)
         self._report("Restoring from backup...")
         try:
             cmd = [
@@ -630,20 +694,77 @@ class SyncEngine:
         if dt.get("search_shortcuts", True):
             self._restore_search_shortcuts(profile_path, self.sync_folder)
 
-        self._progress_cb = None
         self.logger.info("Profile restore complete: %s", profile_path.name)
 
     # ------------------------------------------------------------------
     # Search shortcuts backup/restore
     # ------------------------------------------------------------------
 
-    def _extract_search_shortcuts(self, profile_path: Path, sync_folder_root: Path) -> None:
-        """Extract ACTIVE search shortcuts from Web Data database to global JSON file.
+    @staticmethod
+    def _load_oscrypt_key(user_data_dir: Path) -> AESGCM | None:
+        """Return an AESGCM cipher seeded from the browser's OSCrypt key (Windows only).
 
-        Reads only active (is_active = 1) keywords from Web Data and exports to
+        On non-Windows platforms Chromium does not verify url_hash, so returns None.
+        Returns None on any error so callers can skip url_hash computation gracefully.
+        """
+        if platform.system() != "Windows":
+            return None
+        try:
+            import base64
+            import ctypes
+            import ctypes.wintypes
+
+            local_state = json.loads(
+                (user_data_dir / "Local State").read_text(encoding="utf-8")
+            )
+            enc_key = base64.b64decode(local_state["os_crypt"]["encrypted_key"])[5:]
+
+            class _BLOB(ctypes.Structure):
+                _fields_ = [
+                    ("cbData", ctypes.wintypes.DWORD),
+                    ("pbData", ctypes.POINTER(ctypes.c_char)),
+                ]
+
+            buf = ctypes.create_string_buffer(enc_key)
+            blob_in = _BLOB(len(enc_key), buf)
+            blob_out = _BLOB()
+            ok = ctypes.windll.crypt32.CryptUnprotectData(
+                ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)
+            )
+            if not ok:
+                return None
+            return AESGCM(ctypes.string_at(blob_out.pbData, blob_out.cbData))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _make_url_hash(row_id: int, url: str, aesgcm: AESGCM) -> bytes:
+        """Compute Chromium's url_hash blob for a keyword row.
+
+        Chromium stores SHA-256 of Pickle(WriteInt64(id), WriteString(url)),
+        prefixed with a version byte, OSCrypt-encrypted as an AES-256-GCM blob.
+        The DB row id is part of the hash so tampered rows cannot be reinserted
+        with a different id.
+        """
+        url_b = url.encode("utf-8")
+        pad = (4 - len(url_b) % 4) % 4
+        payload = struct.pack("<q", row_id) + struct.pack("<I", len(url_b)) + url_b + bytes(pad)
+        pickle_bytes = struct.pack("<I", len(payload)) + payload
+        plaintext = b"\x01" + hashlib.sha256(pickle_bytes).digest()
+        nonce = os.urandom(12)
+        return b"v10" + nonce + aesgcm.encrypt(nonce, plaintext, None)
+
+    def _extract_search_shortcuts(self, profile_path: Path, sync_folder_root: Path) -> None:
+        """Extract user-created search shortcuts from Web Data database to global JSON file.
+
+        Reads all user-created (prepopulate_id = 0) keywords from Web Data and exports to
         search_shortcuts.json at the root of sync folder (shared across all browsers).
         Uses read-only connection to avoid lock issues.
         Always creates the file even if extraction fails (empty array).
+
+        When the default engine has an empty sync_guid in the DB but its URL matches
+        default_search_provider_data in Preferences, the Preferences guid is adopted so
+        it survives round-trip through JSON.
         """
         web_data_src = profile_path / "Web Data"
         shortcuts_json = sync_folder_root / "search_shortcuts.json"
@@ -654,39 +775,67 @@ class SyncEngine:
             return
 
         try:
+            prefs_path = profile_path / "Preferences"
+            default_guid = ""
+            default_engine_url = ""
+            if prefs_path.exists():
+                prefs = json.loads(prefs_path.read_text(encoding="utf-8"))
+                default_guid = prefs.get("default_search_provider", {}).get("guid", "")
+                dspd = prefs.get("default_search_provider_data", {}).get(
+                    "mirrored_template_url_data", {}
+                )
+                default_engine_url = dspd.get("url", "")
+
             conn = sqlite3.connect(f"file:{web_data_src}?mode=ro&immutable=1", uri=True)
             cursor = conn.cursor()
             cursor.execute(
                 """
                 SELECT keyword, short_name, url, favicon_url, suggest_url,
-                       prepopulate_id, is_active, date_created, last_modified
+                       prepopulate_id, is_active, date_created, last_modified,
+                       sync_guid, safe_for_autoreplace, input_encodings, alternate_urls
                 FROM keywords
-                WHERE is_active = 1
+                WHERE prepopulate_id = 0
                 ORDER BY keyword
                 """
             )
             rows = cursor.fetchall()
             conn.close()
 
-            shortcuts = [
-                {
-                    "keyword": row[0],
-                    "short_name": row[1],
-                    "url": row[2],
-                    "favicon_url": row[3],
-                    "suggest_url": row[4],
-                    "prepopulate_id": row[5],
-                    "is_active": row[6],
-                    "date_created": row[7],
-                    "last_modified": row[8],
-                }
-                for row in rows
-            ]
+            shortcuts = []
+            for row in rows:
+                sync_guid = row[9] or ""
+                is_default = False
+                if default_guid:
+                    if sync_guid == default_guid:
+                        is_default = True
+                    elif not sync_guid and default_engine_url and row[2] == default_engine_url:
+                        # DB sync_guid is empty but URL matches the default engine in Preferences;
+                        # adopt the known guid so it survives round-trip through the JSON.
+                        sync_guid = default_guid
+                        is_default = True
+                shortcuts.append(
+                    {
+                        "keyword": row[0],
+                        "short_name": row[1],
+                        "url": row[2],
+                        "favicon_url": row[3],
+                        "suggest_url": row[4],
+                        "prepopulate_id": row[5],
+                        "is_active": row[6],
+                        "date_created": row[7],
+                        "last_modified": row[8],
+                        "sync_guid": sync_guid,
+                        "safe_for_autoreplace": row[10] if row[10] is not None else 0,
+                        "input_encodings": row[11] or "UTF-8",
+                        "alternate_urls": row[12] or "[]",
+                        "is_default": is_default,
+                    }
+                )
 
             shortcuts_json.write_text(json.dumps(shortcuts, indent=2), encoding="utf-8")
             self._report("search_shortcuts.json")
             self.logger.info(
-                "Extracted %d active search shortcuts to %s", len(shortcuts), shortcuts_json
+                "Extracted %d user search shortcuts to %s", len(shortcuts), shortcuts_json
             )
 
         except sqlite3.Error as exc:
@@ -700,8 +849,12 @@ class SyncEngine:
     def _restore_search_shortcuts(self, profile_path: Path, sync_folder_root: Path) -> None:
         """Restore search shortcuts from global JSON file to Web Data database (overwrite mode).
 
-        Reads search_shortcuts.json from sync folder root and overwrites all keywords
-        in the Web Data database. This removes non-active shortcuts.
+        Reads search_shortcuts.json from sync folder root and replaces all user-created
+        (prepopulate_id = 0) keywords in the Web Data database.  Prepopulated built-ins
+        are left untouched to avoid triggering Chromium's keyword-table re-initialisation.
+
+        If any shortcut is flagged is_default, Preferences is updated so Chromium uses it
+        as the default search engine after the next launch.
         """
         web_data_dst = profile_path / "Web Data"
         shortcuts_json = sync_folder_root / "search_shortcuts.json"
@@ -717,34 +870,89 @@ class SyncEngine:
         try:
             shortcuts = json.loads(shortcuts_json.read_text(encoding="utf-8"))
 
+            prefs_path = profile_path / "Preferences"
+            prefs: dict | None = None
+            if prefs_path.exists():
+                prefs = json.loads(prefs_path.read_text(encoding="utf-8"))
+
+            # On Windows, Chromium verifies url_hash on startup and drops rows
+            # whose hash doesn't match Pickle(id, url).  Load the OSCrypt key
+            # once so we can compute a valid blob for every inserted row.
+            aesgcm = self._load_oscrypt_key(profile_path.parent)
+
             conn = sqlite3.connect(str(web_data_dst))
             cursor = conn.cursor()
 
-            cursor.execute("DELETE FROM keywords")
+            cursor.execute("DELETE FROM keywords WHERE prepopulate_id = 0")
 
-            for shortcut in shortcuts:
+            # Predict the auto-increment ids so they match the url_hash computation.
+            next_id = (
+                cursor.execute("SELECT COALESCE(MAX(id), 0) FROM keywords").fetchone()[0] + 1
+            )
+
+            restored_default_guid: str | None = None
+
+            for i, shortcut in enumerate(shortcuts):
+                row_id = next_id + i
+                sync_guid = shortcut.get("sync_guid") or ""
+                if shortcut.get("is_default"):
+                    restored_default_guid = sync_guid or None
+
+                url_hash_blob: bytes | None = None
+                if aesgcm is not None:
+                    url_hash_blob = self._make_url_hash(row_id, shortcut["url"], aesgcm)
+
                 cursor.execute(
                     """
                     INSERT INTO keywords (
-                        keyword, short_name, url, favicon_url, suggest_url,
-                        prepopulate_id, is_active, date_created, last_modified
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        id, short_name, keyword, favicon_url, url, safe_for_autoreplace,
+                        originating_url, date_created, usage_count, input_encodings,
+                        suggest_url, prepopulate_id, created_by_policy, last_modified,
+                        sync_guid, alternate_urls, image_url, search_url_post_params,
+                        suggest_url_post_params, image_url_post_params, new_tab_url,
+                        last_visited, created_from_play_api, is_active, starter_pack_id,
+                        enforced_by_policy, featured_by_policy, url_hash
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
-                        shortcut["keyword"],
+                        row_id,
                         shortcut["short_name"],
-                        shortcut["url"],
+                        shortcut["keyword"],
                         shortcut.get("favicon_url", ""),
+                        shortcut["url"],
+                        shortcut.get("safe_for_autoreplace", 0),
+                        "",
+                        shortcut.get("date_created", 0),
+                        0,
+                        shortcut.get("input_encodings", "UTF-8"),
                         shortcut.get("suggest_url", ""),
                         shortcut.get("prepopulate_id", 0),
-                        shortcut.get("is_active", 1),
-                        shortcut.get("date_created", 0),
+                        0,
                         shortcut.get("last_modified", 0),
+                        sync_guid,
+                        shortcut.get("alternate_urls", "[]"),
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        shortcut.get("last_modified", 0),
+                        0,
+                        shortcut.get("is_active", 1),
+                        0,
+                        0,
+                        0,
+                        url_hash_blob,
                     ),
                 )
 
             conn.commit()
             conn.close()
+
+            # Point Preferences at the restored default engine so Chromium picks it up.
+            if restored_default_guid and prefs is not None:
+                prefs.setdefault("default_search_provider", {})["guid"] = restored_default_guid
+                prefs_path.write_text(json.dumps(prefs), encoding="utf-8")
 
             self._report("search shortcuts restored")
             self.logger.info("Restored %d search shortcuts from %s", len(shortcuts), shortcuts_json)
@@ -801,7 +1009,6 @@ class SyncEngine:
             if direction in ("pull", "both"):
                 self._restore_search_shortcuts(profile_path, self.sync_folder)
 
-        self._progress_cb = None
         self.logger.info("Profile sync complete: %s", profile_path.name)
 
     # ------------------------------------------------------------------
@@ -828,87 +1035,113 @@ class SyncEngine:
         # Reset sync statistics
         self._synced_count = 0
         self._skipped_count = 0
+        skipped_running: list[str] = []
 
         if is_first_sync:
             self.logger.info("Starting initial sync (first-time setup)")
         else:
             self.logger.info("Starting sync_all")
 
-        self._rotate_backups()
+        # Skip entirely if every installed, non-disabled browser is running.
+        manageable = [
+            b for b in self.browsers
+            if enabled_browsers.get(b.name) is not False and b.is_installed()
+        ]
+        if manageable and all(b.is_running() for b in manageable):
+            running_names = [b.name for b in manageable]
+            self.logger.warning(
+                "All managed browsers running (%s) — skipping sync",
+                ", ".join(running_names),
+            )
+            return {"is_first_sync": is_first_sync, "skipped_running": running_names}
 
-        for browser in self.browsers:
-            if enabled_browsers.get(browser.name) is False:
-                self.logger.debug("Browser %s disabled in settings — skipping", browser.name)
-                continue
-            if not browser.is_installed():
-                self.logger.debug("Browser %s not installed — skipping", browser.name)
-                continue
-            if browser.is_running():
-                self.logger.warning(
-                    "Browser %s is running — skipping to avoid data corruption",
-                    browser.name,
-                )
-                continue
+        # Unpack current archive into a system temp directory so the cloud client
+        # never sees individual profile files — only current.tar changes.
+        current_archive = self.sync_folder / "current.tar"
+        work_dir = Path(tempfile.mkdtemp(prefix="cps-work-"))
 
-            profiles = browser.discover_profiles()
-            if not profiles:
-                self.logger.info("Browser %s: no profiles found", browser.name)
-                continue
+        try:
+            if current_archive.exists():
+                self._report("Unpacking...")
+                self._unpack_archive(current_archive, work_dir)
 
-            allowed = enabled_profiles.get(browser.name)
-            if allowed is None or not allowed:
-                self.logger.info(
-                    "Browser %s: no enabled profiles in config — skipping", browser.name
-                )
-                continue
-
-            profiles = [p for p in profiles if p.name in allowed]
-            if not profiles:
-                self.logger.info("Browser %s: no enabled profiles — skipping", browser.name)
-                continue
-
-            ext_dir = browser.external_extensions_dir()
-            self.logger.info("Browser %s: syncing %d profile(s)", browser.name, len(profiles))
-            for profile_path in profiles:
-                self._report(f"{browser.name}/{profile_path.name}")
-                sync_profile_path = (
-                    self.sync_folder / "current" / browser.name / profile_path.name
-                )
-                direction = directions.get(browser.name, {}).get(profile_path.name, "both")
-
-                # Check if this profile needs initial restore from backup
-                needs_restore = (
-                    browser.name in profiles_needing_restore
-                    and profile_path.name in profiles_needing_restore[browser.name]
-                )
-
-                try:
-                    if needs_restore:
-                        # Complete wipe and restore from backup
-                        self.logger.info(
-                            "Profile %s/%s: performing complete restore from backup",
-                            browser.name,
-                            profile_path.name,
-                        )
-                        self.restore_profile_from_backup(
-                            profile_path, sync_profile_path, data_types
-                        )
-                        if ext_dir is not None:
-                            self._install_external_extensions(sync_profile_path, ext_dir)
-                        _config.clear_restore_flag(browser.name, profile_path.name)
-                    else:
-                        # Normal bidirectional sync
-                        self.sync_browser_profile(
-                            profile_path, sync_profile_path, data_types, direction=direction
-                        )
-                        if ext_dir is not None and direction in ("pull", "both"):
-                            self._install_external_extensions(sync_profile_path, ext_dir)
-                except OSError:
-                    self.logger.exception(
-                        "Failed to sync profile %s for browser %s",
-                        profile_path.name,
+            for browser in self.browsers:
+                if enabled_browsers.get(browser.name) is False:
+                    self.logger.debug("Browser %s disabled in settings — skipping", browser.name)
+                    continue
+                if not browser.is_installed():
+                    self.logger.debug("Browser %s not installed — skipping", browser.name)
+                    continue
+                if browser.is_running():
+                    self.logger.warning(
+                        "Browser %s is running — skipping to avoid data corruption",
                         browser.name,
                     )
+                    skipped_running.append(browser.name)
+                    continue
+
+                profiles = browser.discover_profiles()
+                if not profiles:
+                    self.logger.info("Browser %s: no profiles found", browser.name)
+                    continue
+
+                allowed = enabled_profiles.get(browser.name)
+                if allowed is None or not allowed:
+                    self.logger.info(
+                        "Browser %s: no enabled profiles in config — skipping", browser.name
+                    )
+                    continue
+
+                profiles = [p for p in profiles if p.name in allowed]
+                if not profiles:
+                    self.logger.info("Browser %s: no enabled profiles — skipping", browser.name)
+                    continue
+
+                self.logger.info("Browser %s: syncing %d profile(s)", browser.name, len(profiles))
+                for profile_path in profiles:
+                    self._report(f"{browser.name}/{profile_path.name}")
+                    direction = directions.get(browser.name, {}).get(profile_path.name, "both")
+
+                    needs_restore = (
+                        browser.name in profiles_needing_restore
+                        and profile_path.name in profiles_needing_restore[browser.name]
+                    )
+
+                    try:
+                        if needs_restore:
+                            self.logger.info(
+                                "Profile %s/%s: performing complete restore from backup",
+                                browser.name,
+                                profile_path.name,
+                            )
+                            self.restore_profile_from_backup(
+                                profile_path, work_dir, data_types,
+                                on_progress=self._progress_cb,
+                            )
+                            self._install_external_extensions(work_dir, browser)
+                            _config.clear_restore_flag(browser.name, profile_path.name)
+                        else:
+                            self.sync_browser_profile(
+                                profile_path, work_dir, data_types,
+                                direction=direction,
+                                on_progress=self._progress_cb,
+                            )
+                            if direction in ("pull", "both"):
+                                self._install_external_extensions(work_dir, browser)
+                    except OSError:
+                        self.logger.exception(
+                            "Failed to sync profile %s for browser %s",
+                            profile_path.name,
+                            browser.name,
+                        )
+                        if needs_restore:
+                            raise
+        finally:
+            # Repack temp work dir back to archive, then clean up.
+            if any(work_dir.iterdir()):
+                self._report("Packing...")
+                self._pack_to_archive(work_dir, current_archive)
+            shutil.rmtree(work_dir)
 
         self.update_metadata()
 
@@ -922,7 +1155,7 @@ class SyncEngine:
         else:
             self.logger.info("Sync complete — %s", summary)
 
-        return {"is_first_sync": is_first_sync}
+        return {"is_first_sync": is_first_sync, "skipped_running": skipped_running}
 
     def update_metadata(self) -> None:
         """Write metadata.json to the sync folder."""
@@ -933,3 +1166,78 @@ class SyncEngine:
         meta_path = self.sync_folder / "metadata.json"
         meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         self.logger.info("Metadata updated: %s", meta_path)
+
+
+_clean_logger = logging.getLogger(__name__ + ".clean")
+
+
+def clean_external_extensions(browsers: list) -> None:
+    """Remove Web Store extension registrations created by this app for all browsers.
+
+    Registry-based browsers (Windows): enumerates and deletes all HKCU extension keys.
+    File-based browsers (macOS/Linux or no registry key): removes stub files.
+    """
+    on_windows = platform.system() == "Windows"
+    for browser in browsers:
+        reg_key = browser.windows_extensions_registry_key() if on_windows else None
+        if reg_key:
+            _wipe_registry_extensions(reg_key)
+            force_key = browser.windows_force_list_registry_key() if on_windows else None
+            if force_key:
+                _wipe_registry_key(force_key)
+        else:
+            ext_dir = browser.external_extensions_dir()
+            if ext_dir and ext_dir.exists():
+                for stub in ext_dir.glob("*.json"):
+                    stub.unlink(missing_ok=True)
+                    _clean_logger.info("Removed extension stub: %s", stub.stem)
+
+
+def _wipe_registry_extensions(reg_subkey: str) -> None:
+    """Delete all HKCU extension sub-keys under reg_subkey."""
+    import winreg  # Windows-only stdlib module
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_subkey) as base:
+            ext_ids = []
+            i = 0
+            while True:
+                try:
+                    ext_ids.append(winreg.EnumKey(base, i))
+                    i += 1
+                except OSError:
+                    break
+    except FileNotFoundError:
+        return
+
+    for ext_id in ext_ids:
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, reg_subkey + "\\" + ext_id)
+            _clean_logger.info("Removed registry entry: %s", ext_id)
+        except OSError:
+            _clean_logger.warning("Failed to remove registry entry: %s", ext_id)
+
+
+def _wipe_registry_key(reg_subkey: str) -> None:
+    """Delete all values from an HKCU registry key (used for policy list keys)."""
+    import winreg  # Windows-only stdlib module
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, reg_subkey, access=winreg.KEY_ALL_ACCESS
+        ) as key:
+            value_names = []
+            i = 0
+            while True:
+                try:
+                    value_names.append(winreg.EnumValue(key, i)[0])
+                    i += 1
+                except OSError:
+                    break
+            for name in value_names:
+                winreg.DeleteValue(key, name)
+        _clean_logger.info("Cleared registry key: %s", reg_subkey)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        _clean_logger.warning("Failed to clear registry key: %s", reg_subkey)

@@ -2,14 +2,53 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import sqlite3
+import sys
+import tarfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from src.sync_engine import NEVER_SYNC, SyncEngine, _parse_version, find_rclone
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _make_archive(engine: SyncEngine, sync_folder: Path, files: dict[str, str]) -> Path:
+    """Pack files dict {rel_path: content} into sync_folder/current.tar."""
+    tmp = sync_folder / "_tmp_setup"
+    tmp.mkdir(exist_ok=True)
+    for rel, content in files.items():
+        p = tmp / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+    archive = sync_folder / "current.tar"
+    engine._pack_to_archive(tmp, archive)
+    shutil.rmtree(tmp)
+    return archive
+
+
+def _file_in_archive(archive: Path, rel_path: str) -> bool:
+    """Return True if rel_path exists inside a tar archive."""
+    if not archive.is_file():
+        return False
+    with tarfile.open(str(archive)) as tf:
+        names = tf.getnames()
+    normalized = "./" + rel_path if not rel_path.startswith("./") else rel_path
+    return normalized in names
+
+
+def _read_from_archive(archive: Path, rel_path: str) -> str:
+    """Read and return the decoded content of rel_path from a tar archive."""
+    with tarfile.open(str(archive)) as tf:
+        normalized = "./" + rel_path if not rel_path.startswith("./") else rel_path
+        member = tf.extractfile(normalized)
+        assert member is not None, f"{rel_path} not in archive"
+        return member.read().decode("utf-8")
 
 
 def _make_engine(sync_folder: Path, browsers: list | None = None) -> SyncEngine:
@@ -28,6 +67,8 @@ def _make_browser(
     mock.is_running.return_value = running
     mock.discover_profiles.return_value = profiles or []
     mock.external_extensions_dir.return_value = None
+    mock.windows_extensions_registry_key.return_value = None
+    mock.windows_force_list_registry_key.return_value = None
     return mock
 
 
@@ -121,63 +162,6 @@ def test_copy_leveldb_atomic_tmp_cleaned_before_retry(tmp_path: Path) -> None:
     assert (dst / "a.txt").read_text() == "a"
     assert not tmp_dir.exists()
 
-
-# ---------------------------------------------------------------------------
-# _rotate_backups
-# ---------------------------------------------------------------------------
-
-
-def test_rotate_backups_full_rotation(tmp_path: Path) -> None:
-    sync_folder = tmp_path / "sync"
-    sync_folder.mkdir()
-
-    current = sync_folder / "current"
-    backup1 = sync_folder / "backup-1"
-    backup2 = sync_folder / "backup-2"
-
-    current.mkdir()
-    (current / "profile.json").write_text("current")
-    backup1.mkdir()
-    (backup1 / "profile.json").write_text("backup1")
-    backup2.mkdir()
-    (backup2 / "profile.json").write_text("backup2")
-
-    engine = _make_engine(sync_folder)
-    engine._rotate_backups()
-
-    assert not backup2.exists() or (backup2 / "profile.json").read_text() == "backup1"
-    new_backup2 = sync_folder / "backup-2"
-    assert new_backup2.exists()
-    assert (new_backup2 / "profile.json").read_text() == "backup1"
-
-    new_backup1 = sync_folder / "backup-1"
-    assert new_backup1.exists()
-    assert (new_backup1 / "profile.json").read_text() == "current"
-
-
-def test_rotate_backups_first_run_no_existing_backups(tmp_path: Path) -> None:
-    sync_folder = tmp_path / "sync"
-    sync_folder.mkdir()
-    current = sync_folder / "current"
-    current.mkdir()
-    (current / "data.txt").write_text("init")
-
-    engine = _make_engine(sync_folder)
-    engine._rotate_backups()
-
-    backup1 = sync_folder / "backup-1"
-    assert backup1.exists()
-    assert (backup1 / "data.txt").read_text() == "init"
-    assert not (sync_folder / "backup-2").exists()
-
-
-def test_rotate_backups_no_current(tmp_path: Path) -> None:
-    sync_folder = tmp_path / "sync"
-    sync_folder.mkdir()
-    # No current, no backups — should not raise
-    engine = _make_engine(sync_folder)
-    engine._rotate_backups()
-    assert not (sync_folder / "backup-1").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -298,11 +282,14 @@ def test_sync_all_uses_direction_from_config(tmp_path: Path) -> None:
     sync_folder = tmp_path / "sync"
     sync_folder.mkdir()
 
-    # Pre-populate sync with older data
-    sync_bk = sync_folder / "current" / "TestBrowser" / "Default" / "Bookmarks"
-    _write_file(sync_bk, "sync-data", mtime=1000.0)
-    sync_prefs = sync_folder / "current" / "TestBrowser" / "Default" / "Preferences"
-    _write_file(sync_prefs, "{}", mtime=1000.0)
+    # Pre-populate archive with older data
+    engine = _make_engine(sync_folder)
+    tmp_dir = sync_folder / "_setup"
+    tmp_dir.mkdir()
+    _write_file(tmp_dir / "Bookmarks", "sync-data", mtime=1000.0)
+    _write_file(tmp_dir / "Preferences", "{}", mtime=1000.0)
+    engine._pack_to_archive(tmp_dir, sync_folder / "current.tar")
+    shutil.rmtree(tmp_dir)
 
     browser = _make_browser(
         name="TestBrowser", installed=True, running=False, profiles=[profile]
@@ -315,8 +302,8 @@ def test_sync_all_uses_direction_from_config(tmp_path: Path) -> None:
          patch("src.config.get_profile_directions", return_value=directions):
         engine.sync_all()
 
-    # Push: profile (newer) → sync should be updated
-    assert sync_bk.read_text() == "profile-data"
+    # Push: profile (newer) → archive updated
+    assert _read_from_archive(sync_folder / "current.tar", "Bookmarks") == "profile-data"
     # Profile itself must not be overwritten (push skips reverse copy)
     assert (profile / "Bookmarks").read_text() == "profile-data"
 
@@ -598,9 +585,10 @@ def test_sync_all_skips_running_browser(tmp_path: Path) -> None:
     browser = _make_browser(installed=True, running=True)
     engine = _make_engine(tmp_path, browsers=[browser])
 
-    engine.sync_all()
+    result = engine.sync_all()
 
     browser.discover_profiles.assert_not_called()
+    assert browser.name in result["skipped_running"]
 
 
 def test_sync_all_skips_uninstalled_browser(tmp_path: Path) -> None:
@@ -631,9 +619,8 @@ def test_sync_all_processes_installed_idle_browser(tmp_path: Path) -> None:
          patch("src.config.get_profile_directions", return_value={}):
         engine.sync_all()
 
-    synced = sync_folder / "current" / "TestBrowser" / "Default" / "Bookmarks"
-    assert synced.exists()
-    assert synced.read_text() == '{"roots":{}}'
+    assert (sync_folder / "current.tar").is_file()
+    assert _read_from_archive(sync_folder / "current.tar", "Bookmarks") == '{"roots":{}}'
 
 
 def test_sync_all_no_profiles_found(tmp_path: Path) -> None:
@@ -675,8 +662,7 @@ def test_sync_all_filters_profiles(tmp_path: Path) -> None:
     with patch("src.config.get_enabled_profiles", return_value={"TB": ["Default"]}):
         engine.sync_all()
 
-    assert (sync_folder / "current" / "TB" / "Default").exists()
-    assert not (sync_folder / "current" / "TB" / "Profile 1").exists()
+    assert _file_in_archive(sync_folder / "current.tar", "Preferences")
 
 
 # ---------------------------------------------------------------------------
@@ -719,13 +705,15 @@ def test_install_external_extensions_writes_stubs(tmp_path: Path) -> None:
     sync_profile.mkdir(parents=True)
     ext_dir = tmp_path / "External Extensions"
 
-    # Create manifest with Web Store extension IDs
     (sync_profile / "webstore_extensions.json").write_text(
         json.dumps(["aaabbbccc", "dddeeefff"]), encoding="utf-8"
     )
 
+    browser = _make_browser()
+    browser.external_extensions_dir.return_value = ext_dir
+
     engine = _make_engine(tmp_path)
-    engine._install_external_extensions(sync_profile, ext_dir)
+    engine._install_external_extensions(sync_profile, browser)
 
     assert (ext_dir / "aaabbbccc.json").exists()
     assert (ext_dir / "dddeeefff.json").exists()
@@ -739,16 +727,18 @@ def test_install_external_extensions_idempotent(tmp_path: Path) -> None:
     sync_profile.mkdir(parents=True)
     ext_dir = tmp_path / "External Extensions"
 
-    # Create manifest with one Web Store extension ID
     (sync_profile / "webstore_extensions.json").write_text(
         json.dumps(["aaabbbccc"]), encoding="utf-8"
     )
 
+    browser = _make_browser()
+    browser.external_extensions_dir.return_value = ext_dir
+
     engine = _make_engine(tmp_path)
-    engine._install_external_extensions(sync_profile, ext_dir)
+    engine._install_external_extensions(sync_profile, browser)
     # Write custom content to simulate an existing stub
     (ext_dir / "aaabbbccc.json").write_text('{"custom": true}', encoding="utf-8")
-    engine._install_external_extensions(sync_profile, ext_dir)
+    engine._install_external_extensions(sync_profile, browser)
 
     # Must not overwrite existing stub
     assert json.loads((ext_dir / "aaabbbccc.json").read_text()) == {"custom": True}
@@ -759,9 +749,12 @@ def test_install_external_extensions_no_extensions_dir(tmp_path: Path) -> None:
     sync_profile.mkdir()
     ext_dir = tmp_path / "External Extensions"
 
+    browser = _make_browser()
+    browser.external_extensions_dir.return_value = ext_dir
+
     engine = _make_engine(tmp_path)
-    # Should not raise when Extensions/ dir doesn't exist
-    engine._install_external_extensions(sync_profile, ext_dir)
+    # Should not raise when no manifest exists; ext_dir must not be created
+    engine._install_external_extensions(sync_profile, browser)
     assert not ext_dir.exists()
 
 
@@ -818,13 +811,12 @@ def test_never_sync_files_excluded(tmp_path: Path) -> None:
 
 
 def test_full_round_trip(tmp_path: Path) -> None:
-    """Write profile files → sync → modify sync copy → sync back → verify profile updated."""
+    """Write profile files → sync → modify archive → sync back → verify profile updated."""
     profile = tmp_path / "profile"
     profile.mkdir()
     sync_folder = tmp_path / "sync"
     sync_folder.mkdir()
 
-    # Step 1: populate profile
     bk_profile = profile / "Bookmarks"
     _write_file(bk_profile, "v1", mtime=1000.0)
 
@@ -836,20 +828,24 @@ def test_full_round_trip(tmp_path: Path) -> None:
          patch("src.config.get_profile_directions", return_value={}):
         engine.sync_all()
 
-    # Verify sync folder received Bookmarks
-    bk_sync = sync_folder / "current" / "Chrome" / profile.name / "Bookmarks"
-    assert bk_sync.exists()
-    assert bk_sync.read_text() == "v1"
+    # Verify archive contains Bookmarks
+    archive = sync_folder / "current.tar"
+    assert archive.is_file()
+    assert _read_from_archive(archive, "Bookmarks") == "v1"
 
-    # Step 2: simulate user edits in sync folder (newer mtime)
-    _write_file(bk_sync, "v2", mtime=3000.0)
+    # Step 2: simulate user editing the archive content (unpack, modify, repack)
+    edit_dir = tmp_path / "_edit"
+    engine._unpack_archive(archive, edit_dir)
+    _write_file(edit_dir / "Bookmarks", "v2", mtime=3000.0)
+    engine._pack_to_archive(edit_dir, archive)
+    shutil.rmtree(edit_dir)
 
     with patch("src.config.get_enabled_browsers", return_value={"Chrome": True}), \
          patch("src.config.get_enabled_profiles", return_value={"Chrome": [profile.name]}), \
          patch("src.config.get_profile_directions", return_value={}):
         engine.sync_all()
 
-    # Verify profile was updated
+    # Verify profile was updated with v2
     assert bk_profile.read_text() == "v2"
 
 
@@ -876,11 +872,313 @@ def test_sync_all_with_empty_config_skips_browser(tmp_path: Path) -> None:
          patch("src.config.get_profile_directions", return_value={}):
         engine.sync_all()
 
-    # FIXED: No profiles should be synced when browser has no config entry
+    # No profiles should be synced when browser has no config entry
+    assert not (sync_folder / "current.tar").exists()
     current = sync_folder / "current"
-    if current.exists():
-        chrome_dir = current / "Chrome"
-        assert not chrome_dir.exists(), "Chrome directory should not exist when no profiles enabled"
+    assert not current.exists() or not any(current.iterdir())
+
+
+# ---------------------------------------------------------------------------
+# _extract_search_shortcuts / _restore_search_shortcuts
+# ---------------------------------------------------------------------------
+
+
+def _make_web_data(path: Path, rows: list[dict]) -> None:
+    """Create a minimal Web Data SQLite file with a keywords table."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        """
+        CREATE TABLE keywords (
+            id INTEGER PRIMARY KEY,
+            short_name VARCHAR NOT NULL,
+            keyword VARCHAR NOT NULL,
+            favicon_url VARCHAR NOT NULL DEFAULT '',
+            url VARCHAR NOT NULL,
+            safe_for_autoreplace INTEGER DEFAULT 0,
+            originating_url VARCHAR DEFAULT '',
+            date_created INTEGER DEFAULT 0,
+            usage_count INTEGER DEFAULT 0,
+            input_encodings VARCHAR DEFAULT 'UTF-8',
+            suggest_url VARCHAR DEFAULT '',
+            prepopulate_id INTEGER DEFAULT 0,
+            created_by_policy INTEGER DEFAULT 0,
+            last_modified INTEGER DEFAULT 0,
+            sync_guid VARCHAR DEFAULT '',
+            alternate_urls VARCHAR DEFAULT '[]',
+            image_url VARCHAR DEFAULT '',
+            search_url_post_params VARCHAR DEFAULT '',
+            suggest_url_post_params VARCHAR DEFAULT '',
+            image_url_post_params VARCHAR DEFAULT '',
+            new_tab_url VARCHAR DEFAULT '',
+            last_visited INTEGER DEFAULT 0,
+            created_from_play_api INTEGER DEFAULT 0,
+            is_active INTEGER DEFAULT 1,
+            starter_pack_id INTEGER DEFAULT 0,
+            enforced_by_policy INTEGER DEFAULT 0,
+            featured_by_policy INTEGER DEFAULT 0,
+            url_hash BLOB
+        )
+        """
+    )
+    for row in rows:
+        conn.execute(
+            """
+            INSERT INTO keywords
+                (short_name, keyword, url, prepopulate_id, is_active,
+                 sync_guid, safe_for_autoreplace, input_encodings, alternate_urls)
+            VALUES (?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                row["short_name"], row["keyword"], row["url"],
+                row.get("prepopulate_id", 0), row.get("is_active", 1),
+                row.get("sync_guid", ""), row.get("safe_for_autoreplace", 0),
+                row.get("input_encodings", "UTF-8"), row.get("alternate_urls", "[]"),
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_extract_search_shortcuts_stores_sync_guid(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    _make_web_data(
+        profile / "Web Data",
+        [{"keyword": "yt", "short_name": "YouTube", "url": "https://yt.com/?q={searchTerms}",
+          "sync_guid": "stable-guid-yt"}],
+    )
+    engine = _make_engine(tmp_path)
+    engine._extract_search_shortcuts(profile, tmp_path)
+
+    data = json.loads((tmp_path / "search_shortcuts.json").read_text())
+    assert len(data) == 1
+    assert data[0]["sync_guid"] == "stable-guid-yt"
+
+
+def test_extract_search_shortcuts_excludes_prepopulated(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    _make_web_data(
+        profile / "Web Data",
+        [
+            {"keyword": "custom", "short_name": "Custom", "url": "https://c.com/?q={searchTerms}",
+             "prepopulate_id": 0},
+            {"keyword": "google", "short_name": "Google", "url": "https://g.com/?q={searchTerms}",
+             "prepopulate_id": 1},
+        ],
+    )
+    engine = _make_engine(tmp_path)
+    engine._extract_search_shortcuts(profile, tmp_path)
+
+    data = json.loads((tmp_path / "search_shortcuts.json").read_text())
+    assert len(data) == 1
+    assert data[0]["keyword"] == "custom"
+
+
+def test_restore_search_shortcuts_uses_sync_guid(tmp_path: Path) -> None:
+    shortcuts_json = tmp_path / "search_shortcuts.json"
+    shortcuts_json.write_text(
+        json.dumps([{
+            "keyword": "yt", "short_name": "YouTube",
+            "url": "https://yt.com/?q={searchTerms}",
+            "sync_guid": "my-stable-guid",
+        }]),
+        encoding="utf-8",
+    )
+    profile = tmp_path / "profile"
+    _make_web_data(profile / "Web Data", [])
+
+    engine = _make_engine(tmp_path)
+    engine._restore_search_shortcuts(profile, tmp_path)
+
+    conn = sqlite3.connect(str(profile / "Web Data"))
+    row = conn.execute("SELECT sync_guid FROM keywords WHERE keyword='yt'").fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == "my-stable-guid"
+
+
+def test_restore_search_shortcuts_empty_guid_when_missing(tmp_path: Path) -> None:
+    shortcuts_json = tmp_path / "search_shortcuts.json"
+    shortcuts_json.write_text(
+        json.dumps([{
+            "keyword": "yt", "short_name": "YouTube",
+            "url": "https://yt.com/?q={searchTerms}",
+        }]),
+        encoding="utf-8",
+    )
+    profile = tmp_path / "profile"
+    _make_web_data(profile / "Web Data", [])
+
+    engine = _make_engine(tmp_path)
+    engine._restore_search_shortcuts(profile, tmp_path)
+
+    conn = sqlite3.connect(str(profile / "Web Data"))
+    row = conn.execute("SELECT sync_guid FROM keywords WHERE keyword='yt'").fetchone()
+    conn.close()
+    assert row is not None
+    # Empty sync_guid keeps the engine local-only (not subject to sync deletion).
+    assert row[0] == ""
+
+
+def test_extract_search_shortcuts_marks_default(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    _make_web_data(
+        profile / "Web Data",
+        [
+            {"keyword": "gru", "short_name": "Google RU", "url": "https://g.ru/?q={searchTerms}",
+             "sync_guid": "default-guid-123"},
+            {"keyword": "yt", "short_name": "YouTube", "url": "https://yt.com/?q={searchTerms}",
+             "sync_guid": "other-guid-456"},
+        ],
+    )
+    profile.mkdir(parents=True, exist_ok=True)
+    (profile / "Preferences").write_text(
+        json.dumps({"default_search_provider": {"guid": "default-guid-123"}}),
+        encoding="utf-8",
+    )
+    engine = _make_engine(tmp_path)
+    engine._extract_search_shortcuts(profile, tmp_path)
+
+    data = json.loads((tmp_path / "search_shortcuts.json").read_text())
+    by_keyword = {s["keyword"]: s for s in data}
+    assert by_keyword["gru"]["is_default"] is True
+    assert by_keyword["yt"]["is_default"] is False
+
+
+def test_extract_search_shortcuts_adopts_prefs_guid_when_db_guid_empty(tmp_path: Path) -> None:
+    """Default engine with empty sync_guid in DB should adopt the guid from Preferences."""
+    profile = tmp_path / "profile"
+    _make_web_data(
+        profile / "Web Data",
+        [
+            {"keyword": "gru", "short_name": "Google RU",
+             "url": "https://g.ru/?q={searchTerms}", "sync_guid": ""},
+            {"keyword": "yt", "short_name": "YouTube",
+             "url": "https://yt.com/?q={searchTerms}", "sync_guid": ""},
+        ],
+    )
+    profile.mkdir(parents=True, exist_ok=True)
+    (profile / "Preferences").write_text(
+        json.dumps({
+            "default_search_provider": {"guid": "known-guid-from-prefs"},
+            "default_search_provider_data": {
+                "mirrored_template_url_data": {"url": "https://g.ru/?q={searchTerms}"},
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    engine = _make_engine(tmp_path)
+    engine._extract_search_shortcuts(profile, tmp_path)
+
+    data = json.loads((tmp_path / "search_shortcuts.json").read_text())
+    by_keyword = {s["keyword"]: s for s in data}
+    # Guid from Preferences is adopted when the DB row has no guid.
+    assert by_keyword["gru"]["sync_guid"] == "known-guid-from-prefs"
+    assert by_keyword["gru"]["is_default"] is True
+    # Non-default engine stays without a guid.
+    assert by_keyword["yt"]["sync_guid"] == ""
+    assert by_keyword["yt"]["is_default"] is False
+
+
+def test_restore_search_shortcuts_preserves_stored_guid_and_updates_preferences(
+    tmp_path: Path,
+) -> None:
+    shortcuts_json = tmp_path / "search_shortcuts.json"
+    shortcuts_json.write_text(
+        json.dumps([
+            {"keyword": "gru", "short_name": "Google RU",
+             "url": "https://g.ru/?q={searchTerms}",
+             "sync_guid": "old-guid", "is_default": True},
+            {"keyword": "yt", "short_name": "YouTube",
+             "url": "https://yt.com/?q={searchTerms}",
+             "sync_guid": "yt-guid", "is_default": False},
+        ]),
+        encoding="utf-8",
+    )
+    profile = tmp_path / "profile"
+    _make_web_data(profile / "Web Data", [])
+    prefs_path = profile / "Preferences"
+    prefs_path.write_text(
+        json.dumps({"default_search_provider": {"guid": "old-prefs-guid"}}),
+        encoding="utf-8",
+    )
+
+    engine = _make_engine(tmp_path)
+    engine._restore_search_shortcuts(profile, tmp_path)
+
+    conn = sqlite3.connect(str(profile / "Web Data"))
+    rows = {r[0]: r[1] for r in conn.execute("SELECT keyword, sync_guid FROM keywords")}
+    conn.close()
+    # Stored guid from JSON is preserved, not overridden with current Preferences guid.
+    assert rows["gru"] == "old-guid"
+    assert rows["yt"] == "yt-guid"
+    # Preferences is updated to point at the default engine's stored guid.
+    prefs = json.loads(prefs_path.read_text(encoding="utf-8"))
+    assert prefs["default_search_provider"]["guid"] == "old-guid"
+
+
+def test_make_url_hash_returns_valid_64_byte_blob() -> None:
+    """_make_url_hash must return exactly 64 bytes starting with b'v10', decryptable."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    key = os.urandom(32)
+    aesgcm = AESGCM(key)
+    blob = SyncEngine._make_url_hash(42, "https://example.com/?q={searchTerms}", aesgcm)
+    assert len(blob) == 64
+    assert blob[:3] == b"v10"
+    # Decrypt and verify plaintext: b'\x01' + 32-byte SHA-256 hash
+    nonce = blob[3:15]
+    plaintext = aesgcm.decrypt(nonce, blob[15:], None)
+    assert len(plaintext) == 33
+    assert plaintext[0:1] == b"\x01"
+
+
+def test_restore_search_shortcuts_writes_url_hash_when_key_available(tmp_path: Path) -> None:
+    """url_hash must be a valid 64-byte v10 blob when the OSCrypt key is available."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    aesgcm = AESGCM(os.urandom(32))
+    shortcuts_json = tmp_path / "search_shortcuts.json"
+    shortcuts_json.write_text(
+        json.dumps([{"keyword": "yt", "short_name": "YouTube",
+                     "url": "https://yt.com/?q={searchTerms}"}]),
+        encoding="utf-8",
+    )
+    profile = tmp_path / "profile"
+    _make_web_data(profile / "Web Data", [])
+
+    engine = _make_engine(tmp_path)
+    with patch.object(SyncEngine, "_load_oscrypt_key", return_value=aesgcm):
+        engine._restore_search_shortcuts(profile, tmp_path)
+
+    conn = sqlite3.connect(str(profile / "Web Data"))
+    blob = conn.execute("SELECT url_hash FROM keywords WHERE keyword='yt'").fetchone()[0]
+    conn.close()
+    assert isinstance(blob, bytes)
+    assert len(blob) == 64
+    assert blob[:3] == b"v10"
+
+
+def test_restore_search_shortcuts_null_url_hash_without_key(tmp_path: Path) -> None:
+    """url_hash stays NULL when no OSCrypt key is available (non-Windows or error)."""
+    shortcuts_json = tmp_path / "search_shortcuts.json"
+    shortcuts_json.write_text(
+        json.dumps([{"keyword": "yt", "short_name": "YouTube",
+                     "url": "https://yt.com/?q={searchTerms}"}]),
+        encoding="utf-8",
+    )
+    profile = tmp_path / "profile"
+    _make_web_data(profile / "Web Data", [])
+
+    engine = _make_engine(tmp_path)
+    with patch.object(SyncEngine, "_load_oscrypt_key", return_value=None):
+        engine._restore_search_shortcuts(profile, tmp_path)
+
+    conn = sqlite3.connect(str(profile / "Web Data"))
+    blob = conn.execute("SELECT url_hash FROM keywords WHERE keyword='yt'").fetchone()[0]
+    conn.close()
+    assert blob is None
 
 
 # ---------------------------------------------------------------------------
@@ -898,6 +1196,7 @@ def test_find_rclone_from_path() -> None:
         find_rclone.cache_clear()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Tests macOS/Linux-specific fallback paths")
 def test_find_rclone_fallback() -> None:
     find_rclone.cache_clear()
     try:
@@ -905,6 +1204,19 @@ def test_find_rclone_fallback() -> None:
              patch.object(Path, "exists", lambda self: str(self) == "/opt/homebrew/bin/rclone"):
             result = find_rclone()
         assert result == Path("/opt/homebrew/bin/rclone")
+    finally:
+        find_rclone.cache_clear()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Tests Windows-specific fallback paths")
+def test_find_rclone_fallback_windows() -> None:
+    find_rclone.cache_clear()
+    expected = "C:/Program Files/rclone/rclone.exe"
+    try:
+        with patch("shutil.which", return_value=None), \
+             patch.object(Path, "exists", lambda self: str(self).replace("\\", "/") == expected):
+            result = find_rclone()
+        assert result == Path(expected)
     finally:
         find_rclone.cache_clear()
 

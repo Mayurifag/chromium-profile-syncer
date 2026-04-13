@@ -82,7 +82,12 @@ def build() -> Path:
         print(f"\nBuild successful: {app_path.resolve()}")
         return app_path
 
-    # Non-macOS fallback: single binary
+    # Non-macOS: check for onedir bundle first (Windows default), then single binary
+    dist_dir = Path("dist") / APP_NAME
+    if dist_dir.is_dir():
+        print(f"\nBuild successful: {dist_dir.resolve()}")
+        return dist_dir
+
     candidates = list(Path("dist").glob(f"{APP_NAME}*"))
     candidates = [c for c in candidates if c.is_file()]
     if not candidates:
@@ -127,22 +132,28 @@ def install(artifact: Path) -> None:
 
     INSTALL_DIR.mkdir(parents=True, exist_ok=True)
 
-    if INSTALL_PATH.exists():
-        print(f"Removing existing {INSTALL_PATH}...")
-        shutil.rmtree(INSTALL_PATH) if INSTALL_PATH.is_dir() else INSTALL_PATH.unlink()
-
     print(f"Installing to {INSTALL_PATH}...")
     if artifact.is_dir():
-        # macOS .app bundle
-        shutil.copytree(artifact, INSTALL_PATH)
+        if sys.platform == "darwin":
+            # macOS .app bundle: install as-is
+            if INSTALL_PATH.exists():
+                print(f"Removing existing {INSTALL_PATH}...")
+                shutil.rmtree(INSTALL_PATH)
+            shutil.copytree(artifact, INSTALL_PATH)
+        else:
+            # Windows onedir: copy whole bundle dir to INSTALL_PATH.parent
+            install_target = INSTALL_PATH.parent
+            if install_target.exists():
+                print(f"Removing existing {install_target}...")
+                shutil.rmtree(install_target)
+            shutil.copytree(artifact, install_target)
     else:
-        # Windows/Linux single executable
-        if sys.platform == "win32":
-            # Windows: create dedicated folder for exe
-            INSTALL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        # Linux single executable
+        if INSTALL_PATH.exists():
+            print(f"Removing existing {INSTALL_PATH}...")
+            INSTALL_PATH.unlink()
         shutil.copy2(artifact, INSTALL_PATH)
-        if sys.platform != "win32":
-            INSTALL_PATH.chmod(0o755)
+        INSTALL_PATH.chmod(0o755)
 
     print(f"Installed: {INSTALL_PATH}")
 
