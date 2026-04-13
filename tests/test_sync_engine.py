@@ -1160,6 +1160,42 @@ def test_restore_search_shortcuts_writes_url_hash_when_key_available(tmp_path: P
     assert blob[:3] == b"v10"
 
 
+def test_restore_search_shortcuts_url_hash_encodes_correct_id_and_url(tmp_path: Path) -> None:
+    """url_hash plaintext must encode the actual DB row id and the engine url."""
+    import hashlib
+    import struct
+
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    aesgcm = AESGCM(os.urandom(32))
+    url = "https://yt.com/?q={searchTerms}"
+    shortcuts_json = tmp_path / "search_shortcuts.json"
+    shortcuts_json.write_text(
+        json.dumps([{"keyword": "yt", "short_name": "YouTube", "url": url}]),
+        encoding="utf-8",
+    )
+    profile = tmp_path / "profile"
+    _make_web_data(profile / "Web Data", [])
+
+    engine = _make_engine(tmp_path)
+    with patch.object(SyncEngine, "_load_oscrypt_key", return_value=aesgcm):
+        engine._restore_search_shortcuts(profile, tmp_path)
+
+    conn = sqlite3.connect(str(profile / "Web Data"))
+    row_id, blob = conn.execute("SELECT id, url_hash FROM keywords WHERE keyword='yt'").fetchone()
+    conn.close()
+
+    # Decrypt and verify the plaintext encodes the actual row id and url
+    nonce = blob[3:15]
+    plaintext = aesgcm.decrypt(nonce, blob[15:], None)
+    url_b = url.encode("utf-8")
+    pad = (4 - len(url_b) % 4) % 4
+    payload = struct.pack("<q", row_id) + struct.pack("<I", len(url_b)) + url_b + bytes(pad)
+    pickle_bytes = struct.pack("<I", len(payload)) + payload
+    expected_plaintext = b"\x01" + hashlib.sha256(pickle_bytes).digest()
+    assert plaintext == expected_plaintext
+
+
 def test_restore_search_shortcuts_null_url_hash_without_key(tmp_path: Path) -> None:
     """url_hash stays NULL when no OSCrypt key is available (non-Windows or error)."""
     shortcuts_json = tmp_path / "search_shortcuts.json"
