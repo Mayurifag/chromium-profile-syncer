@@ -17,6 +17,15 @@ class BrowserBase(ABC):
     @abstractmethod
     def process_names(self) -> list[str]: ...
 
+    @property
+    def ungoogled(self) -> bool:
+        """Whether this browser is an ungoogled Chromium variant.
+
+        Ungoogled browsers lack built-in features like translation, so they may need
+        extensions that regular Google Chrome users don't (e.g. translation extensions).
+        """
+        return False
+
     @abstractmethod
     def _windows_path(self) -> Path: ...
 

@@ -106,3 +106,29 @@ extensions will also install to all used profiles of Chrome.
 
 For Windows extensions installed via registry keys, Linux/MacOS via external
 extensions `.json` files (no other ways to manage those).
+
+#### Ungoogled browsers and extension exclusions
+
+Some browsers are marked as **ungoogled** in their definition (currently: Helium).
+Ungoogled browsers strip out Google-specific built-in features such as translation,
+so they need extensions to compensate (e.g. a translation extension like Linguist).
+Installing those same extensions in a regular browser (Chrome, Thorium) that already
+provides the feature natively would be redundant.
+
+To mark an extension as ungoogled-only, add its Chrome Web Store extension ID to the
+`ungoogled_only_extensions` list in the app config
+(`%APPDATA%\chromium-profile-syncer\config.json` on Windows,
+`~/.config/chromium-profile-syncer/config.json` elsewhere):
+
+~~~json
+{
+  "ungoogled_only_extensions": [
+    "gbefmodhlophhakmoecijeppjblibmie"
+  ]
+}
+~~~
+
+During restore and extension registration, these IDs are silently skipped for
+non-ungoogled browsers. The backup archive always contains the extension settings
+(they are sourced from whichever ungoogled browser is being synced), so the data
+is preserved — it just is not applied to browsers that don't need it.

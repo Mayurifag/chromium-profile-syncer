@@ -528,7 +528,12 @@ class SyncEngine:
         only reads from the Registry. Browsers that provide windows_extensions_registry_key()
         use HKCU registry entries; others fall back to file-based JSON stubs (works on
         macOS, Linux, and non-Chrome browsers that honour the directory).
+
+        Extensions in the ungoogled_only_extensions config list are skipped for browsers
+        that are not marked as ungoogled (they have the feature built-in instead).
         """
+        from src import config as _config
+
         manifest_path = sync_profile_path / "webstore_extensions.json"
         if not manifest_path.exists():
             return
@@ -541,6 +546,19 @@ class SyncEngine:
 
         if not ext_ids:
             return
+
+        is_ungoogled = getattr(browser, "ungoogled", True)
+        if not is_ungoogled:
+            ungoogled_only = set(_config.get_ungoogled_only_extensions())
+            before = len(ext_ids)
+            ext_ids = [e for e in ext_ids if e not in ungoogled_only]
+            skipped = before - len(ext_ids)
+            if skipped:
+                self.logger.info(
+                    "Skipping %d ungoogled-only extension(s) for non-ungoogled browser %s",
+                    skipped,
+                    getattr(browser, "name", "unknown"),
+                )
 
         update_url = "https://clients2.google.com/service/update2/crx"
 
@@ -608,12 +626,20 @@ class SyncEngine:
         sync_profile_path: Path,
         data_types: dict[str, bool] | None = None,
         *,
+        browser: object | None = None,
         on_progress: Callable[[str], None] | None = None,
     ) -> None:
         """Complete wipe and restore: delete local profile data, copy everything from backup.
 
         This is used for first-time profile management to ensure a clean slate.
+        Extensions and their settings/caches are fully wiped before restore so no
+        stale data from a previous install persists.
+
+        If *browser* is provided and not ungoogled, extensions listed in
+        ungoogled_only_extensions config are excluded from the restore.
         """
+        from src import config as _config
+
         self._progress_cb = on_progress
         dt = data_types or {}
 
@@ -630,6 +656,8 @@ class SyncEngine:
             items_to_delete.append(profile_path / "Extensions")
             items_to_delete.append(profile_path / "Local Extension Settings")
             items_to_delete.append(profile_path / "Sync Extension Settings")
+            items_to_delete.append(profile_path / "Extension State")
+            items_to_delete.append(profile_path / "Extension Rules")
 
         if dt.get("local_storage", True):
             items_to_delete.append(profile_path / "Local Storage")
@@ -651,6 +679,12 @@ class SyncEngine:
                     item.unlink()
                 self._synced_count += 1
 
+        # Determine which extension IDs to skip for non-ungoogled browsers
+        is_ungoogled = getattr(browser, "ungoogled", True)
+        excluded_ext_ids: list[str] = (
+            [] if is_ungoogled else _config.get_ungoogled_only_extensions()
+        )
+
         # Copy everything from backup using rclone (skips unchanged files)
         self._report("Restoring from backup...")
         try:
@@ -663,6 +697,9 @@ class SyncEngine:
                 "--checkers", "16",
                 "--exclude", "._*",
             ]
+            for ext_id in excluded_ext_ids:
+                cmd += ["--exclude", f"Extensions/{ext_id}/**"]
+                cmd += ["--exclude", f"Local Extension Settings/{ext_id}/**"]
 
             self.logger.debug("Executing restore: %s", " ".join(cmd))
 
@@ -1119,6 +1156,7 @@ class SyncEngine:
                             )
                             self.restore_profile_from_backup(
                                 profile_path, work_dir, data_types,
+                                browser=browser,
                                 on_progress=self._progress_cb,
                             )
                             self._install_external_extensions(work_dir, browser)

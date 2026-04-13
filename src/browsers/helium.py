@@ -12,6 +12,10 @@ class Helium(BrowserBase):
         return "Helium"
 
     @property
+    def ungoogled(self) -> bool:
+        return True
+
+    @property
     def process_names(self) -> list[str]:
         return ["helium", "helium.exe"]
 

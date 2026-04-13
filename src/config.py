@@ -161,3 +161,21 @@ def clear_restore_flag(browser: str, profile: str) -> None:
         _LOG.info("Cleared restore flag for %s/%s", browser, profile)
 
 
+def get_ungoogled_only_extensions() -> list[str]:
+    """Return extension IDs that should only be installed in ungoogled browsers.
+
+    These extensions compensate for features that regular Chromium builds provide
+    natively (e.g. translation). Installing them in Google Chrome or other browsers
+    with those features built in would be redundant.
+    """
+    return load().get("ungoogled_only_extensions", [])
+
+
+def set_ungoogled_only_extensions(ext_ids: list[str]) -> None:
+    """Persist the list of ungoogled-only extension IDs."""
+    data = load()
+    data["ungoogled_only_extensions"] = ext_ids
+    save(data)
+    _LOG.info("ungoogled_only_extensions updated: %s", ext_ids)
+
+
