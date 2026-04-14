@@ -28,17 +28,11 @@ but extensions still did not install — `Default\Extensions\` remained absent a
 relaunch. It is unclear whether Helium reads from these keys or ignores them
 entirely due to its ungoogled build flags.
 
-### Consequence
-
-There is currently no known automated mechanism to install webstore extensions
-into Helium via profile sync on Windows. Extensions must be installed manually
-from within Helium after applying a backup.
-
 ---
 
 ## 2. Helium's built-in uBlock Origin is not removed on apply-backup
 
-Helium ships uBlock Origin (and other extensions) as internal/component
+Helium ships uBlock Origin as internal/component
 extensions. When applying a backup (restore), the sync tool:
 
 - Deletes `Default\Extensions\`
@@ -49,9 +43,6 @@ Despite this, uBlock Origin reappears after the next Helium launch. Helium
 re-injects its bundled extensions unconditionally — presumably from a manifest
 inside its installation directory — so profile-level cleanup has no effect on them.
 
-**This cannot be fixed at the sync-tool level.** To remove bundled extensions,
-disable them manually from within `helium://extensions` after launching.
-
 ---
 
 ## 3. Default search engine is not removed on apply-backup
@@ -59,7 +50,7 @@ disable them manually from within `helium://extensions` after launching.
 When applying a backup, the sync tool restores user-created search shortcuts
 (`prepopulate_id = 0`) and updates `default_search_provider.guid` in Preferences.
 However, Helium resets the default search engine to its own built-in default on
-next launch if it does not recognise the GUID stored in Preferences.
+next launch.
 
 Additionally, the backup's `search_shortcuts.json` may not have a matching entry
 for the exact search engine Helium uses as its default (different `prepopulate_id`
@@ -73,13 +64,48 @@ restored.
 
 ## Summary
 
-| Feature | Status |
-|---|---|
-| Extension install via file stubs | ✗ Not working |
-| Extension install via registry | ✗ Not working (tested) |
+| Feature                             | Status                             |
+| ----------------------------------- | ---------------------------------- |
+| Extension install via file stubs    | ✗ Not working                      |
+| Extension install via registry      | ✗ Not working (tested)             |
 | Built-in extension (uBlock) removal | ✗ Not possible — Helium re-injects |
-| Default search engine restore | ✗ Helium overrides on launch |
-| Bookmarks sync | ✓ Works |
-| Custom Dictionary sync | ✓ Works |
-| Local Storage sync | ✓ Works |
-| Preferences (partial) sync | ✓ Works |
+| Default search engine restore       | ✗ Helium overrides on launch       |
+| Bookmarks sync                      | ✓ Works                            |
+| Custom Dictionary sync              | ✓ Works                            |
+| Local Storage sync                  | ✓ Works                            |
+| Preferences (partial) sync          | ✓ Works                            |
+
+---
+
+## Current webstore_extensions.json
+
+Resolved from Thorium's `Extensions/` directory for comparison.
+
+1. AHA Music - Song Finder for Browser — `dpacanjfikmhoddligfbehkpomnbgblf`
+2. Augmented Steam — `dnhpnfgdlenaccegplpojghhmaamnnfp`
+3. AutoScroll — `occjjkgifpmdgodlplnacmkejpdionan`
+4. Claude — `fcoeoabgfenejglbffodgkkbkcdhcgfn`
+5. Control Panel for Twitter — `kpmjjdhbcfebfjgdnpjagcndoelnidfj`
+6. Dark Reader — `eimadpbcbfnmbkopoojfekhnkhdbieeh`
+7. Disable Twitch extensions — `nmogopjdbhhnbkiklkdahphkdpbjfine`
+8. Dracula Chrome Theme — `gfapcejdoghpoidkfodoiiffaaibpaem`
+9. DynamicHistory — `ehkdegpnplleadlmjoaidmjiabocgpok`
+10. Enhancer for YouTube™ — `ponfpcnoihfmfllpaingbgckeeldkhle`
+11. KeePassXC-Browser — `oboonakemofpalcgghocfoadofidjkkk`
+12. Keepa™ - Amazon Price Tracker — `neebplgakaahbhdphmkckjjcegoiijjo`
+13. Location Flags for X (Twitter) — `jnpglhiolmmfchhpoipnknmffmpmogmc`
+14. Reddit Untranslate — `eninkmbmgkpkcelmohdlgldafpkfpnaf`
+15. Redirector — `lioaeidejmlpffbndjhaameocfldlhin`
+16. Search by Image — `cnojnbdhbhnkbcieeekonklommdnndci`
+17. Select like a Boss — `mbnnmpmcijodolgeejegcijdamonganh`
+18. SponsorBlock for YouTube - Skip Sponsorships — `mnjggcdmjocbbbhaepdhchncahnbgone`
+19. Stylus — `clngdbkpkpeebahjckkjfobafhncgmne`
+20. uBlock Origin — `cjpalhdlnbpafiamejdnhcphjbkeiagm`
+21. Violentmonkey — `jinjaccalgkegednnccohejagnlnfdag`
+22. VK Next - functions for VK — `jephanpkonkmnkekmlkcijdjgniikppl`
+23. YouTube Anti Translate — `ndpmhjnlfkgfalaieeneneenijondgag`
+
+### To not forget to add later
+
+24. Autofill for Code web chat
+25. something else...

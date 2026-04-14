@@ -146,8 +146,5 @@ is preserved — it just is not applied to browsers that don't need it.
 
 # TODO
 
-- helium - extensions dont install. internal ublock origin was not deleted
-- search shortcut gru by default - needs to check fix
-- stylus styles arent applied (find culprit) - perhaps fixed via indexeddb
-- Extensions to cut their backup size i.e. ublock compiled rules
-- bug on active browser - better process name handling required. also every 5sec fine
+- helium - extensions dont install. Make sure that it is ungoogled, so lingvist has to be installed. internal ublock origin was not deleted
+- search shortcut gru by default

@@ -47,6 +47,16 @@ This builds the app, kills the running instance, installs, and launches automati
 
 ## Key Implementation Details
 
+### Windows Registry — Extension Policy Keys
+
+**Never wipe `HKCU\SOFTWARE\Policies\*` or `HKCU\SOFTWARE\Chromium\Extensions`
+(or any shared Chromium registry key) outside of what `_install_extensions_via_registry`
+and `_install_extensions_via_force_list` already manage.**
+
+These keys are shared across all Chromium-based browsers on the machine. Bulk-deleting
+them (e.g. as part of a browser cleanup) will silently break extension installation for
+unrelated browsers that read from the same paths.
+
 ### Smart Extension Syncing
 
 **Detection:** Web Store extensions have `_metadata/verified_contents.json` (Google signature)
