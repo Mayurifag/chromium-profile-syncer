@@ -8,6 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import src.config as _config
 from src import rclone as _rclone
 from src.sync import archive as _archive
 from src.sync import extensions as _extensions
@@ -102,8 +103,6 @@ class SyncEngine:
         self.logger.info("Syncing profile: %s ↔ %s", profile_path, sync_profile_path)
 
         if dt.get("extensions", True):
-            from src import config as _config
-
             excluded_ext_ids = set(_config.get_excluded_ext_settings_ids())
             s, sk = _extensions.sync_extensions(
                 profile_path, sync_profile_path, direction, self._report
@@ -176,8 +175,6 @@ class SyncEngine:
         browser: object | None = None,
         on_progress: Callable[[str], None] | None = None,
     ) -> None:
-        from src import config as _config
-
         self._progress_cb = on_progress
         dt = data_types or {}
 
@@ -263,9 +260,9 @@ class SyncEngine:
         only_browser: str | None = None,
         only_profile: str | None = None,
         force_direction: str | None = None,
+        on_progress: Callable[[str], None] | None = None,
     ) -> dict[str, bool]:
-        from src import config as _config
-
+        self._progress_cb = on_progress
         enabled_browsers = _config.get_enabled_browsers()
         enabled_profiles = _config.get_enabled_profiles()
         directions = _config.get_profile_directions()

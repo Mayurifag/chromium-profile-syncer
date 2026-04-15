@@ -230,7 +230,6 @@ def install_external_extensions(
         force_key = browser.windows_force_list_registry_key() if on_windows else None
         if force_key:
             _install_via_force_list(ext_ids, force_key, update_url)
-        # Remove any file-based stubs left over from before switching to registry.
         ext_dir = browser.external_extensions_dir()
         if ext_dir is not None and ext_dir.exists():
             for stub in ext_dir.glob("*.json"):

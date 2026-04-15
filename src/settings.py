@@ -5,7 +5,7 @@ import platform
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox,
@@ -37,6 +37,7 @@ from src.dracula import (
 )
 from src.log_viewer import GUILogHandler, LogSignaler
 from src.shortcuts_editor import ShortcutsEditorDialog
+from src.sync_worker import _InitialUploadWorker
 
 _LOG = logging.getLogger(__name__)
 
@@ -45,36 +46,6 @@ _CLOSE_BROWSER_HINT = (
     if platform.system() == "Windows"
     else "Quit browser (Cmd+Q) to allow sync"
 )
-
-
-class _InitialUploadWorker(QThread):
-    step = Signal(str)
-    done = Signal()
-
-    def __init__(self, src: Path, folder: Path) -> None:
-        super().__init__()
-        self._src = src
-        self._folder = folder
-
-    def run(self) -> None:
-        import shutil
-        import tempfile
-
-        from src.sync.archive import pack_to_archive
-        from src.sync_engine import SyncEngine
-
-        engine = SyncEngine(self._folder)
-        work_dir = Path(tempfile.mkdtemp(prefix="cps-upload-"))
-        try:
-            engine.sync_browser_profile(
-                self._src, work_dir, direction="push",
-                on_progress=lambda desc: self.step.emit(desc),
-            )
-            self.step.emit("Packing archive...")
-            pack_to_archive(work_dir, self._folder / "current.tar")
-        finally:
-            shutil.rmtree(work_dir)
-        self.done.emit()
 
 
 def _make_indicator_pixmap(is_running: bool) -> QPixmap:
@@ -276,21 +247,16 @@ class SettingsDialog(QDialog):
 
     def _on_folder_changed(self, text: str) -> None:
         folder_text = text.strip()
-        if not folder_text:
+        if not folder_text or not (folder := Path(folder_text)).is_dir():
             self._hide_profiles()
             if self._clean_btn:
                 self._clean_btn.setVisible(False)
             return
-        folder = Path(folder_text)
-        if not folder.is_dir():
-            self._hide_profiles()
-            if self._clean_btn:
-                self._clean_btn.setVisible(False)
-            return
-
         config_module.set_sync_folder(folder)
         self.settings_saved.emit()
+        self._refresh_for_folder(folder)
 
+    def _refresh_for_folder(self, folder: Path) -> None:
         has_data = _sync_folder_has_data(folder)
         if self._clean_btn:
             self._clean_btn.setVisible(has_data)
@@ -298,8 +264,8 @@ class SettingsDialog(QDialog):
             initial = self._pick_initial_upload_profile()
             if initial is None:
                 self._hide_profiles()
-                return
-            self._do_initial_upload(folder, initial)
+            else:
+                self._do_initial_upload(folder, initial)
         else:
             self._rebuild_profiles(folder)
 
@@ -823,17 +789,7 @@ class SettingsDialog(QDialog):
             self._folder_edit.setText(str(sync_folder))
             self._folder_edit.blockSignals(False)
             if sync_folder.is_dir():
-                has_data = _sync_folder_has_data(sync_folder)
-                if self._clean_btn:
-                    self._clean_btn.setVisible(has_data)
-                if not has_data:
-                    initial = self._pick_initial_upload_profile()
-                    if initial is None:
-                        self._hide_profiles()
-                    else:
-                        self._do_initial_upload(sync_folder, initial)
-                else:
-                    self._rebuild_profiles(sync_folder)
+                self._refresh_for_folder(sync_folder)
             else:
                 self._hide_profiles()
         else:

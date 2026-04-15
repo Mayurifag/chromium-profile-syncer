@@ -11,13 +11,6 @@ _LOG = logging.getLogger(__name__)
 
 
 def validate_archive_content(work_dir: Path) -> bool:
-    """Check each expected data type independently and log per-item status.
-
-    Returns False only when the staging directory contains no meaningful
-    content at all (i.e. profile discovery failed entirely), to prevent
-    overwriting the cloud archive with empty data.  Missing individual items
-    are logged as warnings so silent partial-backup failures are visible.
-    """
     def _dir_nonempty(p: Path) -> bool:
         return p.is_dir() and any(p.iterdir())
 
@@ -64,13 +57,6 @@ def validate_archive_content(work_dir: Path) -> bool:
 
 
 def pack_to_archive(src_dir: Path, dst_archive: Path) -> None:
-    """Pack src_dir into an uncompressed tar archive at dst_archive.
-
-    Writes to a system temp file first (outside the sync folder) to avoid
-    triggering cloud-sync clients mid-write, then moves into place.
-    Tarfile preserves file modification times exactly (float precision), which
-    is essential for the mtime-based sync comparisons used elsewhere.
-    """
     with tempfile.NamedTemporaryFile(suffix=".tar.tmp", delete=False) as ntf:
         tmp = Path(ntf.name)
     try:

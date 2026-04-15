@@ -9,6 +9,7 @@ from PySide6.QtCore import QFileSystemWatcher, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
+import src.config as _config
 from src import autostart
 from src.browser_monitor import BrowserMonitor
 from src.browsers import ALL_BROWSERS
@@ -109,8 +110,6 @@ class TrayApp(QSystemTrayIcon):
         self.setToolTip(f"Chromium Profile Syncer\n{tip}")
 
     def _on_browser_closed(self, browser_name: str) -> None:
-        from src import config as _config
-
         enabled_profiles = _config.get_enabled_profiles()
         profiles = enabled_profiles.get(browser_name, [])
         if not profiles:
@@ -276,7 +275,6 @@ class TrayApp(QSystemTrayIcon):
         self._worker.finished.connect(self._on_sync_finished)
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker.error.connect(self._on_sync_error)
-        self._worker.progress.connect(self._on_sync_progress)
         self._worker.profile_progress.connect(self._on_profile_progress)
         self._worker.start()
 
@@ -290,9 +288,6 @@ class TrayApp(QSystemTrayIcon):
         self._watcher_paused = True
         logger.debug("File watcher paused during sync")
         self._update_tooltip()
-
-    def _on_sync_progress(self, description: str) -> None:
-        pass
 
     def _on_profile_progress(
         self, browser: str, profile: str, direction: str, count: int, elapsed: float
@@ -328,7 +323,6 @@ class TrayApp(QSystemTrayIcon):
             logger.info("Sync finished at %s", last_sync)
 
         if self._settings_dialog is not None:
-            from src import config as _config
             enabled_profiles = _config.get_enabled_profiles()
             for browser, profiles in enabled_profiles.items():
                 for profile in profiles:

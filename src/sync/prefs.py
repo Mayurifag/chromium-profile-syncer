@@ -5,6 +5,8 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
+from src.sync import _noop
+
 _LOG = logging.getLogger(__name__)
 
 PREFERENCES_KEYS: tuple[str, ...] = (
@@ -78,7 +80,7 @@ def sync_preferences_json(
     profile_path: Path,
     sync_profile_path: Path,
     direction: str,
-    report: Callable[[str], None] = lambda _: None,
+    report: Callable[[str], None] = _noop,
 ) -> int:
     prefs_path = profile_path / "Preferences"
     json_path = sync_profile_path / "preferences.json"

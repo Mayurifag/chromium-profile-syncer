@@ -1,13 +1,42 @@
 from __future__ import annotations
 
 import logging
+import shutil
+import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
+import src.config as _config
+from src.sync.archive import pack_to_archive
 from src.sync_engine import SyncEngine
 
 logger = logging.getLogger(__name__)
+
+
+class _InitialUploadWorker(QThread):
+    step = Signal(str)
+    done = Signal()
+
+    def __init__(self, src: Path, folder: Path) -> None:
+        super().__init__()
+        self._src = src
+        self._folder = folder
+
+    def run(self) -> None:
+        engine = SyncEngine(self._folder)
+        work_dir = Path(tempfile.mkdtemp(prefix="cps-upload-"))
+        try:
+            engine.sync_browser_profile(
+                self._src, work_dir, direction="push",
+                on_progress=lambda desc: self.step.emit(desc),
+            )
+            self.step.emit("Packing archive...")
+            pack_to_archive(work_dir, self._folder / "current.tar")
+        finally:
+            shutil.rmtree(work_dir)
+        self.done.emit()
 
 
 class SyncWorker(QThread):
@@ -45,7 +74,6 @@ class SyncWorker(QThread):
                     or self._current_profile[0] != browser
                     or self._current_profile[1] != profile
                 ):
-                    from src import config as _config
                     directions = _config.get_profile_directions()
                     direction = directions.get(browser, {}).get(profile, "both")
                     direction_label = {"push": "TO", "pull": "FROM", "both": "FROM/TO"}.get(
@@ -65,11 +93,11 @@ class SyncWorker(QThread):
                     )
                     self._last_emit = elapsed
 
-            self._engine._progress_cb = _progress_handler
             result = self._engine.sync_all(
                 only_browser=self._only_browser,
                 only_profile=self._only_profile,
                 force_direction=self._force_direction,
+                on_progress=_progress_handler,
             )
             ts = datetime.now(tz=UTC).isoformat()
             is_first_sync = result.get("is_first_sync", False)
@@ -80,5 +108,4 @@ class SyncWorker(QThread):
             logger.exception("SyncWorker: sync error")
             self.error.emit(str(exc))
         finally:
-            self._engine._progress_cb = None
             self._current_profile = None
