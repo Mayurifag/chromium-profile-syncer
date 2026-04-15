@@ -1,4 +1,3 @@
-"""Search shortcuts: extract from Web Data SQLite, restore with valid url_hash blobs."""
 from __future__ import annotations
 
 import hashlib
@@ -20,11 +19,6 @@ _LOG = logging.getLogger(__name__)
 
 
 def load_oscrypt_key(user_data_dir: Path) -> AESGCM | None:
-    """Return an AESGCM cipher seeded from the browser's OSCrypt key (Windows only).
-
-    On non-Windows platforms Chromium does not verify url_hash, so returns None.
-    Returns None on any error so callers can skip url_hash computation gracefully.
-    """
     if platform.system() != "Windows":
         return None
     try:
@@ -57,13 +51,6 @@ def load_oscrypt_key(user_data_dir: Path) -> AESGCM | None:
 
 
 def make_url_hash(row_id: int, url: str, aesgcm: AESGCM) -> bytes:
-    """Compute Chromium's url_hash blob for a keyword row.
-
-    Chromium stores SHA-256 of Pickle(WriteInt64(id), WriteString(url)),
-    prefixed with a version byte, OSCrypt-encrypted as an AES-256-GCM blob.
-    The DB row id is part of the hash so tampered rows cannot be reinserted
-    with a different id.
-    """
     url_b = url.encode("utf-8")
     pad = (4 - len(url_b) % 4) % 4
     payload = struct.pack("<q", row_id) + struct.pack("<I", len(url_b)) + url_b + bytes(pad)
@@ -78,18 +65,6 @@ def extract_search_shortcuts(
     sync_folder_root: Path,
     report: Callable[[str], None] = _noop,
 ) -> None:
-    """Extract user-created search shortcuts from Web Data database to global JSON file.
-
-    Reads all user-created (prepopulate_id = 0) keywords from Web Data and writes them
-    to search_shortcuts.json at the root of sync folder (shared across all browsers).
-    This is only called for browsers in push direction — the JSON acts as the master
-    and is consumed (but never overwritten) by browsers in both/pull direction.
-    Uses read-only connection to avoid lock issues.
-
-    When the default engine has an empty sync_guid in the DB but its URL matches
-    default_search_provider_data in Preferences, the Preferences guid is adopted so
-    it survives round-trip through JSON.
-    """
     web_data_src = profile_path / "Web Data"
     shortcuts_json = sync_folder_root / "search_shortcuts.json"
 
@@ -172,14 +147,6 @@ def restore_search_shortcuts(
     sync_folder_root: Path,
     report: Callable[[str], None] = _noop,
 ) -> None:
-    """Restore search shortcuts from global JSON file to Web Data database (overwrite mode).
-
-    Wipes all user keyword rows then inserts only user shortcuts from the JSON.
-    Chromium re-adds its built-ins on next launch.
-
-    If any shortcut is flagged is_default, Preferences is updated so Chromium uses it
-    as the default search engine after the next launch.
-    """
     web_data_dst = profile_path / "Web Data"
     shortcuts_json = sync_folder_root / "search_shortcuts.json"
 

@@ -2,15 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import shutil
-import subprocess
 import tempfile
 from collections.abc import Callable
-from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from src import rclone as _rclone
 from src.sync import archive as _archive
 from src.sync import extensions as _extensions
 from src.sync import leveldb as _leveldb
@@ -20,33 +18,8 @@ from src.sync import shortcuts as _shortcuts
 if TYPE_CHECKING:
     from src.browsers.base import BrowserBase
 
-
-def _find_rclone_fallback_paths() -> list[Path]:
-    import sys
-    if sys.platform == "darwin":
-        return [Path("/opt/homebrew/bin/rclone"), Path("/usr/local/bin/rclone")]
-    elif sys.platform == "win32":
-        return [
-            Path("C:/Program Files/rclone/rclone.exe"),
-            Path("C:/Program Files (x86)/rclone/rclone.exe"),
-            Path.home() / "AppData" / "Local" / "rclone" / "rclone.exe",
-        ]
-    return [Path("/usr/bin/rclone"), Path("/usr/local/bin/rclone")]
-
-
-_FALLBACK_PATHS = _find_rclone_fallback_paths()
-
-
-@lru_cache(maxsize=1)
-def find_rclone() -> Path | None:
-    which = shutil.which("rclone")
-    if which:
-        return Path(which)
-    for p in _FALLBACK_PATHS:
-        if p.exists():
-            return p
-    return None
-
+find_rclone = _rclone.find_rclone
+_FALLBACK_PATHS = _rclone._FALLBACK_PATHS  # patched by tests via src.sync_engine
 
 NEVER_SYNC: frozenset[str] = frozenset(
     ["Login Data", "Cookies", "Web Data", "History", "Secure Preferences"]
@@ -59,10 +32,6 @@ DEFAULT_DATA_TYPES: dict[str, bool] = {
     "local_storage": True,
     "search_shortcuts": True,
 }
-
-_RCLONE_PROGRESS_RE = re.compile(
-    r"Transferred:\s+[\d.]+\s*\w+\s*/\s*[\d.]+\s*\w+,\s*(\d+)%"
-)
 
 _LOG = logging.getLogger(__name__)
 
@@ -90,54 +59,14 @@ class SyncEngine:
             self._progress_cb(description)
 
     def _run_rclone(self, cmd: list[str], description: str = "") -> None:
-        self._report(f"{description} (starting...)" if description else "Starting sync...")
-        self.logger.debug("Executing: %s", " ".join(cmd))
-        output_lines: list[str] = []
-        try:
-            process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1,
-            )
-            for line in iter(process.stdout.readline, ""):
-                line = line.strip()
-                if not line:
-                    continue
-                output_lines.append(line)
-                match = _RCLONE_PROGRESS_RE.search(line)
-                if match:
-                    pct = match.group(1)
-                    self._report(f"{description} ({pct}%)" if description else f"Syncing ({pct}%)")
-                elif "Transferred:" in line:
-                    self._report(f"{description}..." if description else "Syncing...")
-            process.wait()
-            if process.returncode != 0:
-                error_output = "\n".join(output_lines[-10:]) if output_lines else "No output"
-                self.logger.error("rclone failed:\n%s", error_output)
-                raise subprocess.CalledProcessError(process.returncode, cmd, output=error_output)
-            self.logger.debug("rclone complete: %s", description or cmd[1])
-        except subprocess.CalledProcessError as exc:
-            self.logger.exception("rclone failed")
-            raise OSError(
-                f"rclone sync failed: {exc.output}" if exc.output else f"rclone sync failed: {exc}"
-            ) from exc
-        except FileNotFoundError as exc:
-            self.logger.exception("rclone not found")
-            raise OSError(f"rclone not found: {exc}") from exc
+        _rclone.run(cmd, description, self._report)
 
-    def _rclone_sync(self, src: Path, dst: Path, description: str = "") -> None:
-        cmd = [
-            str(find_rclone() or "rclone"), "sync",
-            str(src), str(dst),
-            "--stats", "1s",
-            "--stats-one-line",
-            "--transfers", "8",
-            "--checkers", "16",
-            "--exclude", "._*",
-            "--checksum",
-            "--fast-list",
-        ]
-        self._run_rclone(cmd, description)
-        self.logger.debug("rclone sync complete: %s → %s", src, dst)
+    def _copy(self, src: Path, dst: Path) -> None:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        self._report(src.name)
+        self.logger.info("Copying file: %s → %s", src.name, dst)
+        shutil.copy2(src, dst)
+        self._synced_count += 1
 
     def _sync_file(self, src: Path, dst: Path, direction: str = "both") -> None:
         src_mtime = src.stat().st_mtime if src.exists() else 0.0
@@ -147,35 +76,16 @@ class SyncEngine:
             return
         if direction == "push":
             if src_mtime > dst_mtime and src.exists():
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                self._report(src.name)
-                self.logger.info("Copying file: %s → %s", src.name, dst)
-                shutil.copy2(src, dst)
-                self._synced_count += 1
+                self._copy(src, dst)
             else:
                 self._skipped_count += 1
         elif direction == "pull":
             if dst_mtime > src_mtime and dst.exists():
-                src.parent.mkdir(parents=True, exist_ok=True)
-                self._report(dst.name)
-                self.logger.info("Copying file: %s → %s", dst.name, src)
-                shutil.copy2(dst, src)
-                self._synced_count += 1
+                self._copy(dst, src)
             else:
                 self._skipped_count += 1
         else:
-            if src_mtime > dst_mtime:
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                self._report(src.name)
-                self.logger.info("Copying file: %s → %s", src.name, dst)
-                shutil.copy2(src, dst)
-                self._synced_count += 1
-            else:
-                src.parent.mkdir(parents=True, exist_ok=True)
-                self._report(dst.name)
-                self.logger.info("Copying file: %s → %s", dst.name, src)
-                shutil.copy2(dst, src)
-                self._synced_count += 1
+            self._copy(src, dst) if src_mtime > dst_mtime else self._copy(dst, src)
 
     def sync_browser_profile(
         self,
@@ -316,7 +226,7 @@ class SyncEngine:
         )
 
         cmd = [
-            str(find_rclone() or "rclone"), "copy",
+            str(_rclone.find_rclone() or "rclone"), "copy",
             str(sync_profile_path), str(profile_path),
             "--stats", "1s",
             "--stats-one-line",

@@ -13,26 +13,24 @@ from src.sync.leveldb import copy_atomic
 _LOG = logging.getLogger(__name__)
 
 
-def _winreg_enum_subkeys(key) -> list[str]:
-    import winreg
+def _winreg_enum(fn, key) -> list:
     names, i = [], 0
     while True:
         try:
-            names.append(winreg.EnumKey(key, i))
+            names.append(fn(key, i))
             i += 1
         except OSError:
             return names
+
+
+def _winreg_enum_subkeys(key) -> list[str]:
+    import winreg
+    return _winreg_enum(winreg.EnumKey, key)
 
 
 def _winreg_enum_values(key) -> list[str]:
     import winreg
-    names, i = [], 0
-    while True:
-        try:
-            names.append(winreg.EnumValue(key, i)[0])
-            i += 1
-        except OSError:
-            return names
+    return _winreg_enum(lambda k, i: winreg.EnumValue(k, i)[0], key)
 
 
 def _parse_version(v: str) -> tuple[int, ...]:

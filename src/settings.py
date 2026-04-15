@@ -152,6 +152,7 @@ class SettingsDialog(QDialog):
         self._browser_status_indicators: dict[str, QLabel] = {}
         self._apply_backup_buttons: dict[tuple[str, str], QPushButton] = {}
         self._sync_toggle_buttons: dict[tuple[str, str], QPushButton] = {}
+        self._selects_row: QWidget | None = None
         self._syncing: bool = False
 
         self._build_ui()
@@ -305,7 +306,7 @@ class SettingsDialog(QDialog):
     def _hide_profiles(self) -> None:
         if self._profiles_group:
             self._profiles_group.setVisible(False)
-        if hasattr(self, "_selects_row"):
+        if self._selects_row:
             self._selects_row.setVisible(False)
         if self._activity_log_widget:
             self._activity_log_widget.setVisible(False)
@@ -654,7 +655,7 @@ class SettingsDialog(QDialog):
 
         if self._profiles_group:
             self._profiles_group.setVisible(True)
-        if hasattr(self, "_selects_row"):
+        if self._selects_row:
             self._selects_row.setVisible(True)
         if self._activity_log_select:
             if self._activity_log_select.currentData():

@@ -1420,7 +1420,7 @@ def test_find_rclone_fallback() -> None:
     fake_path = Path("/fake/rclone")
     try:
         with patch("shutil.which", return_value=None), \
-             patch("src.sync_engine._FALLBACK_PATHS", [fake_path]), \
+             patch("src.rclone._FALLBACK_PATHS", [fake_path]), \
              patch.object(Path, "exists", lambda self: self == fake_path):
             result = find_rclone()
         assert result == fake_path
