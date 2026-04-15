@@ -4,7 +4,6 @@ import logging
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QFileSystemWatcher, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
@@ -16,9 +15,6 @@ from src.browsers import ALL_BROWSERS
 from src.dracula import ICON_COLORS
 from src.settings import SettingsDialog
 from src.sync_engine import SyncEngine, find_rclone
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 

@@ -47,29 +47,58 @@ _CLOSE_BROWSER_HINT = (
 )
 
 
+class _InitialUploadWorker(QThread):
+    step = Signal(str)
+    done = Signal()
+
+    def __init__(self, src: Path, folder: Path) -> None:
+        super().__init__()
+        self._src = src
+        self._folder = folder
+
+    def run(self) -> None:
+        import shutil
+        import tempfile
+
+        from src.sync.archive import pack_to_archive
+        from src.sync_engine import SyncEngine
+
+        engine = SyncEngine(self._folder)
+        work_dir = Path(tempfile.mkdtemp(prefix="cps-upload-"))
+        try:
+            engine.sync_browser_profile(
+                self._src, work_dir, direction="push",
+                on_progress=lambda desc: self.step.emit(desc),
+            )
+            self.step.emit("Packing archive...")
+            pack_to_archive(work_dir, self._folder / "current.tar")
+        finally:
+            shutil.rmtree(work_dir)
+        self.done.emit()
+
+
+def _make_indicator_pixmap(is_running: bool) -> QPixmap:
+    pixmap = QPixmap(12, 12)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    if is_running:
+        painter.setBrush(QColor(*RUNNING_GLOW))
+        painter.drawEllipse(0, 0, 12, 12)
+        painter.setBrush(QColor(*RUNNING_DOT))
+        painter.drawEllipse(2, 2, 8, 8)
+    else:
+        painter.setBrush(QColor(*NOT_RUNNING_DOT))
+        painter.drawEllipse(2, 2, 8, 8)
+    painter.end()
+    return pixmap
+
+
 def _make_status_indicator(is_running: bool) -> QLabel:
     label = QLabel()
-
-    if is_running:
-        pixmap = QPixmap(12, 12)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        painter.setBrush(QColor(80, 200, 120, 60))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(0, 0, 12, 12)
-
-        painter.setBrush(QColor(80, 200, 120))
-        painter.drawEllipse(2, 2, 8, 8)
-        painter.end()
-
-        label.setPixmap(pixmap)
-        label.setToolTip(_CLOSE_BROWSER_HINT)
-    else:
-        label.setFixedWidth(12)
-        label.setToolTip("")
-
+    label.setPixmap(_make_indicator_pixmap(is_running))
+    label.setToolTip(_CLOSE_BROWSER_HINT if is_running else "Browser is not running")
     return label
 
 
@@ -107,9 +136,7 @@ class SettingsDialog(QDialog):
         )
         self._browser_monitor = browser_monitor
 
-        # {browser_name: {profile_name: bool}}
         self._profile_states: dict[str, dict[str, bool]] = {}
-        # {(browser_name, profile_name): (progress_bar, info_label)}
         self._profile_progress: dict[tuple[str, str], tuple[QProgressBar, QLabel]] = {}
         self._autostart_select: QComboBox | None = None
         self._folder_edit: QLineEdit | None = None
@@ -136,7 +163,6 @@ class SettingsDialog(QDialog):
         root.setSpacing(4)
         root.setContentsMargins(8, 8, 8, 8)
 
-        # Sync folder
         folder_group = QGroupBox("Sync folder")
         folder_layout = QHBoxLayout(folder_group)
         self._folder_edit = QLineEdit()
@@ -225,31 +251,11 @@ class SettingsDialog(QDialog):
     def _on_browser_state_changed(self, browser_name: str, is_running: bool) -> None:
         indicator = self._browser_status_indicators.get(browser_name)
         if indicator is not None:
-            pixmap = QPixmap(12, 12)
-            pixmap.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(pixmap)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-            if is_running:
-                painter.setBrush(QColor(*RUNNING_GLOW))
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.drawEllipse(0, 0, 12, 12)
-                painter.setBrush(QColor(*RUNNING_DOT))
-                painter.drawEllipse(2, 2, 8, 8)
-                indicator.setToolTip(_CLOSE_BROWSER_HINT)
-            else:
-                painter.setBrush(QColor(*NOT_RUNNING_DOT))
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.drawEllipse(2, 2, 8, 8)
-                indicator.setToolTip("Browser is not running")
-
-            painter.end()
-            indicator.setPixmap(pixmap)
-
+            indicator.setPixmap(_make_indicator_pixmap(is_running))
+            indicator.setToolTip(_CLOSE_BROWSER_HINT if is_running else "Browser is not running")
         self._refresh_apply_backup_enabled()
 
     def _refresh_apply_backup_enabled(self) -> None:
-        """Enable/disable Apply Backup buttons based on browser running state and sync state."""
         for (browser_name, profile_name), btn in self._apply_backup_buttons.items():
             is_running = (
                 self._browser_monitor.is_running(browser_name)
@@ -333,7 +339,7 @@ class SettingsDialog(QDialog):
     def _on_autostart_changed(self, index: int) -> None:
         checked = self._autostart_select.currentData() if self._autostart_select else True
         config_module.set_autostart(checked)
-        _LOG.info(f"Autostart {'enabled' if checked else 'disabled'}")
+        _LOG.info("Autostart %s", "enabled" if checked else "disabled")
 
     def _append_log(self, level: str, message: str) -> None:
         if self._activity_log_text is None:
@@ -442,34 +448,7 @@ class SettingsDialog(QDialog):
 
         start_time = time.monotonic()
 
-        class _Worker(QThread):
-            step = Signal(str)
-            done = Signal()
-
-            def __init__(self, src: Path) -> None:
-                super().__init__()
-                self._src = src
-
-            def run(self) -> None:
-                import shutil as _shutil
-                import tempfile
-                from pathlib import Path as _Path
-
-                from src.sync_engine import SyncEngine
-                engine = SyncEngine(folder)
-                work_dir = _Path(tempfile.mkdtemp(prefix="cps-upload-"))
-                try:
-                    engine.sync_browser_profile(
-                        self._src, work_dir, direction="push",
-                        on_progress=lambda desc: self.step.emit(desc),
-                    )
-                    self.step.emit("Packing archive...")
-                    engine._pack_to_archive(work_dir, folder / "current.tar")
-                finally:
-                    _shutil.rmtree(work_dir)
-                self.done.emit()
-
-        self._upload_worker = _Worker(profile_path)
+        self._upload_worker = _InitialUploadWorker(profile_path, folder)
         self._upload_count = 0
 
         def _on_step(description: str) -> None:
@@ -498,6 +477,104 @@ class SettingsDialog(QDialog):
         self._upload_worker.done.connect(_on_done)
         self._upload_worker.start()
 
+    def _add_profile_row(
+        self,
+        layout: QVBoxLayout,
+        browser_name: str,
+        profile_name: str,
+        folder: Path | None,
+        is_running: bool,
+        is_enabled: bool,
+        prefix_widgets: list,
+    ) -> None:
+        row = QWidget()
+        row.setObjectName("profile_row")
+        row.setStyleSheet(PROFILE_ROW_STYLE)
+        row_layout = QVBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(0)
+
+        top_row = QWidget()
+        top_layout = QHBoxLayout(top_row)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(4)
+
+        for w in prefix_widgets:
+            top_layout.addWidget(w)
+        top_layout.addStretch()
+
+        sync_toggle_btn = QPushButton()
+        sync_toggle_btn.setFixedWidth(110)
+        sync_enabled = config_module.is_profile_sync_enabled(browser_name, profile_name)
+        sync_toggle_btn.setText("Auto-sync: ON" if sync_enabled else "Auto-sync: OFF")
+        sync_toggle_btn.setVisible(is_enabled)
+        self._sync_toggle_buttons[(browser_name, profile_name)] = sync_toggle_btn
+        top_layout.addWidget(sync_toggle_btn)
+
+        apply_btn = QPushButton("Apply Backup")
+        apply_btn.setFixedWidth(100)
+        apply_btn.setEnabled(not is_running and not self._syncing)
+        if is_running:
+            apply_btn.setToolTip(_CLOSE_BROWSER_HINT)
+        self._apply_backup_buttons[(browser_name, profile_name)] = apply_btn
+        top_layout.addWidget(apply_btn)
+
+        progress_bar = QProgressBar()
+        progress_bar.setMaximumHeight(8)
+        progress_bar.setTextVisible(False)
+        progress_bar.setVisible(False)
+
+        info_label = QLabel()
+        info_label.setStyleSheet(SMALL_MUTED)
+        info_label.setVisible(False)
+
+        self._profile_progress[(browser_name, profile_name)] = (progress_bar, info_label)
+
+        row_layout.addWidget(top_row)
+        row_layout.addWidget(progress_bar)
+        row_layout.addWidget(info_label)
+        layout.addWidget(row)
+
+        def _on_toggle_clicked(bn: str = browser_name, pn: str = profile_name,
+                               btn: QPushButton = sync_toggle_btn) -> None:
+            enabled = config_module.is_profile_sync_enabled(bn, pn)
+            config_module.set_profile_sync_enabled(bn, pn, not enabled)
+            btn.setText("Auto-sync: ON" if not enabled else "Auto-sync: OFF")
+
+        sync_toggle_btn.clicked.connect(_on_toggle_clicked)
+
+        def _on_apply_clicked(bn: str = browser_name, pn: str = profile_name,
+                              btn: QPushButton = apply_btn,
+                              s_btn: QPushButton = sync_toggle_btn,
+                              f: Path | None = folder) -> None:
+            currently = self._profile_states[bn][pn]
+            if not currently:
+                self._profile_states[bn][pn] = True
+                s_btn.setVisible(True)
+                if f is not None and _sync_folder_has_profile(f):
+                    config_module.mark_profile_for_restore(bn, pn)
+                    _LOG.info("Profile %s/%s marked for initial restore", bn, pn)
+                self._save_profiles_config()
+                self._syncing = True
+                self._refresh_apply_backup_enabled()
+                self.apply_backup_requested.emit(bn, pn)
+            else:
+                from PySide6.QtWidgets import QMessageBox
+                reply = QMessageBox.question(
+                    self,
+                    "Apply Backup",
+                    f"Overwrite local {bn} profile with backup?\n\n"
+                    "This will replace local data with the synced backup.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    self._syncing = True
+                    self._refresh_apply_backup_enabled()
+                    self.apply_backup_requested.emit(bn, pn)
+
+        apply_btn.clicked.connect(_on_apply_clicked)
+
     def _rebuild_profiles(self, folder: Path | None) -> None:
         layout = self._profiles_scroll_layout
         while layout.count():
@@ -511,7 +588,6 @@ class SettingsDialog(QDialog):
         self._sync_toggle_buttons.clear()
 
         saved_profiles = config_module.get_enabled_profiles()
-
         found_any = False
 
         for browser in self._browsers:
@@ -528,106 +604,16 @@ class SettingsDialog(QDialog):
             )
 
             if len(profiles) == 1:
-                profile_path = profiles[0]
-                profile_name = profile_path.name
+                profile_name = profiles[0].name
                 is_enabled = profile_name in browser_saved
                 self._profile_states[browser.name][profile_name] = is_enabled
 
-                row = QWidget()
-                row.setObjectName("profile_row")
-                row.setStyleSheet(PROFILE_ROW_STYLE)
-                row_layout = QVBoxLayout(row)
-                row_layout.setContentsMargins(0, 0, 0, 0)
-                row_layout.setSpacing(0)
-
-                top_row = QWidget()
-                top_layout = QHBoxLayout(top_row)
-                top_layout.setContentsMargins(0, 0, 0, 0)
-                top_layout.setSpacing(4)
-
                 indicator = _make_status_indicator(is_running)
                 self._browser_status_indicators[browser.name] = indicator
-                top_layout.addWidget(indicator)
-
-                name_lbl = QLabel(f"<b>{browser.name}</b>")
-                top_layout.addWidget(name_lbl)
-                top_layout.addStretch()
-
-                sync_toggle_btn = QPushButton()
-                sync_toggle_btn.setFixedWidth(110)
-                sync_enabled = config_module.is_profile_sync_enabled(browser.name, profile_name)
-                sync_toggle_btn.setText("Auto-sync: ON" if sync_enabled else "Auto-sync: OFF")
-                sync_toggle_btn.setVisible(is_enabled)
-                self._sync_toggle_buttons[(browser.name, profile_name)] = sync_toggle_btn
-                top_layout.addWidget(sync_toggle_btn)
-
-                apply_btn = QPushButton("Apply Backup")
-                apply_btn.setFixedWidth(100)
-                apply_btn.setEnabled(not is_running and not self._syncing)
-                if is_running:
-                    apply_btn.setToolTip(_CLOSE_BROWSER_HINT)
-                self._apply_backup_buttons[(browser.name, profile_name)] = apply_btn
-                top_layout.addWidget(apply_btn)
-
-                progress_bar = QProgressBar()
-                progress_bar.setMaximumHeight(8)
-                progress_bar.setTextVisible(False)
-                progress_bar.setVisible(False)
-
-                info_label = QLabel()
-                info_label.setStyleSheet(SMALL_MUTED)
-                info_label.setVisible(False)
-
-                self._profile_progress[(browser.name, profile_name)] = (progress_bar, info_label)
-
-                row_layout.addWidget(top_row)
-                row_layout.addWidget(progress_bar)
-                row_layout.addWidget(info_label)
-
-                layout.addWidget(row)
-
-                def _make_sync_toggle_handler(bn: str, pn: str, btn: QPushButton) -> None:
-                    def _clicked() -> None:
-                        enabled = config_module.is_profile_sync_enabled(bn, pn)
-                        config_module.set_profile_sync_enabled(bn, pn, not enabled)
-                        btn.setText("Auto-sync: ON" if not enabled else "Auto-sync: OFF")
-                    btn.clicked.connect(_clicked)
-
-                _make_sync_toggle_handler(browser.name, profile_name, sync_toggle_btn)
-
-                def _make_apply_handler(
-                    bn: str, pn: str, btn: QPushButton, s_btn: QPushButton
-                ) -> None:
-                    def _clicked() -> None:
-                        currently = self._profile_states[bn][pn]
-                        if not currently:
-                            self._profile_states[bn][pn] = True
-                            s_btn.setVisible(True)
-                            if folder is not None and _sync_folder_has_profile(folder):
-                                config_module.mark_profile_for_restore(bn, pn)
-                                _LOG.info("Profile %s/%s marked for initial restore", bn, pn)
-                            self._save_profiles_config()
-                            self._syncing = True
-                            self._refresh_apply_backup_enabled()
-                            self.apply_backup_requested.emit(bn, pn)
-                        else:
-                            from PySide6.QtWidgets import QMessageBox
-                            reply = QMessageBox.question(
-                                self,
-                                "Apply Backup",
-                                f"Overwrite local {bn} profile with backup?\n\n"
-                                "This will replace local data with the synced backup.",
-                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                QMessageBox.StandardButton.No,
-                            )
-                            if reply == QMessageBox.StandardButton.Yes:
-                                self._syncing = True
-                                self._refresh_apply_backup_enabled()
-                                self.apply_backup_requested.emit(bn, pn)
-                    btn.clicked.connect(_clicked)
-
-                _make_apply_handler(browser.name, profile_name, apply_btn, sync_toggle_btn)
-
+                self._add_profile_row(
+                    layout, browser.name, profile_name, folder, is_running, is_enabled,
+                    prefix_widgets=[indicator, QLabel(f"<b>{browser.name}</b>")],
+                )
             else:
                 header_row = QWidget()
                 header_row.setObjectName("profile_row")
@@ -639,11 +625,8 @@ class SettingsDialog(QDialog):
                 indicator = _make_status_indicator(is_running)
                 self._browser_status_indicators[browser.name] = indicator
                 header_layout.addWidget(indicator)
-
-                header_lbl = QLabel(f"<b>{browser.name}</b>")
-                header_layout.addWidget(header_lbl)
+                header_layout.addWidget(QLabel(f"<b>{browser.name}</b>"))
                 header_layout.addStretch()
-
                 layout.addWidget(header_row)
 
                 for profile_path in profiles:
@@ -657,107 +640,12 @@ class SettingsDialog(QDialog):
                     is_enabled = profile_name in browser_saved
                     self._profile_states[browser.name][profile_name] = is_enabled
 
-                    row = QWidget()
-                    row.setObjectName("profile_row")
-                    row.setStyleSheet(PROFILE_ROW_STYLE)
-                    row_layout = QVBoxLayout(row)
-                    row_layout.setContentsMargins(0, 0, 0, 0)
-                    row_layout.setSpacing(0)
-
-                    top_row = QWidget()
-                    top_layout = QHBoxLayout(top_row)
-                    top_layout.setContentsMargins(0, 0, 0, 0)
-                    top_layout.setSpacing(4)
-
                     spacer = QLabel()
                     spacer.setFixedWidth(12)
-                    top_layout.addWidget(spacer)
-
-                    name_lbl = QLabel(f"• {display}")
-                    top_layout.addWidget(name_lbl)
-                    top_layout.addStretch()
-
-                    sync_toggle_btn = QPushButton()
-                    sync_toggle_btn.setFixedWidth(110)
-                    sync_enabled = config_module.is_profile_sync_enabled(
-                        browser.name, profile_name
+                    self._add_profile_row(
+                        layout, browser.name, profile_name, folder, is_running, is_enabled,
+                        prefix_widgets=[spacer, QLabel(f"• {display}")],
                     )
-                    sync_toggle_btn.setText("Auto-sync: ON" if sync_enabled else "Auto-sync: OFF")
-                    sync_toggle_btn.setVisible(is_enabled)
-                    self._sync_toggle_buttons[(browser.name, profile_name)] = sync_toggle_btn
-                    top_layout.addWidget(sync_toggle_btn)
-
-                    apply_btn = QPushButton("Apply Backup")
-                    apply_btn.setFixedWidth(100)
-                    apply_btn.setEnabled(not is_running and not self._syncing)
-                    if is_running:
-                        apply_btn.setToolTip(_CLOSE_BROWSER_HINT)
-                    self._apply_backup_buttons[(browser.name, profile_name)] = apply_btn
-                    top_layout.addWidget(apply_btn)
-
-                    progress_bar = QProgressBar()
-                    progress_bar.setMaximumHeight(8)
-                    progress_bar.setTextVisible(False)
-                    progress_bar.setVisible(False)
-
-                    info_label = QLabel()
-                    info_label.setStyleSheet(SMALL_MUTED)
-                    info_label.setVisible(False)
-
-                    self._profile_progress[(browser.name, profile_name)] = (
-                        progress_bar,
-                        info_label,
-                    )
-
-                    row_layout.addWidget(top_row)
-                    row_layout.addWidget(progress_bar)
-                    row_layout.addWidget(info_label)
-
-                    layout.addWidget(row)
-
-                    def _make_sync_toggle_handler(bn: str, pn: str, btn: QPushButton) -> None:
-                        def _clicked() -> None:
-                            enabled = config_module.is_profile_sync_enabled(bn, pn)
-                            config_module.set_profile_sync_enabled(bn, pn, not enabled)
-                            btn.setText("Auto-sync: ON" if not enabled else "Auto-sync: OFF")
-                        btn.clicked.connect(_clicked)
-
-                    _make_sync_toggle_handler(browser.name, profile_name, sync_toggle_btn)
-
-                    def _make_apply_handler(
-                        bn: str, pn: str, btn: QPushButton, s_btn: QPushButton
-                    ) -> None:
-                        def _clicked() -> None:
-                            currently = self._profile_states[bn][pn]
-                            if not currently:
-                                self._profile_states[bn][pn] = True
-                                s_btn.setVisible(True)
-                                if folder is not None and _sync_folder_has_profile(folder):
-                                    config_module.mark_profile_for_restore(bn, pn)
-                                    _LOG.info(
-                                        "Profile %s/%s marked for initial restore", bn, pn
-                                    )
-                                self._save_profiles_config()
-                                self._syncing = True
-                                self._refresh_apply_backup_enabled()
-                                self.apply_backup_requested.emit(bn, pn)
-                            else:
-                                from PySide6.QtWidgets import QMessageBox
-                                reply = QMessageBox.question(
-                                    self,
-                                    "Apply Backup",
-                                    f"Overwrite local {bn} profile with backup?\n\n"
-                                    "This will replace local data with the synced backup.",
-                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                    QMessageBox.StandardButton.No,
-                                )
-                                if reply == QMessageBox.StandardButton.Yes:
-                                    self._syncing = True
-                                    self._refresh_apply_backup_enabled()
-                                    self.apply_backup_requested.emit(bn, pn)
-                        btn.clicked.connect(_clicked)
-
-                    _make_apply_handler(browser.name, profile_name, apply_btn, sync_toggle_btn)
 
         if not found_any:
             layout.addWidget(QLabel("No supported browsers detected."))
@@ -878,10 +766,11 @@ class SettingsDialog(QDialog):
 
     def _open_shortcuts_editor(self) -> None:
         import shutil
-        import tarfile
         import tempfile
 
         from PySide6.QtWidgets import QDialog, QMessageBox
+
+        from src.sync.archive import pack_to_archive, unpack_archive
 
         sync_folder = config_module.get_sync_folder()
         if not sync_folder or not sync_folder.exists():
@@ -898,8 +787,7 @@ class SettingsDialog(QDialog):
 
         work_dir = Path(tempfile.mkdtemp(prefix="cps-edit-"))
         try:
-            with tarfile.open(str(archive)) as tf:
-                tf.extractall(str(work_dir), filter="data")
+            unpack_archive(archive, work_dir)
 
             shortcuts_json_path = work_dir / "search_shortcuts.json"
             if not shortcuts_json_path.exists():
@@ -912,9 +800,7 @@ class SettingsDialog(QDialog):
 
             editor = ShortcutsEditorDialog(self, shortcuts_json_path=shortcuts_json_path)
             if editor.exec() == QDialog.DialogCode.Accepted:
-                from src.sync_engine import SyncEngine
-                engine = SyncEngine(sync_folder)
-                engine._pack_to_archive(work_dir, archive)
+                pack_to_archive(work_dir, archive)
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 

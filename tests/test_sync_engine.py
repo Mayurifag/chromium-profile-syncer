@@ -13,14 +13,22 @@ from unittest.mock import MagicMock, patch
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from src.sync_engine import NEVER_SYNC, SyncEngine, _parse_version, find_rclone
+from src.sync.archive import pack_to_archive, unpack_archive
+from src.sync.extensions import _parse_version, install_external_extensions, sync_extensions
+from src.sync.leveldb import copy_atomic, sync_dir
+from src.sync.shortcuts import (
+    extract_search_shortcuts,
+    make_url_hash,
+    restore_search_shortcuts,
+)
+from src.sync_engine import NEVER_SYNC, SyncEngine, find_rclone
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_archive(engine: SyncEngine, sync_folder: Path, files: dict[str, str]) -> Path:
+def _make_archive(sync_folder: Path, files: dict[str, str]) -> Path:
     """Pack files dict {rel_path: content} into sync_folder/current.tar."""
     tmp = sync_folder / "_tmp_setup"
     tmp.mkdir(exist_ok=True)
@@ -29,7 +37,7 @@ def _make_archive(engine: SyncEngine, sync_folder: Path, files: dict[str, str]) 
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
     archive = sync_folder / "current.tar"
-    engine._pack_to_archive(tmp, archive)
+    pack_to_archive(tmp, archive)
     shutil.rmtree(tmp)
     return archive
 
@@ -124,8 +132,7 @@ def test_copy_leveldb_atomic_success(tmp_path: Path) -> None:
     (src / "000001.ldb").write_text("ldb")
 
     dst = tmp_path / "dst_db"
-    engine = _make_engine(tmp_path)
-    engine._copy_leveldb_atomic(src, dst)
+    copy_atomic(src, dst)
 
     assert dst.exists()
     assert (dst / "MANIFEST").read_text() == "data"
@@ -141,10 +148,8 @@ def test_copy_leveldb_atomic_failure_dst_untouched(tmp_path: Path) -> None:
     dst = tmp_path / "dst_db"
     dst.mkdir()
     (dst / "original.txt").write_text("original")
-
-    engine = _make_engine(tmp_path)
     with patch("shutil.copytree", side_effect=OSError("disk full")):
-        engine._copy_leveldb_atomic(src, dst)
+        copy_atomic(src, dst)
 
     # dst must be untouched
     assert (dst / "original.txt").read_text() == "original"
@@ -161,9 +166,7 @@ def test_copy_leveldb_atomic_tmp_cleaned_before_retry(tmp_path: Path) -> None:
     tmp_dir = tmp_path / "dst_db.tmp"
     tmp_dir.mkdir()
     (tmp_dir / "stale.txt").write_text("stale")
-
-    engine = _make_engine(tmp_path)
-    engine._copy_leveldb_atomic(src, dst)
+    copy_atomic(src, dst)
 
     assert dst.exists()
     assert (dst / "a.txt").read_text() == "a"
@@ -181,7 +184,6 @@ def test_sync_file_src_newer_copies_to_dst(tmp_path: Path) -> None:
     dst = tmp_path / "dst" / "Bookmarks"
     _write_file(src, "profile", mtime=2000.0)
     _write_file(dst, "sync", mtime=1000.0)
-
     engine = _make_engine(tmp_path)
     engine._sync_file(src, dst)
 
@@ -193,7 +195,6 @@ def test_sync_file_dst_newer_copies_to_src(tmp_path: Path) -> None:
     dst = tmp_path / "dst" / "Bookmarks"
     _write_file(src, "profile", mtime=1000.0)
     _write_file(dst, "sync", mtime=2000.0)
-
     engine = _make_engine(tmp_path)
     engine._sync_file(src, dst)
 
@@ -205,7 +206,6 @@ def test_sync_file_equal_mtime_no_copy(tmp_path: Path) -> None:
     dst = tmp_path / "dst" / "Bookmarks"
     _write_file(src, "profile", mtime=1500.0)
     _write_file(dst, "sync", mtime=1500.0)
-
     engine = _make_engine(tmp_path)
     engine._sync_file(src, dst)
 
@@ -218,7 +218,6 @@ def test_sync_file_missing_dst_creates_it(tmp_path: Path) -> None:
     src = tmp_path / "src" / "Bookmarks"
     dst = tmp_path / "deep" / "nested" / "Bookmarks"
     _write_file(src, "hello", mtime=1000.0)
-
     engine = _make_engine(tmp_path)
     engine._sync_file(src, dst)
 
@@ -231,7 +230,6 @@ def test_sync_file_push_only_copies_profile_to_sync(tmp_path: Path) -> None:
     dst = tmp_path / "dst" / "Bookmarks"
     _write_file(src, "profile", mtime=2000.0)
     _write_file(dst, "sync", mtime=1000.0)
-
     engine = _make_engine(tmp_path)
     engine._sync_file(src, dst, direction="push")
 
@@ -244,7 +242,6 @@ def test_sync_file_pull_only_copies_sync_to_profile(tmp_path: Path) -> None:
     dst = tmp_path / "dst" / "Bookmarks"
     _write_file(src, "profile", mtime=1000.0)
     _write_file(dst, "sync", mtime=2000.0)
-
     engine = _make_engine(tmp_path)
     engine._sync_file(src, dst, direction="pull")
 
@@ -257,7 +254,6 @@ def test_sync_file_push_skips_when_sync_is_newer(tmp_path: Path) -> None:
     dst = tmp_path / "dst" / "Bookmarks"
     _write_file(src, "profile", mtime=1000.0)
     _write_file(dst, "sync", mtime=2000.0)
-
     engine = _make_engine(tmp_path)
     engine._sync_file(src, dst, direction="push")
 
@@ -271,7 +267,6 @@ def test_sync_file_pull_skips_when_profile_is_newer(tmp_path: Path) -> None:
     dst = tmp_path / "dst" / "Bookmarks"
     _write_file(src, "profile", mtime=2000.0)
     _write_file(dst, "sync", mtime=1000.0)
-
     engine = _make_engine(tmp_path)
     engine._sync_file(src, dst, direction="pull")
 
@@ -295,7 +290,7 @@ def test_sync_all_uses_direction_from_config(tmp_path: Path) -> None:
     tmp_dir.mkdir()
     _write_file(tmp_dir / "Bookmarks", "sync-data", mtime=1000.0)
     _write_file(tmp_dir / "Preferences", "{}", mtime=1000.0)
-    engine._pack_to_archive(tmp_dir, sync_folder / "current.tar")
+    pack_to_archive(tmp_dir, sync_folder / "current.tar")
     shutil.rmtree(tmp_dir)
 
     browser = _make_browser(
@@ -354,9 +349,7 @@ def test_sync_extensions_profile_version_wins(tmp_path: Path) -> None:
     sync = tmp_path / "sync"
     _make_ext_version_dir(profile, "abc123", "1.5.0", "1.5.0")
     _make_ext_version_dir(sync, "abc123", "1.0.0", "1.0.0")
-
-    engine = _make_engine(tmp_path)
-    engine._sync_extensions(profile, sync)
+    sync_extensions(profile, sync)
 
     # sync should now have 1.5.0
     assert (sync / "Extensions" / "abc123" / "1.5.0").exists()
@@ -367,9 +360,7 @@ def test_sync_extensions_sync_version_wins(tmp_path: Path) -> None:
     sync = tmp_path / "sync"
     _make_ext_version_dir(profile, "abc123", "1.0.0", "1.0.0")
     _make_ext_version_dir(sync, "abc123", "2.0.0", "2.0.0")
-
-    engine = _make_engine(tmp_path)
-    engine._sync_extensions(profile, sync)
+    sync_extensions(profile, sync)
 
     # profile should now have 2.0.0
     assert (profile / "Extensions" / "abc123" / "2.0.0").exists()
@@ -380,10 +371,8 @@ def test_sync_extensions_equal_versions_no_copy(tmp_path: Path) -> None:
     sync = tmp_path / "sync"
     _make_ext_version_dir(profile, "abc123", "1.0.0", "1.0.0")
     _make_ext_version_dir(sync, "abc123", "1.0.0", "1.0.0")
-
-    engine = _make_engine(tmp_path)
     # Should not raise and should result in no additional dirs created
-    engine._sync_extensions(profile, sync)
+    sync_extensions(profile, sync)
 
     profile_subdirs = list((profile / "Extensions" / "abc123").iterdir())
     sync_subdirs = list((sync / "Extensions" / "abc123").iterdir())
@@ -397,9 +386,7 @@ def test_sync_extensions_missing_manifest_fallback_to_dirname(tmp_path: Path) ->
     # No manifest.json — version parsed from dir name
     _make_ext_version_dir(profile, "extxyz", "2.0.0")  # no manifest
     _make_ext_version_dir(sync, "extxyz", "1.0.0")  # no manifest
-
-    engine = _make_engine(tmp_path)
-    engine._sync_extensions(profile, sync)
+    sync_extensions(profile, sync)
 
     # profile 2.0.0 > sync 1.0.0 → copied to sync
     assert (sync / "Extensions" / "extxyz" / "2.0.0").exists()
@@ -411,9 +398,7 @@ def test_sync_extensions_version_dir_with_0_suffix(tmp_path: Path) -> None:
     # Chromium _0 suffix stripped
     _make_ext_version_dir(profile, "extabc", "1.5.0_0")  # effectively 1.5.0
     _make_ext_version_dir(sync, "extabc", "1.4.0_0")  # effectively 1.4.0
-
-    engine = _make_engine(tmp_path)
-    engine._sync_extensions(profile, sync)
+    sync_extensions(profile, sync)
 
     # profile 1.5.0 > sync 1.4.0 → sync gets 1.5.0_0
     assert (sync / "Extensions" / "extabc" / "1.5.0_0").exists()
@@ -424,9 +409,7 @@ def test_sync_extensions_only_in_sync_copies_to_profile(tmp_path: Path) -> None:
     sync = tmp_path / "sync"
     # Extension only in sync — should be copied to profile
     _make_ext_version_dir(sync, "newext", "3.0.0", "3.0.0")
-
-    engine = _make_engine(tmp_path)
-    engine._sync_extensions(profile, sync)
+    sync_extensions(profile, sync)
 
     assert (profile / "Extensions" / "newext" / "3.0.0").exists()
 
@@ -450,9 +433,7 @@ def test_sync_leveldb_dir_profile_newer_copies_to_sync(tmp_path: Path) -> None:
     sync = tmp_path / "sync"
     _make_leveldb_unit(profile, "Local Extension Settings", "unit1", "profile-data", 2000.0)
     _make_leveldb_unit(sync, "Local Extension Settings", "unit1", "sync-data", 1000.0)
-
-    engine = _make_engine(tmp_path)
-    engine._sync_leveldb_dir(profile, sync, "Local Extension Settings")
+    sync_dir(profile, sync, "Local Extension Settings")
 
     assert (sync / "Local Extension Settings" / "unit1" / "data.ldb").read_text() == "profile-data"
 
@@ -462,9 +443,7 @@ def test_sync_leveldb_dir_sync_newer_copies_to_profile(tmp_path: Path) -> None:
     sync = tmp_path / "sync"
     _make_leveldb_unit(profile, "Local Extension Settings", "unit1", "profile-data", 1000.0)
     _make_leveldb_unit(sync, "Local Extension Settings", "unit1", "sync-data", 2000.0)
-
-    engine = _make_engine(tmp_path)
-    engine._sync_leveldb_dir(profile, sync, "Local Extension Settings")
+    sync_dir(profile, sync, "Local Extension Settings")
 
     assert (profile / "Local Extension Settings" / "unit1" / "data.ldb").read_text() == "sync-data"
 
@@ -474,9 +453,7 @@ def test_sync_leveldb_dir_equal_mtime_no_copy(tmp_path: Path) -> None:
     sync = tmp_path / "sync"
     _make_leveldb_unit(profile, "Sync Extension Settings", "unit1", "p", 1500.0)
     _make_leveldb_unit(sync, "Sync Extension Settings", "unit1", "s", 1500.0)
-
-    engine = _make_engine(tmp_path)
-    engine._sync_leveldb_dir(profile, sync, "Sync Extension Settings")
+    sync_dir(profile, sync, "Sync Extension Settings")
 
     # No overwrite — each side retains original content
     assert (profile / "Sync Extension Settings" / "unit1" / "data.ldb").read_text() == "p"
@@ -489,10 +466,8 @@ def test_sync_leveldb_dir_empty_dir(tmp_path: Path) -> None:
     # Empty LevelDB dir (no files) — mtime is 0.0, no copy expected
     unit = profile / "Local Extension Settings" / "empty_unit"
     unit.mkdir(parents=True, exist_ok=True)
-
-    engine = _make_engine(tmp_path)
     # Should not raise
-    engine._sync_leveldb_dir(profile, sync, "Local Extension Settings")
+    sync_dir(profile, sync, "Local Extension Settings")
 
 
 # ---------------------------------------------------------------------------
@@ -512,7 +487,6 @@ def test_sync_browser_profile_syncs_plain_files(tmp_path: Path) -> None:
         mtime=2000.0,
     )
     _write_file(profile / "Custom Dictionary.txt", "word1\nword2", mtime=2000.0)
-
     engine = _make_engine(tmp_path)
     engine.sync_browser_profile(profile, sync_profile)
 
@@ -528,7 +502,6 @@ def test_sync_browser_profile_syncs_extensions(tmp_path: Path) -> None:
     profile = tmp_path / "profile"
     sync_profile = tmp_path / "sync_profile"
     _make_ext_version_dir(profile, "testext", "1.0.0", "1.0.0")
-
     engine = _make_engine(tmp_path)
     engine.sync_browser_profile(profile, sync_profile)
 
@@ -539,9 +512,8 @@ def test_sync_browser_profile_empty_profile_dir(tmp_path: Path) -> None:
     profile = tmp_path / "profile"
     sync_profile = tmp_path / "sync_profile"
     profile.mkdir()
-
-    engine = _make_engine(tmp_path)
     # Should not raise on empty profile
+    engine = _make_engine(tmp_path)
     engine.sync_browser_profile(profile, sync_profile)
     assert sync_profile.exists()
 
@@ -551,7 +523,6 @@ def test_sync_browser_profile_data_types_extensions_disabled(tmp_path: Path) -> 
     sync_profile = tmp_path / "sync_profile"
     _make_ext_version_dir(profile, "testext", "1.0.0", "1.0.0")
     _write_file(profile / "Bookmarks", "bk", mtime=2000.0)
-
     engine = _make_engine(tmp_path)
     engine.sync_browser_profile(profile, sync_profile, {"extensions": False, "bookmarks": True})
 
@@ -565,7 +536,6 @@ def test_sync_browser_profile_data_types_bookmarks_disabled(tmp_path: Path) -> N
     profile.mkdir()
     _write_file(profile / "Bookmarks", "bk", mtime=2000.0)
     _write_file(profile / "Preferences", "{}", mtime=2000.0)
-
     engine = _make_engine(tmp_path)
     engine.sync_browser_profile(profile, sync_profile, {"bookmarks": False})
 
@@ -578,9 +548,8 @@ def test_sync_browser_profile_preferences_always_synced(tmp_path: Path) -> None:
     sync_profile = tmp_path / "sync_profile"
     profile.mkdir()
     _write_file(profile / "Preferences", "{}", mtime=2000.0)
-
-    engine = _make_engine(tmp_path)
     # Even with everything disabled, preferences.json must be written
+    engine = _make_engine(tmp_path)
     engine.sync_browser_profile(
         profile, sync_profile,
         {"extensions": False, "bookmarks": False, "custom_dictionary": False,
@@ -695,9 +664,7 @@ def test_install_external_extensions_writes_stubs(tmp_path: Path) -> None:
 
     browser = _make_browser()
     browser.external_extensions_dir.return_value = ext_dir
-
-    engine = _make_engine(tmp_path)
-    engine._install_external_extensions(sync_profile, browser)
+    install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
 
     assert (ext_dir / "aaabbbccc.json").exists()
     assert (ext_dir / "dddeeefff.json").exists()
@@ -717,12 +684,10 @@ def test_install_external_extensions_idempotent(tmp_path: Path) -> None:
 
     browser = _make_browser()
     browser.external_extensions_dir.return_value = ext_dir
-
-    engine = _make_engine(tmp_path)
-    engine._install_external_extensions(sync_profile, browser)
+    install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
     # Write custom content to simulate an existing stub
     (ext_dir / "aaabbbccc.json").write_text('{"custom": true}', encoding="utf-8")
-    engine._install_external_extensions(sync_profile, browser)
+    install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
 
     # Must not overwrite existing stub
     assert json.loads((ext_dir / "aaabbbccc.json").read_text()) == {"custom": True}
@@ -735,10 +700,8 @@ def test_install_external_extensions_no_extensions_dir(tmp_path: Path) -> None:
 
     browser = _make_browser()
     browser.external_extensions_dir.return_value = ext_dir
-
-    engine = _make_engine(tmp_path)
     # Should not raise when no manifest exists; ext_dir must not be created
-    engine._install_external_extensions(sync_profile, browser)
+    install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
     assert not ext_dir.exists()
 
 
@@ -777,7 +740,6 @@ def test_never_sync_files_excluded(tmp_path: Path) -> None:
     for name in NEVER_SYNC:
         _write_file(profile / name, "sensitive", mtime=9999.0)
     _write_file(profile / "Bookmarks", "safe", mtime=9999.0)
-
     engine = _make_engine(tmp_path)
     engine.sync_browser_profile(profile, sync_profile)
 
@@ -819,9 +781,9 @@ def test_full_round_trip(tmp_path: Path) -> None:
 
     # Step 2: simulate user editing the archive content (unpack, modify, repack)
     edit_dir = tmp_path / "_edit"
-    engine._unpack_archive(archive, edit_dir)
+    unpack_archive(archive, edit_dir)
     _write_file(edit_dir / "Bookmarks", "v2", mtime=3000.0)
-    engine._pack_to_archive(edit_dir, archive)
+    pack_to_archive(edit_dir, archive)
     shutil.rmtree(edit_dir)
 
     with patch("src.config.get_enabled_browsers", return_value={"Chrome": True}), \
@@ -947,8 +909,7 @@ def test_extract_search_shortcuts_stores_sync_guid(tmp_path: Path) -> None:
         [{"keyword": "yt", "short_name": "YouTube", "url": "https://yt.com/?q={searchTerms}",
           "sync_guid": "stable-guid-yt"}],
     )
-    engine = _make_engine(tmp_path)
-    engine._extract_search_shortcuts(profile, tmp_path)
+    extract_search_shortcuts(profile, tmp_path)
 
     data = json.loads((tmp_path / "search_shortcuts.json").read_text())
     assert len(data) == 1
@@ -966,8 +927,7 @@ def test_extract_search_shortcuts_excludes_prepopulated(tmp_path: Path) -> None:
              "prepopulate_id": 1},
         ],
     )
-    engine = _make_engine(tmp_path)
-    engine._extract_search_shortcuts(profile, tmp_path)
+    extract_search_shortcuts(profile, tmp_path)
 
     data = json.loads((tmp_path / "search_shortcuts.json").read_text())
     assert len(data) == 1
@@ -986,10 +946,8 @@ def test_restore_search_shortcuts_uses_sync_guid(tmp_path: Path) -> None:
     )
     profile = tmp_path / "profile"
     _make_web_data(profile / "Web Data", [])
-
-    engine = _make_engine(tmp_path)
-    with patch.object(SyncEngine, "_load_oscrypt_key", return_value=_make_aesgcm()):
-        engine._restore_search_shortcuts(profile, tmp_path)
+    with patch("src.sync.shortcuts.load_oscrypt_key", return_value=_make_aesgcm()):
+        restore_search_shortcuts(profile, tmp_path)
 
     conn = sqlite3.connect(str(profile / "Web Data"))
     row = conn.execute("SELECT sync_guid FROM keywords WHERE keyword='yt'").fetchone()
@@ -1009,10 +967,8 @@ def test_restore_search_shortcuts_empty_guid_when_missing(tmp_path: Path) -> Non
     )
     profile = tmp_path / "profile"
     _make_web_data(profile / "Web Data", [])
-
-    engine = _make_engine(tmp_path)
-    with patch.object(SyncEngine, "_load_oscrypt_key", return_value=_make_aesgcm()):
-        engine._restore_search_shortcuts(profile, tmp_path)
+    with patch("src.sync.shortcuts.load_oscrypt_key", return_value=_make_aesgcm()):
+        restore_search_shortcuts(profile, tmp_path)
 
     conn = sqlite3.connect(str(profile / "Web Data"))
     row = conn.execute("SELECT sync_guid FROM keywords WHERE keyword='yt'").fetchone()
@@ -1038,8 +994,7 @@ def test_extract_search_shortcuts_marks_default(tmp_path: Path) -> None:
         json.dumps({"default_search_provider": {"guid": "default-guid-123"}}),
         encoding="utf-8",
     )
-    engine = _make_engine(tmp_path)
-    engine._extract_search_shortcuts(profile, tmp_path)
+    extract_search_shortcuts(profile, tmp_path)
 
     data = json.loads((tmp_path / "search_shortcuts.json").read_text())
     by_keyword = {s["keyword"]: s for s in data}
@@ -1069,9 +1024,7 @@ def test_extract_search_shortcuts_adopts_prefs_guid_when_db_guid_empty(tmp_path:
         }),
         encoding="utf-8",
     )
-
-    engine = _make_engine(tmp_path)
-    engine._extract_search_shortcuts(profile, tmp_path)
+    extract_search_shortcuts(profile, tmp_path)
 
     data = json.loads((tmp_path / "search_shortcuts.json").read_text())
     by_keyword = {s["keyword"]: s for s in data}
@@ -1105,9 +1058,7 @@ def test_extract_search_shortcuts_marks_default_when_prefs_guid_empty(tmp_path: 
         }),
         encoding="utf-8",
     )
-
-    engine = _make_engine(tmp_path)
-    engine._extract_search_shortcuts(profile, tmp_path)
+    extract_search_shortcuts(profile, tmp_path)
 
     data = json.loads((tmp_path / "search_shortcuts.json").read_text())
     by_keyword = {s["keyword"]: s for s in data}
@@ -1126,8 +1077,7 @@ def test_extract_search_shortcuts_no_webdata_preserves_existing_json(tmp_path: P
     (tmp_path / "search_shortcuts.json").write_text(json.dumps(existing), encoding="utf-8")
 
     profile = tmp_path / "profile_no_webdata"  # no Web Data file here
-    engine = _make_engine(tmp_path)
-    engine._extract_search_shortcuts(profile, tmp_path)
+    extract_search_shortcuts(profile, tmp_path)
 
     data = json.loads((tmp_path / "search_shortcuts.json").read_text())
     assert len(data) == 1
@@ -1216,10 +1166,8 @@ def test_restore_search_shortcuts_preserves_stored_guid_and_updates_preferences(
         json.dumps({"default_search_provider": {"guid": "old-prefs-guid"}}),
         encoding="utf-8",
     )
-
-    engine = _make_engine(tmp_path)
-    with patch.object(SyncEngine, "_load_oscrypt_key", return_value=_make_aesgcm()):
-        engine._restore_search_shortcuts(profile, tmp_path)
+    with patch("src.sync.shortcuts.load_oscrypt_key", return_value=_make_aesgcm()):
+        restore_search_shortcuts(profile, tmp_path)
 
     conn = sqlite3.connect(str(profile / "Web Data"))
     rows = {r[0]: r[1] for r in conn.execute("SELECT keyword, sync_guid FROM keywords")}
@@ -1260,10 +1208,8 @@ def test_restore_search_shortcuts_updates_mirrored_template_url_data(tmp_path: P
         json.dumps({"default_search_provider": {"guid": "old-guid"}}),
         encoding="utf-8",
     )
-
-    engine = _make_engine(tmp_path)
-    with patch.object(SyncEngine, "_load_oscrypt_key", return_value=_make_aesgcm()):
-        engine._restore_search_shortcuts(profile, tmp_path)
+    with patch("src.sync.shortcuts.load_oscrypt_key", return_value=_make_aesgcm()):
+        restore_search_shortcuts(profile, tmp_path)
 
     prefs = json.loads(prefs_path.read_text(encoding="utf-8"))
     mirror = prefs.get("default_search_provider_data", {}).get("mirrored_template_url_data", {})
@@ -1287,7 +1233,7 @@ def test_make_url_hash_returns_valid_64_byte_blob() -> None:
 
     key = os.urandom(32)
     aesgcm = AESGCM(key)
-    blob = SyncEngine._make_url_hash(42, "https://example.com/?q={searchTerms}", aesgcm)
+    blob = make_url_hash(42, "https://example.com/?q={searchTerms}", aesgcm)
     assert len(blob) == 64
     assert blob[:3] == b"v10"
     # Decrypt and verify plaintext: b'\x01' + 32-byte SHA-256 hash
@@ -1310,10 +1256,8 @@ def test_restore_search_shortcuts_writes_url_hash_when_key_available(tmp_path: P
     )
     profile = tmp_path / "profile"
     _make_web_data(profile / "Web Data", [])
-
-    engine = _make_engine(tmp_path)
-    with patch.object(SyncEngine, "_load_oscrypt_key", return_value=aesgcm):
-        engine._restore_search_shortcuts(profile, tmp_path)
+    with patch("src.sync.shortcuts.load_oscrypt_key", return_value=aesgcm):
+        restore_search_shortcuts(profile, tmp_path)
 
     conn = sqlite3.connect(str(profile / "Web Data"))
     blob = conn.execute("SELECT url_hash FROM keywords WHERE keyword='yt'").fetchone()[0]
@@ -1339,10 +1283,8 @@ def test_restore_search_shortcuts_url_hash_encodes_correct_id_and_url(tmp_path: 
     )
     profile = tmp_path / "profile"
     _make_web_data(profile / "Web Data", [])
-
-    engine = _make_engine(tmp_path)
-    with patch.object(SyncEngine, "_load_oscrypt_key", return_value=aesgcm):
-        engine._restore_search_shortcuts(profile, tmp_path)
+    with patch("src.sync.shortcuts.load_oscrypt_key", return_value=aesgcm):
+        restore_search_shortcuts(profile, tmp_path)
 
     conn = sqlite3.connect(str(profile / "Web Data"))
     row_id, blob = conn.execute("SELECT id, url_hash FROM keywords WHERE keyword='yt'").fetchone()
@@ -1370,10 +1312,8 @@ def test_restore_search_shortcuts_null_url_hash_without_key(tmp_path: Path) -> N
     )
     profile = tmp_path / "profile"
     _make_web_data(profile / "Web Data", [])
-
-    engine = _make_engine(tmp_path)
-    with patch.object(SyncEngine, "_load_oscrypt_key", return_value=None):
-        engine._restore_search_shortcuts(profile, tmp_path)
+    with patch("src.sync.shortcuts.load_oscrypt_key", return_value=None):
+        restore_search_shortcuts(profile, tmp_path)
 
     conn = sqlite3.connect(str(profile / "Web Data"))
     row = conn.execute("SELECT url_hash FROM keywords WHERE keyword='yt'").fetchone()
@@ -1403,10 +1343,8 @@ def test_restore_search_shortcuts_default_engine_empty_guid_generates_uuid(
     _make_web_data(profile / "Web Data", [])
     prefs_path = profile / "Preferences"
     prefs_path.write_text(json.dumps({"default_search_provider": {"guid": ""}}), encoding="utf-8")
-
-    engine = _make_engine(tmp_path)
-    with patch.object(SyncEngine, "_load_oscrypt_key", return_value=_make_aesgcm()):
-        engine._restore_search_shortcuts(profile, tmp_path)
+    with patch("src.sync.shortcuts.load_oscrypt_key", return_value=_make_aesgcm()):
+        restore_search_shortcuts(profile, tmp_path)
 
     conn = sqlite3.connect(str(profile / "Web Data"))
     row = conn.execute("SELECT sync_guid FROM keywords WHERE keyword='gru'").fetchone()
@@ -1447,10 +1385,8 @@ def test_restore_search_shortcuts_updates_keywords_metadata(tmp_path: Path) -> N
     prefs_path.write_text(
         json.dumps({"default_search_provider": {"guid": ""}}), encoding="utf-8"
     )
-
-    engine = _make_engine(tmp_path)
-    with patch.object(SyncEngine, "_load_oscrypt_key", return_value=_make_aesgcm()):
-        engine._restore_search_shortcuts(profile, tmp_path)
+    with patch("src.sync.shortcuts.load_oscrypt_key", return_value=_make_aesgcm()):
+        restore_search_shortcuts(profile, tmp_path)
 
     conn = sqlite3.connect(str(profile / "Web Data"))
     inserted_id = conn.execute("SELECT id FROM keywords WHERE keyword='gru'").fetchone()[0]

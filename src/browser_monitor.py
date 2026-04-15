@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import logging
-import sys
 from typing import TYPE_CHECKING
 
-import psutil
 from PySide6.QtCore import QObject, QTimer, Signal
+
+from src.browsers.base import scan_running_procs
 
 if TYPE_CHECKING:
     from src.browsers.base import BrowserBase
@@ -14,16 +14,14 @@ logger = logging.getLogger(__name__)
 
 
 class BrowserMonitor(QObject):
-    """Polls installed browser processes every 5 s and emits signals on state transitions."""
-
-    browser_closed = Signal(str)    # browser_name: running → stopped
-    browser_opened = Signal(str)    # browser_name: stopped → running
-    state_changed = Signal(str, bool)  # browser_name, is_running
+    browser_closed = Signal(str)
+    browser_opened = Signal(str)
+    state_changed = Signal(str, bool)
 
     def __init__(self, browsers: list[BrowserBase], parent=None) -> None:
         super().__init__(parent)
         self._browsers = browsers
-        running = self._running_procs()
+        running = scan_running_procs()
         self._state: dict[str, bool] = {b.name: b.is_running(running) for b in browsers}
         self._timer = QTimer(self)
         self._timer.setInterval(5000)
@@ -40,29 +38,8 @@ class BrowserMonitor(QObject):
     def running_names(self) -> list[str]:
         return [name for name, running in self._state.items() if running]
 
-    def _running_procs(self) -> set[str]:
-        """Collect exe paths (Windows) or process names (macOS/Linux) for all running processes."""
-        results: set[str] = set()
-        if sys.platform == "win32":
-            for proc in psutil.process_iter(["exe"]):
-                try:
-                    exe = proc.info.get("exe")
-                    if exe:
-                        results.add(exe.lower())
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    continue
-        else:
-            for proc in psutil.process_iter(["name"]):
-                try:
-                    name = proc.info.get("name")
-                    if name:
-                        results.add(name.lower())
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    continue
-        return results
-
     def _poll(self) -> None:
-        running = self._running_procs()
+        running = scan_running_procs()
         for browser in self._browsers:
             current = browser.is_running(running)
             prev = self._state.get(browser.name, current)

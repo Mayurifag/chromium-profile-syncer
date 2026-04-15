@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import platform
 import re
 import sys
@@ -9,6 +10,20 @@ from pathlib import Path
 import psutil
 
 
+def scan_running_procs() -> set[str]:
+    on_windows = sys.platform == "win32"
+    attr = "exe" if on_windows else "name"
+    results: set[str] = set()
+    for proc in psutil.process_iter([attr]):
+        try:
+            val = proc.info.get(attr)
+            if val:
+                results.add(val.lower())
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return results
+
+
 class BrowserBase(ABC):
     @property
     @abstractmethod
@@ -16,27 +31,14 @@ class BrowserBase(ABC):
 
     @property
     @abstractmethod
-    def unix_process_names(self) -> list[str]:
-        """Process names used for detection on macOS and Linux."""
-        ...
+    def unix_process_names(self) -> list[str]: ...
 
     @property
     @abstractmethod
-    def windows_exe_substr(self) -> str:
-        """Lowercase path fragment unique to this browser's exe directory on Windows.
-
-        Matched against the lowercased full exe path of each running process, e.g.
-        ``\\\\google\\\\chrome\\\\application``.
-        """
-        ...
+    def windows_exe_substr(self) -> str: ...
 
     @property
     def ungoogled(self) -> bool:
-        """Whether this browser is an ungoogled Chromium variant.
-
-        Ungoogled browsers lack built-in features like translation, so they may need
-        extensions that regular Google Chrome users don't (e.g. translation extensions).
-        """
         return False
 
     @abstractmethod
@@ -73,34 +75,18 @@ class BrowserBase(ABC):
         return profiles
 
     def external_extensions_dir(self) -> Path | None:
-        """Return the External Extensions directory for this browser, or None."""
         root = self.profile_root()
         return (root / "External Extensions") if root else None
 
     def windows_extensions_registry_key(self) -> str | None:
-        """Return the HKCU registry subkey for external extension registration on Windows.
-
-        Chrome on Windows ignores the file-based External Extensions directory;
-        the Registry is the only supported mechanism. Other browsers may fall back
-        to the file-based approach, so return None by default.
-        """
         return None
 
     def windows_force_list_registry_key(self) -> str | None:
-        """Return the HKCU registry subkey for ExtensionInstallForcelist policy.
-
-        Force-listed extensions install and enable automatically with no user prompt.
-        Returns None by default; browsers that support this policy override it.
-        """
         return None
 
     def get_profile_name(self, profile_path: Path) -> str:
-        """Read display name from Local State or Preferences, fallback to directory name."""
-        import json
-
         profile_dir_name = profile_path.name
 
-        # Try reading from Local State first (has email and better names)
         try:
             root = self.profile_root()
             if root:
@@ -110,7 +96,6 @@ class BrowserBase(ABC):
                     info_cache = local_state.get("profile", {}).get("info_cache", {})
                     profile_info = info_cache.get(profile_dir_name, {})
 
-                    # Priority: custom name (if not default) > email > gaia_name
                     is_default = profile_info.get("is_using_default_name", True)
                     name = profile_info.get("name", "").strip()
                     if name and not is_default:
@@ -126,7 +111,6 @@ class BrowserBase(ABC):
         except (OSError, json.JSONDecodeError, KeyError):
             pass
 
-        # Fallback to Preferences file
         try:
             prefs = json.loads((profile_path / "Preferences").read_text(encoding="utf-8"))
             name = prefs.get("profile", {}).get("name", "").strip()
@@ -138,26 +122,9 @@ class BrowserBase(ABC):
         return profile_dir_name
 
     def is_running(self, running_procs: set[str] | None = None) -> bool:
-        on_windows = sys.platform == "win32"
         if running_procs is None:
-            running_procs = self._scan_procs(on_windows)
-        return self._matches(running_procs, on_windows)
-
-    @staticmethod
-    def _scan_procs(on_windows: bool) -> set[str]:
-        """Scan running processes and return exe paths (Windows) or names (macOS/Linux)."""
-        results: set[str] = set()
-        attr = "exe" if on_windows else "name"
-        for proc in psutil.process_iter([attr]):
-            try:
-                val = proc.info.get(attr)
-                if val:
-                    results.add(val.lower())
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-        return results
-
-    def _matches(self, running_procs: set[str], on_windows: bool) -> bool:
+            running_procs = scan_running_procs()
+        on_windows = sys.platform == "win32"
         if on_windows:
             return any(self.windows_exe_substr in p for p in running_procs)
         return bool({n.lower() for n in self.unix_process_names} & running_procs)
