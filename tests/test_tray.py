@@ -258,7 +258,9 @@ def test_debounce_resets_on_repeated_events(qapp, tmp_path):
 
     assert tray._debounce_timer.isActive()
 
-    QCoreApplication.processEvents()
+    with patch("src.config.get_enabled_profiles", return_value={"Browser": ["Profile"]}), \
+         patch("src.config.is_profile_sync_enabled", return_value=True):
+        QCoreApplication.processEvents()
 
     trigger_mock.assert_called_once()
 

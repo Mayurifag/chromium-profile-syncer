@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import re
 import sys
@@ -41,6 +42,14 @@ class BrowserBase(ABC):
     def ungoogled(self) -> bool:
         return False
 
+    @property
+    def web_store_update_url(self) -> str:
+        return "https://clients2.google.com/service/update2/crx"
+
+    @staticmethod
+    def _localappdata() -> str:
+        return os.environ.get("LOCALAPPDATA", "")
+
     @abstractmethod
     def _windows_path(self) -> Path: ...
 
@@ -51,13 +60,13 @@ class BrowserBase(ABC):
     def _linux_path(self) -> Path: ...
 
     def profile_root(self) -> Path | None:
-        system = platform.system()
-        if system == "Windows":
-            return self._windows_path()
-        elif system == "Darwin":
-            return self._macos_path()
-        else:
-            return self._linux_path()
+        match platform.system():
+            case "Windows":
+                return self._windows_path()
+            case "Darwin":
+                return self._macos_path()
+            case _:
+                return self._linux_path()
 
     def is_installed(self) -> bool:
         root = self.profile_root()
@@ -84,33 +93,32 @@ class BrowserBase(ABC):
     def windows_force_list_registry_key(self) -> str | None:
         return None
 
-    def get_profile_name(self, profile_path: Path) -> str:
-        profile_dir_name = profile_path.name
-
+    def _name_from_local_state(self, profile_dir_name: str) -> str | None:
+        root = self.profile_root()
+        if not root:
+            return None
+        local_state_path = root / "Local State"
+        if not local_state_path.exists():
+            return None
         try:
-            root = self.profile_root()
-            if root:
-                local_state_path = root / "Local State"
-                if local_state_path.exists():
-                    local_state = json.loads(local_state_path.read_text(encoding="utf-8"))
-                    info_cache = local_state.get("profile", {}).get("info_cache", {})
-                    profile_info = info_cache.get(profile_dir_name, {})
-
-                    is_default = profile_info.get("is_using_default_name", True)
-                    name = profile_info.get("name", "").strip()
-                    if name and not is_default:
-                        return name
-
-                    user_name = profile_info.get("user_name", "").strip()
-                    if user_name:
-                        return user_name
-
-                    gaia_name = profile_info.get("gaia_name", "").strip()
-                    if gaia_name:
-                        return gaia_name
+            local_state = json.loads(local_state_path.read_text(encoding="utf-8"))
+            info = local_state.get("profile", {}).get("info_cache", {}).get(profile_dir_name, {})
+            if not info.get("is_using_default_name", True):
+                name = info.get("name", "").strip()
+                if name:
+                    return name
+            for key in ("user_name", "gaia_name"):
+                val = info.get(key, "").strip()
+                if val:
+                    return val
         except (OSError, json.JSONDecodeError, KeyError):
             pass
+        return None
 
+    def get_profile_name(self, profile_path: Path) -> str:
+        name = self._name_from_local_state(profile_path.name)
+        if name:
+            return name
         try:
             prefs = json.loads((profile_path / "Preferences").read_text(encoding="utf-8"))
             name = prefs.get("profile", {}).get("name", "").strip()
@@ -118,8 +126,7 @@ class BrowserBase(ABC):
                 return name
         except (OSError, json.JSONDecodeError, KeyError):
             pass
-
-        return profile_dir_name
+        return profile_path.name
 
     def is_running(self, running_procs: set[str] | None = None) -> bool:
         if running_procs is None:

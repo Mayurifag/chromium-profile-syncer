@@ -60,6 +60,82 @@ def make_url_hash(row_id: int, url: str, aesgcm: AESGCM) -> bytes:
     return b"v10" + nonce + aesgcm.encrypt(nonce, plaintext, None)
 
 
+def _detect_default(
+    sync_guid: str, url: str, default_guid: str, default_engine_url: str
+) -> tuple[bool, str]:
+    if default_guid:
+        if sync_guid == default_guid:
+            return True, sync_guid
+        if not sync_guid and default_engine_url and url == default_engine_url:
+            # DB sync_guid is empty but URL matches the default engine in Preferences;
+            # adopt the known guid so it survives round-trip through the JSON.
+            return True, default_guid
+    elif default_engine_url and url == default_engine_url:
+        return True, sync_guid
+    return False, sync_guid
+
+
+def _row_to_shortcut(row: tuple, is_default: bool, sync_guid: str) -> dict:
+    return {
+        "keyword": row[0],
+        "short_name": row[1],
+        "url": row[2],
+        "favicon_url": row[3],
+        "suggest_url": row[4],
+        "prepopulate_id": row[5],
+        "is_active": row[6],
+        "date_created": row[7],
+        "last_modified": row[8],
+        "sync_guid": sync_guid,
+        "safe_for_autoreplace": row[10] if row[10] is not None else 0,
+        "input_encodings": row[11] or "UTF-8",
+        "alternate_urls": row[12] or "[]",
+        "is_default": is_default,
+    }
+
+
+def _parse_alt_urls(raw: str | list) -> list:
+    if isinstance(raw, list):
+        return raw
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def _build_mirror_dict(shortcut: dict, row_id: int, alt_urls: list, sync_guid: str) -> dict:
+    return {
+        "alternate_urls": alt_urls,
+        "contextual_search_url": "",
+        "created_from_play_api": False,
+        "date_created": str(shortcut.get("date_created", 0)),
+        "favicon_url": shortcut.get("favicon_url", ""),
+        "id": str(row_id),
+        "image_search_branding_label": "",
+        "image_search_post_params": "",
+        "image_translate_source_language_param_key": "",
+        "image_translate_source_language_param_value": "",
+        "image_translate_target_language_param_key": "",
+        "image_url": "",
+        "image_url_post_params": "",
+        "is_active": shortcut.get("is_active", 1),
+        "keyword": shortcut.get("keyword", ""),
+        "last_modified": str(shortcut.get("last_modified", 0)),
+        "logo_url": "",
+        "new_tab_url": "",
+        "policy_origin": "",
+        "prepopulate_id": shortcut.get("prepopulate_id", 0),
+        "safe_for_autoreplace": bool(shortcut.get("safe_for_autoreplace", False)),
+        "search_intent_params": [],
+        "short_name": shortcut.get("short_name", ""),
+        "side_image_search_param": "",
+        "suggestions_url": shortcut.get("suggest_url", ""),
+        "synced_guid": sync_guid,
+        "url": shortcut.get("url", ""),
+        "visual_url": "",
+    }
+
+
 def extract_search_shortcuts(
     profile_path: Path,
     sync_folder_root: Path,
@@ -104,35 +180,10 @@ def extract_search_shortcuts(
         shortcuts = []
         for row in rows:
             sync_guid = row[9] or ""
-            is_default = False
-            if default_guid:
-                if sync_guid == default_guid:
-                    is_default = True
-                elif not sync_guid and default_engine_url and row[2] == default_engine_url:
-                    # DB sync_guid is empty but URL matches the default engine in Preferences;
-                    # adopt the known guid so it survives round-trip through the JSON.
-                    sync_guid = default_guid
-                    is_default = True
-            elif default_engine_url and row[2] == default_engine_url:
-                is_default = True
-            shortcuts.append(
-                {
-                    "keyword": row[0],
-                    "short_name": row[1],
-                    "url": row[2],
-                    "favicon_url": row[3],
-                    "suggest_url": row[4],
-                    "prepopulate_id": row[5],
-                    "is_active": row[6],
-                    "date_created": row[7],
-                    "last_modified": row[8],
-                    "sync_guid": sync_guid,
-                    "safe_for_autoreplace": row[10] if row[10] is not None else 0,
-                    "input_encodings": row[11] or "UTF-8",
-                    "alternate_urls": row[12] or "[]",
-                    "is_default": is_default,
-                }
+            is_default, sync_guid = _detect_default(
+                sync_guid, row[2], default_guid, default_engine_url
             )
+            shortcuts.append(_row_to_shortcut(row, is_default, sync_guid))
 
         shortcuts_json.write_text(json.dumps(shortcuts, indent=2), encoding="utf-8")
         report("search_shortcuts.json")
@@ -284,50 +335,12 @@ def restore_search_shortcuts(
             dsp.pop("reset_time", None)
 
             if default_shortcut is not None and default_row_id is not None:
-                alt_urls_raw = default_shortcut.get("alternate_urls", "[]")
-                try:
-                    alt_urls = (
-                        json.loads(alt_urls_raw)
-                        if isinstance(alt_urls_raw, str)
-                        else alt_urls_raw
-                    )
-                except (json.JSONDecodeError, TypeError):
-                    alt_urls = []
-                mirror = {
-                    "alternate_urls": alt_urls,
-                    "contextual_search_url": "",
-                    "created_from_play_api": False,
-                    "date_created": str(default_shortcut.get("date_created", 0)),
-                    "favicon_url": default_shortcut.get("favicon_url", ""),
-                    "id": str(default_row_id),
-                    "image_search_branding_label": "",
-                    "image_search_post_params": "",
-                    "image_translate_source_language_param_key": "",
-                    "image_translate_source_language_param_value": "",
-                    "image_translate_target_language_param_key": "",
-                    "image_url": "",
-                    "image_url_post_params": "",
-                    "is_active": default_shortcut.get("is_active", 1),
-                    "keyword": default_shortcut.get("keyword", ""),
-                    "last_modified": str(default_shortcut.get("last_modified", 0)),
-                    "logo_url": "",
-                    "new_tab_url": "",
-                    "policy_origin": "",
-                    "prepopulate_id": default_shortcut.get("prepopulate_id", 0),
-                    "safe_for_autoreplace": bool(
-                        default_shortcut.get("safe_for_autoreplace", False)
-                    ),
-                    "search_intent_params": [],
-                    "short_name": default_shortcut.get("short_name", ""),
-                    "side_image_search_param": "",
-                    "suggestions_url": default_shortcut.get("suggest_url", ""),
-                    "synced_guid": restored_default_guid,
-                    "url": default_shortcut.get("url", ""),
-                    "visual_url": "",
-                }
+                alt_urls = _parse_alt_urls(default_shortcut.get("alternate_urls", "[]"))
                 prefs.setdefault("default_search_provider_data", {})[
                     "mirrored_template_url_data"
-                ] = mirror
+                ] = _build_mirror_dict(
+                    default_shortcut, default_row_id, alt_urls, restored_default_guid
+                )
 
             prefs_path.write_text(json.dumps(prefs), encoding="utf-8")
 

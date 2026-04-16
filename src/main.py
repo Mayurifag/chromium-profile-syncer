@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication
 from src import autostart, config, single_instance
 from src.dracula import DRACULA_STYLESHEET
 from src.sync_engine import SyncEngine
-from src.tray import TrayApp
+from src.tray import TrayApp, make_app_icon
 
 
 def main() -> None:
@@ -33,6 +33,7 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setStyleSheet(DRACULA_STYLESHEET)
+    app.setWindowIcon(make_app_icon())
 
     from PySide6.QtCore import QTimer
 

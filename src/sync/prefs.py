@@ -81,7 +81,7 @@ def sync_preferences_json(
     sync_profile_path: Path,
     direction: str,
     report: Callable[[str], None] = _noop,
-) -> int:
+) -> tuple[int, int]:
     prefs_path = profile_path / "Preferences"
     json_path = sync_profile_path / "preferences.json"
 
@@ -101,11 +101,8 @@ def sync_preferences_json(
                 _set_nested(extracted, keys, value)
         json_path.parent.mkdir(parents=True, exist_ok=True)
         json_path.write_text(json.dumps(extracted), encoding="utf-8")
-        legacy = sync_profile_path / "Preferences"
-        if legacy.exists():
-            legacy.unlink()
         report("preferences.json")
-        return 1
+        return 1, 0
 
     if do_pull and json_path.exists() and prefs_path.exists():
         saved = json.loads(json_path.read_bytes())
@@ -113,6 +110,6 @@ def sync_preferences_json(
         merge_prefs(prefs, saved)
         prefs_path.write_bytes(json.dumps(prefs, separators=(",", ":")).encode())
         report("Preferences")
-        return 1
+        return 1, 0
 
-    return 0
+    return 0, 1

@@ -13,6 +13,7 @@ Install locations:
 
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -55,7 +56,40 @@ INSTALL_DIR = _get_install_dir()
 INSTALL_PATH = _get_install_path()
 
 
+def _generate_icon() -> Path:
+    from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
+    from PySide6.QtGui import QPainter, QPixmap
+    from PySide6.QtSvg import QSvgRenderer
+    from PySide6.QtWidgets import QApplication
+
+    from src.dracula import APP_ICON_SVG
+
+    _app = QApplication.instance() or QApplication(sys.argv)
+
+    renderer = QSvgRenderer(QByteArray(APP_ICON_SVG.encode()))
+    pixmap = QPixmap(256, 256)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    renderer.render(painter)
+    painter.end()
+
+    buf = QBuffer()
+    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    pixmap.save(buf, "PNG")
+    png_data = bytes(buf.data())
+    buf.close()
+
+    # PNG-in-ICO (supported on Vista+)
+    header = struct.pack("<HHH", 0, 1, 1)
+    entry = struct.pack("<BBBBHHII", 0, 0, 0, 0, 1, 32, len(png_data), 22)
+    ico_path = Path("assets") / "icon.ico"
+    ico_path.parent.mkdir(exist_ok=True)
+    ico_path.write_bytes(header + entry + png_data)
+    return ico_path
+
+
 def build() -> Path:
+    icon_path = _generate_icon()
     cmd = [
         "uv",
         "run",
@@ -64,6 +98,8 @@ def build() -> Path:
         "--windowed",
         "--name",
         APP_NAME,
+        "--icon",
+        str(icon_path),
         "--hidden-import",
         "psutil",
         "--hidden-import",

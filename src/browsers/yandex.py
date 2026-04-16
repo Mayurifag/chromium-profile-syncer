@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from .base import BrowserBase
@@ -20,7 +19,7 @@ class Yandex(BrowserBase):
         return "\\yandex\\yandexbrowser\\application"
 
     def _windows_path(self) -> Path:
-        return Path(os.environ.get("LOCALAPPDATA", "")) / "Yandex" / "YandexBrowser" / "User Data"
+        return Path(self._localappdata()) / "Yandex" / "YandexBrowser" / "User Data"
 
     def _macos_path(self) -> Path:
         return Path.home() / "Library" / "Application Support" / "Yandex" / "YandexBrowser"

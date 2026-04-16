@@ -19,9 +19,7 @@ class Chrome(BrowserBase):
         return "\\google\\chrome\\application"
 
     def _windows_path(self) -> Path:
-        import os
-
-        return Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "User Data"
+        return Path(self._localappdata()) / "Google" / "Chrome" / "User Data"
 
     def _macos_path(self) -> Path:
         return Path.home() / "Library" / "Application Support" / "Google" / "Chrome"

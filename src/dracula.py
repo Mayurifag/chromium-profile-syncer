@@ -1,5 +1,3 @@
-"""Dracula theme — all colors, styles, and visual constants."""
-
 # Core Dracula colors
 BACKGROUND = "#282a36"
 BACKGROUND_DARK = "#1e1e1e"
@@ -67,6 +65,16 @@ QPushButton {{
 """
 
 # Main application stylesheet
+APP_ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <circle cx="50" cy="50" r="48" fill="#282a36"/>
+  <path d="M 18 50 A 32 32 0 0 1 82 50"
+        fill="none" stroke="#bd93f9" stroke-width="9" stroke-linecap="round"/>
+  <polygon points="82,58 76,44 88,44" fill="#bd93f9"/>
+  <path d="M 82 50 A 32 32 0 0 1 18 50"
+        fill="none" stroke="#8be9fd" stroke-width="9" stroke-linecap="round"/>
+  <polygon points="18,42 12,56 24,56" fill="#8be9fd"/>
+</svg>"""
+
 DRACULA_STYLESHEET = f"""
 QWidget {{
     background-color: {BACKGROUND};

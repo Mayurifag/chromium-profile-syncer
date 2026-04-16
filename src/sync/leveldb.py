@@ -26,7 +26,7 @@ def copy_atomic(
     *,
     display_name: str | None = None,
 ) -> None:
-    tmp = dst.with_suffix(".tmp")
+    tmp = dst.parent / f"{dst.name}.tmp"
     try:
         if tmp.exists():
             shutil.rmtree(tmp)

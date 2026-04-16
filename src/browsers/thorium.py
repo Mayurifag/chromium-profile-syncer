@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from .base import BrowserBase
@@ -20,7 +19,7 @@ class Thorium(BrowserBase):
         return "\\thorium\\application"
 
     def _windows_path(self) -> Path:
-        return Path(os.environ.get("LOCALAPPDATA", "")) / "Thorium" / "User Data"
+        return Path(self._localappdata()) / "Thorium" / "User Data"
 
     def _macos_path(self) -> Path:
         return Path.home() / "Library" / "Application Support" / "Thorium"

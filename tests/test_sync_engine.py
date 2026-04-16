@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from src.rclone import find_rclone
 from src.sync.archive import pack_to_archive, unpack_archive
 from src.sync.extensions import _parse_version, install_external_extensions, sync_extensions
 from src.sync.leveldb import copy_atomic, sync_dir
@@ -21,7 +22,7 @@ from src.sync.shortcuts import (
     make_url_hash,
     restore_search_shortcuts,
 )
-from src.sync_engine import NEVER_SYNC, SyncEngine, find_rclone
+from src.sync_engine import NEVER_SYNC, SyncEngine
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -79,6 +80,7 @@ def _make_browser(
     mock.external_extensions_dir.return_value = None
     mock.windows_extensions_registry_key.return_value = None
     mock.windows_force_list_registry_key.return_value = None
+    mock.web_store_update_url = "https://clients2.google.com/service/update2/crx"
     return mock
 
 
@@ -332,7 +334,8 @@ def _make_ext_version_dir(
     ver_dir.mkdir(parents=True, exist_ok=True)
     if manifest_version is not None:
         (ver_dir / "manifest.json").write_text(
-            json.dumps({"version": manifest_version}), encoding="utf-8"
+            json.dumps({"version": manifest_version, "name": f"Test Extension {ext_id[:8]}"}),
+            encoding="utf-8",
         )
     if webstore:
         # Create verified_contents.json to simulate Web Store extension
@@ -498,14 +501,23 @@ def test_sync_browser_profile_syncs_plain_files(tmp_path: Path) -> None:
     assert (sync_profile / "Custom Dictionary.txt").read_text() == "word1\nword2"
 
 
-def test_sync_browser_profile_syncs_extensions(tmp_path: Path) -> None:
+def test_sync_browser_profile_updates_webstore_manifest(tmp_path: Path) -> None:
     profile = tmp_path / "profile"
     sync_profile = tmp_path / "sync_profile"
-    _make_ext_version_dir(profile, "testext", "1.0.0", "1.0.0")
+    _make_ext_version_dir(
+        profile, "wsext1234567890123456789012345", "1.0.0", "1.0.0", webstore=True
+    )
+    _make_ext_version_dir(
+        profile, "localext12345678901234567890123", "1.0.0", "1.0.0", webstore=False
+    )
     engine = _make_engine(tmp_path)
     engine.sync_browser_profile(profile, sync_profile)
 
-    assert (sync_profile / "Extensions" / "testext" / "1.0.0").exists()
+    assert not (sync_profile / "Extensions").exists()
+    import json
+    manifest = json.loads((sync_profile / "webstore_extensions.json").read_text())
+    assert "wsext1234567890123456789012345" in manifest
+    assert "localext12345678901234567890123" not in manifest
 
 
 def test_sync_browser_profile_empty_profile_dir(tmp_path: Path) -> None:
@@ -820,8 +832,38 @@ def test_sync_all_with_empty_config_skips_browser(tmp_path: Path) -> None:
 
     # No profiles should be synced when browser has no config entry
     assert not (sync_folder / "current.tar").exists()
-    current = sync_folder / "current"
-    assert not current.exists() or not any(current.iterdir())
+
+
+def test_restore_only_deletes_items_present_in_backup(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    sync_profile = tmp_path / "sync_profile"
+    profile.mkdir()
+    sync_profile.mkdir()
+
+    # Backup has: Bookmarks + Local Extension Settings
+    _write_file(sync_profile / "Bookmarks", "from-backup", mtime=2000.0)
+    les = sync_profile / "Local Extension Settings" / "abc"
+    les.mkdir(parents=True)
+    (les / "data").write_text("ext-data")
+
+    # Profile has Bookmarks (old), LES (old), Extensions (keep!), Other (keep!)
+    _write_file(profile / "Bookmarks", "old", mtime=1000.0)
+    old_les = profile / "Local Extension Settings" / "abc"
+    old_les.mkdir(parents=True)
+    (old_les / "data").write_text("old-ext-data")
+    (profile / "Extensions" / "ext123" / "1.0").mkdir(parents=True)
+    _write_file(profile / "Other File.txt", "keep-me", mtime=1000.0)
+    _write_file(profile / "Preferences", "{}", mtime=1000.0)
+
+    engine = _make_engine(tmp_path)
+    engine.restore_profile_from_backup(profile, sync_profile)
+
+    # Items from backup: replaced
+    assert (profile / "Bookmarks").read_text() == "from-backup"
+    assert (profile / "Local Extension Settings" / "abc" / "data").read_text() == "ext-data"
+    # Items NOT in backup: untouched
+    assert (profile / "Extensions" / "ext123" / "1.0").exists()
+    assert (profile / "Other File.txt").read_text() == "keep-me"
 
 
 # ---------------------------------------------------------------------------

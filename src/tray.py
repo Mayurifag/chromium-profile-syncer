@@ -5,21 +5,32 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QFileSystemWatcher, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QFileSystemWatcher, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 import src.config as _config
 from src import autostart
 from src.browser_monitor import BrowserMonitor
 from src.browsers import ALL_BROWSERS
-from src.dracula import ICON_COLORS
+from src.dracula import APP_ICON_SVG, ICON_COLORS
 from src.rclone import find_rclone
 from src.settings import SettingsDialog
 from src.sync_engine import SyncEngine
 from src.sync_worker import SyncWorker
 
 logger = logging.getLogger(__name__)
+
+
+def make_app_icon() -> QIcon:
+    renderer = QSvgRenderer(QByteArray(APP_ICON_SVG.encode()))
+    pixmap = QPixmap(256, 256)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    renderer.render(painter)
+    painter.end()
+    return QIcon(pixmap)
 
 
 class TrayApp(QSystemTrayIcon):
@@ -168,6 +179,16 @@ class TrayApp(QSystemTrayIcon):
                             return
                     except OSError:
                         pass
+
+        enabled_profiles = _config.get_enabled_profiles()
+        if not any(
+            _config.is_profile_sync_enabled(browser, profile)
+            for browser, profiles in enabled_profiles.items()
+            for profile in profiles
+        ):
+            logger.debug("Watcher fired but no profiles have auto-sync enabled — skipping")
+            return
+
         logger.info("Debounce fired — triggering sync (remote change detected)")
         self._trigger_sync()
 
@@ -212,6 +233,12 @@ class TrayApp(QSystemTrayIcon):
 
         self._engine = SyncEngine(sync_folder)
         logger.info("Settings saved — engine rebuilt with folder %s", sync_folder)
+
+        tar = sync_folder / "current.tar"
+        try:
+            self._last_tar_mtime = tar.stat().st_mtime if tar.exists() else None
+        except OSError:
+            self._last_tar_mtime = None
 
         self._teardown_watcher()
         self._setup_watcher(sync_folder)

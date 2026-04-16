@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import logging
-import platform
-import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPixmap, QTextCursor
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -18,7 +15,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QProgressBar,
     QPushButton,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -26,67 +22,19 @@ from PySide6.QtWidgets import (
 import src.config as config_module
 from src.browser_monitor import BrowserMonitor
 from src.browsers import ALL_BROWSERS
-from src.dracula import (
-    DEFAULT_LOG_COLOR,
-    LOG_COLORS,
-    NOT_RUNNING_DOT,
-    PROFILE_ROW_STYLE,
-    RUNNING_DOT,
-    RUNNING_GLOW,
-    SMALL_MUTED,
+from src.dracula import PROFILE_ROW_STYLE, SMALL_MUTED
+from src.settings._activity_log import ActivityLogWidget
+from src.settings._helpers import (
+    _CLOSE_BROWSER_HINT,
+    _make_indicator_pixmap,
+    _make_status_indicator,
+    _sync_folder_has_data,
+    _sync_folder_has_profile,
 )
-from src.log_viewer import GUILogHandler, LogSignaler
+from src.settings.initial_upload import InitialUploadDialog
 from src.shortcuts_editor import ShortcutsEditorDialog
-from src.sync_worker import _InitialUploadWorker
 
 _LOG = logging.getLogger(__name__)
-
-_CLOSE_BROWSER_HINT = (
-    "Close browser from the system tray to allow sync"
-    if platform.system() == "Windows"
-    else "Quit browser (Cmd+Q) to allow sync"
-)
-
-
-def _make_indicator_pixmap(is_running: bool) -> QPixmap:
-    pixmap = QPixmap(12, 12)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setPen(Qt.PenStyle.NoPen)
-    if is_running:
-        painter.setBrush(QColor(*RUNNING_GLOW))
-        painter.drawEllipse(0, 0, 12, 12)
-        painter.setBrush(QColor(*RUNNING_DOT))
-        painter.drawEllipse(2, 2, 8, 8)
-    else:
-        painter.setBrush(QColor(*NOT_RUNNING_DOT))
-        painter.drawEllipse(2, 2, 8, 8)
-    painter.end()
-    return pixmap
-
-
-def _make_status_indicator(is_running: bool) -> QLabel:
-    label = QLabel()
-    label.setPixmap(_make_indicator_pixmap(is_running))
-    label.setToolTip(_CLOSE_BROWSER_HINT if is_running else "Browser is not running")
-    return label
-
-
-def _sync_folder_has_data(folder: Path) -> bool:
-    if (folder / "current.tar").is_file():
-        return True
-    current = folder / "current"
-    if not current.is_dir():
-        return False
-    return any(entry.is_dir() for entry in current.iterdir())
-
-
-def _sync_folder_has_profile(folder: Path) -> bool:
-    if (folder / "current.tar").is_file():
-        return True
-    current = folder / "current"
-    return current.is_dir() and any(current.iterdir())
 
 
 class SettingsDialog(QDialog):
@@ -115,11 +63,7 @@ class SettingsDialog(QDialog):
         self._profiles_group: QGroupBox | None = None
         self._profiles_scroll_layout: QVBoxLayout | None = None
         self._activity_log_select: QComboBox | None = None
-        self._activity_log_widget: QWidget | None = None
-        self._activity_log_text: QTextEdit | None = None
-        self._clear_log_btn: QPushButton | None = None
-        self._log_signaler: LogSignaler | None = None
-        self._log_handler: GUILogHandler | None = None
+        self._activity_log: ActivityLogWidget
         self._browser_status_indicators: dict[str, QLabel] = {}
         self._apply_backup_buttons: dict[tuple[str, str], QPushButton] = {}
         self._sync_toggle_buttons: dict[tuple[str, str], QPushButton] = {}
@@ -155,7 +99,6 @@ class SettingsDialog(QDialog):
         self._profiles_group.setVisible(False)
         self._profiles_scroll_layout = QVBoxLayout(self._profiles_group)
         self._profiles_scroll_layout.setSpacing(1)
-
         root.addWidget(self._profiles_group)
 
         selects_row = QWidget()
@@ -187,34 +130,18 @@ class SettingsDialog(QDialog):
         edit_shortcuts_btn.clicked.connect(self._open_shortcuts_editor)
         selects_layout.addWidget(edit_shortcuts_btn)
 
+        view_ext_btn = QPushButton("View Extensions")
+        view_ext_btn.clicked.connect(self._open_extension_links)
+        selects_layout.addWidget(view_ext_btn)
+
         selects_layout.addStretch()
         selects_row.setVisible(False)
         root.addWidget(selects_row)
         self._selects_row = selects_row
 
-        self._activity_log_widget = QWidget()
-        log_layout = QVBoxLayout(self._activity_log_widget)
-        log_layout.setContentsMargins(0, 0, 0, 0)
-
-        self._activity_log_text = QTextEdit()
-        self._activity_log_text.setReadOnly(True)
-        self._activity_log_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self._activity_log_text.setMinimumHeight(200)
-        self._activity_log_text.setMaximumHeight(300)
-
-        font = QFont("Monaco, Menlo, Courier New, monospace")
-        font.setPointSize(11)
-        self._activity_log_text.setFont(font)
-
-        log_layout.addWidget(self._activity_log_text)
-
-        self._clear_log_btn = QPushButton("Clear Log")
-        self._clear_log_btn.clicked.connect(self._clear_activity_log)
-        self._clear_log_btn.setVisible(False)
-        log_layout.addWidget(self._clear_log_btn)
-
-        self._activity_log_widget.setVisible(False)
-        root.addWidget(self._activity_log_widget)
+        self._activity_log = ActivityLogWidget()
+        self._activity_log.resized.connect(self.adjustSize)
+        root.addWidget(self._activity_log)
 
     def _connect_browser_monitor(self) -> None:
         if self._browser_monitor is not None:
@@ -228,7 +155,7 @@ class SettingsDialog(QDialog):
         self._refresh_apply_backup_enabled()
 
     def _refresh_apply_backup_enabled(self) -> None:
-        for (browser_name, profile_name), btn in self._apply_backup_buttons.items():
+        for (browser_name, _profile_name), btn in self._apply_backup_buttons.items():
             is_running = (
                 self._browser_monitor.is_running(browser_name)
                 if self._browser_monitor else False
@@ -274,81 +201,26 @@ class SettingsDialog(QDialog):
             self._profiles_group.setVisible(False)
         if self._selects_row:
             self._selects_row.setVisible(False)
-        if self._activity_log_widget:
-            self._activity_log_widget.setVisible(False)
+        self._activity_log.setVisible(False)
         self.adjustSize()
 
-    def _on_activity_log_changed(self, index: int) -> None:
-        checked = self._activity_log_select.currentData() if self._activity_log_select else True
-
-        if checked:
-            if self._log_signaler is None:
-                self._log_signaler = LogSignaler()
-                self._log_signaler.log_message.connect(self._append_log)
-            if self._log_handler is None:
-                self._log_handler = GUILogHandler(self._log_signaler)
-                self._log_handler.setLevel(logging.DEBUG)
-                logging.getLogger().addHandler(self._log_handler)
-                _LOG.info("Activity log enabled in settings window")
-            if self._activity_log_widget and self._activity_log_text:
-                has_logs = self._activity_log_text.toPlainText().strip() != ""
-                self._activity_log_widget.setVisible(has_logs)
+    def _on_activity_log_changed(self, _index: int) -> None:
+        if self._activity_log_select and self._activity_log_select.currentData():
+            self._activity_log.enable()
         else:
-            if self._log_handler is not None:
-                logging.getLogger().removeHandler(self._log_handler)
-                self._log_handler = None
-                _LOG.info("Activity log disabled in settings window")
-            if self._activity_log_widget:
-                self._activity_log_widget.setVisible(False)
+            self._activity_log.disable()
 
-        self.adjustSize()
-
-    def _on_autostart_changed(self, index: int) -> None:
+    def _on_autostart_changed(self, _index: int) -> None:
         checked = self._autostart_select.currentData() if self._autostart_select else True
         config_module.set_autostart(checked)
         _LOG.info("Autostart %s", "enabled" if checked else "disabled")
-
-    def _append_log(self, level: str, message: str) -> None:
-        if self._activity_log_text is None:
-            return
-
-        color = LOG_COLORS.get(level, DEFAULT_LOG_COLOR)
-
-        cursor = self._activity_log_text.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-
-        fmt = cursor.charFormat()
-        fmt.setForeground(QColor(color))
-        cursor.setCharFormat(fmt)
-
-        cursor.insertText(message + "\n")
-
-        self._activity_log_text.setTextCursor(cursor)
-        self._activity_log_text.ensureCursorVisible()
-
-        if self._activity_log_widget and not self._activity_log_widget.isVisible():
-            self._activity_log_widget.setVisible(True)
-            self.adjustSize()
-        if self._clear_log_btn and not self._clear_log_btn.isVisible():
-            self._clear_log_btn.setVisible(True)
-
-    def _clear_activity_log(self) -> None:
-        if self._activity_log_text:
-            _LOG.info("Activity log cleared")
-            self._activity_log_text.clear()
-        if self._clear_log_btn:
-            self._clear_log_btn.setVisible(False)
-        if self._activity_log_widget:
-            self._activity_log_widget.setVisible(False)
-            self.adjustSize()
 
     def _pick_initial_upload_profile(self) -> tuple[str, str] | None:
         options: list[tuple[str, str, str]] = []
         for browser in self._browsers:
             for profile_path in browser.discover_profiles():
                 friendly = browser.get_profile_name(profile_path)
-                display = f"{browser.name} — {friendly}"
-                options.append((display, browser.name, profile_path.name))
+                options.append((f"{browser.name} — {friendly}", browser.name, profile_path.name))
 
         if not options:
             return None
@@ -378,71 +250,44 @@ class SettingsDialog(QDialog):
         _, browser_name, profile_name = options[combo.currentIndex()]
         return (browser_name, profile_name)
 
-    def _do_initial_upload(self, folder: Path, initial: tuple[str, str]) -> None:
-        browser_name, profile_name = initial
-
-        profile_path: Path | None = None
+    def _find_profile_path(self, browser_name: str, profile_name: str) -> Path | None:
         for browser in self._browsers:
             if browser.name == browser_name:
                 for p in browser.discover_profiles():
                     if p.name == profile_name:
-                        profile_path = p
-                        break
-                break
+                        return p
+        return None
 
+    def _do_initial_upload(self, folder: Path, initial: tuple[str, str]) -> None:
+        browser_name, profile_name = initial
+        profile_path = self._find_profile_path(browser_name, profile_name)
         if profile_path is None:
             self._rebuild_profiles(folder)
             return
 
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Uploading Profile")
-        dlg.setMinimumWidth(420)
-        dlg.setWindowFlags(dlg.windowFlags() & ~0x00000008)
-        dlg_layout = QVBoxLayout(dlg)
+        dlg = InitialUploadDialog(
+            self,
+            profile_path=profile_path,
+            folder=folder,
+            browser_name=browser_name,
+            profile_name=profile_name,
+        )
+        dlg.upload_done.connect(
+            lambda bn, pn, cnt, el: self._on_upload_done(folder, bn, pn, cnt, el)
+        )
+        dlg.start()
 
-        op_label = QLabel("Starting…")
-        op_label.setWordWrap(True)
-        dlg_layout.addWidget(op_label)
-
-        bar = QProgressBar()
-        bar.setRange(0, 0)
-        dlg_layout.addWidget(bar)
-
-        stats_label = QLabel("")
-        dlg_layout.addWidget(stats_label)
-
-        dlg.show()
-
-        start_time = time.monotonic()
-
-        self._upload_worker = _InitialUploadWorker(profile_path, folder)
-        self._upload_count = 0
-
-        def _on_step(description: str) -> None:
-            self._upload_count += 1
-            elapsed = time.monotonic() - start_time
-            op_label.setText(f"Copying: <b>{description}</b>")
-            rate = self._upload_count / elapsed if elapsed > 0.1 else 0
-            stats_label.setText(
-                f"{self._upload_count} items copied • {elapsed:.0f}s elapsed"
-                + (f" • ~{rate:.1f} items/s" if rate > 0 else "")
-            )
-
-        def _on_done() -> None:
-            elapsed = time.monotonic() - start_time
-            dlg.close()
-            config_module.set_sync_folder(folder)
-            config_module.set_enabled_profiles({browser_name: [profile_name]})
-            config_module.set_enabled_browsers({browser_name: True})
-            _LOG.info("Initial upload done: %d items in %.1fs", self._upload_count, elapsed)
-            if self._clean_btn:
-                self._clean_btn.setVisible(_sync_folder_has_data(folder))
-            self._rebuild_profiles(folder)
-            self.settings_saved.emit()
-
-        self._upload_worker.step.connect(_on_step)
-        self._upload_worker.done.connect(_on_done)
-        self._upload_worker.start()
+    def _on_upload_done(
+        self, folder: Path, browser_name: str, profile_name: str, count: int, elapsed: float
+    ) -> None:
+        config_module.set_sync_folder(folder)
+        config_module.set_enabled_profiles({browser_name: [profile_name]})
+        config_module.set_enabled_browsers({browser_name: True})
+        _LOG.info("Initial upload done: %d items in %.1fs", count, elapsed)
+        if self._clean_btn:
+            self._clean_btn.setVisible(_sync_folder_has_data(folder))
+        self._rebuild_profiles(folder)
+        self.settings_saved.emit()
 
     def _add_profile_row(
         self,
@@ -502,19 +347,24 @@ class SettingsDialog(QDialog):
         row_layout.addWidget(info_label)
         layout.addWidget(row)
 
-        def _on_toggle_clicked(bn: str = browser_name, pn: str = profile_name,
-                               btn: QPushButton = sync_toggle_btn) -> None:
+        def _on_toggle_clicked(checked: bool = False, bn: str = browser_name,
+                               pn: str = profile_name, btn: QPushButton = sync_toggle_btn) -> None:
             enabled = config_module.is_profile_sync_enabled(bn, pn)
             config_module.set_profile_sync_enabled(bn, pn, not enabled)
             btn.setText("Auto-sync: ON" if not enabled else "Auto-sync: OFF")
 
         sync_toggle_btn.clicked.connect(_on_toggle_clicked)
 
-        def _on_apply_clicked(bn: str = browser_name, pn: str = profile_name,
-                              btn: QPushButton = apply_btn,
+        def _on_apply_clicked(checked: bool = False, bn: str = browser_name,
+                              pn: str = profile_name,
                               s_btn: QPushButton = sync_toggle_btn,
                               f: Path | None = folder) -> None:
-            currently = self._profile_states[bn][pn]
+            _LOG.debug("Apply Backup clicked: %s/%s", bn, pn)
+            try:
+                currently = self._profile_states[bn][pn]
+            except KeyError:
+                _LOG.error("Apply Backup: profile state missing for %s/%s", bn, pn)
+                return
             if not currently:
                 self._profile_states[bn][pn] = True
                 s_btn.setVisible(True)
@@ -623,15 +473,8 @@ class SettingsDialog(QDialog):
             self._profiles_group.setVisible(True)
         if self._selects_row:
             self._selects_row.setVisible(True)
-        if self._activity_log_select:
-            if self._activity_log_select.currentData():
-                if self._log_signaler is None:
-                    self._log_signaler = LogSignaler()
-                    self._log_signaler.log_message.connect(self._append_log)
-                if self._log_handler is None:
-                    self._log_handler = GUILogHandler(self._log_signaler)
-                    self._log_handler.setLevel(logging.DEBUG)
-                    logging.getLogger().addHandler(self._log_handler)
+        if self._activity_log_select and self._activity_log_select.currentData():
+            self._activity_log.enable()
 
         self.adjustSize()
 
@@ -655,16 +498,13 @@ class SettingsDialog(QDialog):
         key = (browser, profile)
         if key not in self._profile_progress:
             return
-
         progress_bar, info_label = self._profile_progress[key]
-        progress_bar.setRange(0, 0)  # indeterminate
+        progress_bar.setRange(0, 0)
         progress_bar.setVisible(True)
-
         rate = count / elapsed if elapsed > 0.1 else 0
         info_text = f"{direction}: {count} items • {elapsed:.0f}s"
         if rate > 0:
             info_text += f" • ~{rate:.1f} items/s"
-
         info_label.setText(info_text)
         info_label.setVisible(True)
 
@@ -672,7 +512,6 @@ class SettingsDialog(QDialog):
         key = (browser, profile)
         if key not in self._profile_progress:
             return
-
         progress_bar, info_label = self._profile_progress[key]
         progress_bar.setVisible(False)
         info_label.setVisible(False)
@@ -689,7 +528,6 @@ class SettingsDialog(QDialog):
         folder_text = self._folder_edit.text().strip() if self._folder_edit else ""
         if not folder_text:
             return
-
         folder = Path(folder_text)
         if not folder.is_dir():
             return
@@ -703,26 +541,16 @@ class SettingsDialog(QDialog):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
-
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-        import shutil
-
-        from src.sync_engine import clean_external_extensions
-        clean_external_extensions(ALL_BROWSERS)
-
-        for path in ["current", "current.tar"]:
-            target = folder / path
-            try:
-                if target.is_dir():
-                    shutil.rmtree(target)
-                    _LOG.info("Deleted directory: %s", target)
-                elif target.is_file():
-                    target.unlink()
-                    _LOG.info("Deleted file: %s", target)
-            except OSError:
-                _LOG.exception("Failed to delete: %s", target)
+        target = folder / "current.tar"
+        try:
+            if target.is_file():
+                target.unlink()
+                _LOG.info("Deleted file: %s", target)
+        except OSError:
+            _LOG.exception("Failed to delete: %s", target)
 
         config_module.set_enabled_profiles({})
         config_module.set_enabled_browsers({})
@@ -735,7 +563,7 @@ class SettingsDialog(QDialog):
         import shutil
         import tempfile
 
-        from PySide6.QtWidgets import QDialog, QMessageBox
+        from PySide6.QtWidgets import QMessageBox
 
         from src.sync.archive import pack_to_archive, unpack_archive
 
@@ -755,7 +583,6 @@ class SettingsDialog(QDialog):
         work_dir = Path(tempfile.mkdtemp(prefix="cps-edit-"))
         try:
             unpack_archive(archive, work_dir)
-
             shortcuts_json_path = work_dir / "search_shortcuts.json"
             if not shortcuts_json_path.exists():
                 QMessageBox.information(
@@ -764,17 +591,74 @@ class SettingsDialog(QDialog):
                     "They will be created on the next sync.",
                 )
                 return
-
             editor = ShortcutsEditorDialog(self, shortcuts_json_path=shortcuts_json_path)
             if editor.exec() == QDialog.DialogCode.Accepted:
                 pack_to_archive(work_dir, archive)
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
+    def _open_extension_links(self) -> None:
+        import json
+        import shutil
+        import tempfile
+        import webbrowser
+
+        from PySide6.QtWidgets import QMessageBox
+
+        from src.sync.archive import unpack_archive
+
+        sync_folder = config_module.get_sync_folder()
+        if not sync_folder or not sync_folder.exists():
+            QMessageBox.warning(self, "No Sync Folder", "Configure a sync folder first.")
+            return
+
+        archive = sync_folder / "current.tar"
+        if not archive.exists():
+            QMessageBox.information(self, "No Backup", "No backup archive found. Run a sync first.")
+            return
+
+        work_dir = Path(tempfile.mkdtemp(prefix="cps-extlinks-"))
+        ext_map: dict[str, str] = {}
+        try:
+            unpack_archive(archive, work_dir)
+            manifest_path = work_dir / "webstore_extensions.json"
+            if not manifest_path.exists():
+                QMessageBox.information(self, "No Extensions", "No web store extensions in backup.")
+                return
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            ext_map = data if isinstance(data, dict) else {e: "" for e in data}
+        except Exception:
+            _LOG.exception("Failed to read extension manifest")
+            return
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+        if not ext_map:
+            QMessageBox.information(self, "No Extensions", "No web store extensions found.")
+            return
+
+        base_url = "https://chromewebstore.google.com/detail"
+        rows = "\n".join(
+            f'<tr><td>{name or ext_id}</td>'
+            f'<td><a href="{base_url}/{ext_id}" target="_blank">Install</a></td></tr>'
+            for ext_id, name in sorted(ext_map.items(), key=lambda x: (x[1] or x[0]).lower())
+        )
+        html = (
+            "<!DOCTYPE html><html><head><title>Extensions</title>"
+            "<style>body{font-family:sans-serif;padding:16px}"
+            "table{border-collapse:collapse}"
+            "td{padding:6px 12px;border-bottom:1px solid #ddd}"
+            "a{color:#1a0dab}</style></head><body>"
+            f"<h2>Web Store Extensions ({len(ext_map)})</h2>"
+            f"<table><tr><th>Name</th><th></th></tr>\n{rows}\n</table>"
+            "</body></html>"
+        )
+        html_path = Path(tempfile.gettempdir()) / "cps_extensions.html"
+        html_path.write_text(html, encoding="utf-8")
+        webbrowser.open(html_path.as_uri())
+
     def closeEvent(self, event) -> None:  # noqa: N802
-        if self._log_handler is not None:
-            logging.getLogger().removeHandler(self._log_handler)
-            self._log_handler = None
+        self._activity_log.cleanup()
         if self._browser_monitor is not None:
             try:
                 self._browser_monitor.state_changed.disconnect(self._on_browser_state_changed)
@@ -796,5 +680,4 @@ class SettingsDialog(QDialog):
             self._hide_profiles()
 
         if self._autostart_select is not None:
-            autostart = config_module.get_autostart()
-            self._autostart_select.setCurrentIndex(0 if autostart else 1)
+            self._autostart_select.setCurrentIndex(0 if config_module.get_autostart() else 1)

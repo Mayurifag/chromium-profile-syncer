@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from .base import BrowserBase
@@ -16,6 +15,10 @@ class Helium(BrowserBase):
         return True
 
     @property
+    def web_store_update_url(self) -> str:
+        return "https://services.helium.imput.net/service/update2/crx"
+
+    @property
     def unix_process_names(self) -> list[str]:
         return ["helium"]
 
@@ -24,7 +27,7 @@ class Helium(BrowserBase):
         return "\\imput\\helium\\application"
 
     def _windows_path(self) -> Path:
-        return Path(os.environ.get("LOCALAPPDATA", "")) / "imput" / "Helium" / "User Data"
+        return Path(self._localappdata()) / "imput" / "Helium" / "User Data"
 
     def _macos_path(self) -> Path:
         return Path.home() / "Library" / "Application Support" / "net.imput.helium"

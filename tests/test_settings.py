@@ -207,9 +207,8 @@ def test_rebuild_profiles_synced_profile_enabled(qapp, tmp_path):
     from src.settings import SettingsDialog
 
     sync_folder = tmp_path / "sync"
-    current = sync_folder / "current"
-    current.mkdir(parents=True)
-    (current / "Preferences").write_text("{}", encoding="utf-8")
+    sync_folder.mkdir()
+    (sync_folder / "current.tar").touch()
 
     # Save Default profile to config (simulating user enabling it)
     config_module.set_enabled_profiles({"Chrome": ["Default"]})
@@ -262,11 +261,16 @@ def test_initial_upload_only_one_profile_enabled(qapp, tmp_path):
         (p / "Preferences").write_text("{}", encoding="utf-8")
         (p / "Bookmarks").write_text('{"roots":{}}', encoding="utf-8")
 
-    # Simulate initial upload of ONLY Default profile to the canonical current/
-    engine = SyncEngine(sync_folder)
-    sync_profile_path = sync_folder / "current"
-    engine.sync_browser_profile(default, sync_profile_path, direction="push")
+    # Simulate initial upload of ONLY Default profile
+    import shutil
 
+    from src.sync.archive import pack_to_archive
+    engine = SyncEngine(sync_folder)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    engine.sync_browser_profile(default, work_dir, direction="push")
+    pack_to_archive(work_dir, sync_folder / "current.tar")
+    shutil.rmtree(work_dir)
 
     # Save Default profile to config (this is what initial upload dialog does)
     config_module.set_enabled_profiles({"Chrome": ["Default"]})
@@ -290,17 +294,16 @@ def test_initial_upload_only_one_profile_enabled(qapp, tmp_path):
 
 
 def test_sync_folder_has_profile(qapp, tmp_path):
-    """_sync_folder_has_profile detects canonical profile data in current/."""
+    """_sync_folder_has_profile detects current.tar."""
     from src.settings import _sync_folder_has_profile
 
     sync_folder = tmp_path / "sync"
     assert not _sync_folder_has_profile(sync_folder)
 
-    current = sync_folder / "current"
-    current.mkdir(parents=True)
+    sync_folder.mkdir()
     assert not _sync_folder_has_profile(sync_folder)
 
-    (current / "Preferences").write_text("{}", encoding="utf-8")
+    (sync_folder / "current.tar").touch()
     assert _sync_folder_has_profile(sync_folder)
 
 
@@ -321,10 +324,16 @@ def test_clean_then_upload_clears_old_profiles(qapp, tmp_path):
         p.mkdir(parents=True)
         (p / "Preferences").write_text("{}", encoding="utf-8")
 
-    # Sync Default initially to canonical current/
+    # Sync Default initially to current.tar
+    import shutil
+
+    from src.sync.archive import pack_to_archive
     engine = SyncEngine(sync_folder)
-    sync_path = sync_folder / "current"
-    engine.sync_browser_profile(default, sync_path, direction="push")
+    work_dir = tmp_path / "work1"
+    work_dir.mkdir()
+    engine.sync_browser_profile(default, work_dir, direction="push")
+    pack_to_archive(work_dir, sync_folder / "current.tar")
+    shutil.rmtree(work_dir)
 
     # Save to config
     config_module.set_enabled_profiles({"Chrome": ["Default", "Profile 1"]})
@@ -333,11 +342,7 @@ def test_clean_then_upload_clears_old_profiles(qapp, tmp_path):
     assert _sync_folder_has_profile(sync_folder)
 
     # Simulate Clean button: delete sync data and clear config
-    import shutil
-    for path in ["current"]:
-        target = sync_folder / path
-        if target.exists():
-            shutil.rmtree(target)
+    (sync_folder / "current.tar").unlink()
     config_module.set_enabled_profiles({})
     config_module.set_enabled_browsers({})
 
@@ -346,8 +351,11 @@ def test_clean_then_upload_clears_old_profiles(qapp, tmp_path):
     assert not _sync_folder_has_profile(sync_folder)
 
     # Now upload only Default profile (simulating initial upload after clean)
-    engine.sync_browser_profile(default, sync_path, direction="push")
-
+    work_dir2 = tmp_path / "work2"
+    work_dir2.mkdir()
+    engine.sync_browser_profile(default, work_dir2, direction="push")
+    pack_to_archive(work_dir2, sync_folder / "current.tar")
+    shutil.rmtree(work_dir2)
 
     # Save Default to config (simulating initial upload dialog)
     config_module.set_enabled_profiles({"Chrome": ["Default"]})

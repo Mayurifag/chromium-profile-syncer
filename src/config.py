@@ -50,12 +50,6 @@ def _flush() -> None:
     _LOG.debug("Config saved to %s", CONFIG_PATH)
 
 
-def _invalidate() -> None:
-    global _data, _loaded_from
-    _data = None
-    _loaded_from = None
-
-
 def load() -> dict:
     return dict(_get())
 
@@ -162,6 +156,10 @@ def is_profile_sync_enabled(browser: str, profile: str) -> bool:
 
 
 def set_profile_sync_enabled(browser: str, profile: str, enabled: bool) -> None:
+    if not isinstance(browser, str) or not browser:
+        raise TypeError(f"browser must be a non-empty str, got {browser!r}")
+    if not isinstance(profile, str) or not profile:
+        raise TypeError(f"profile must be a non-empty str, got {profile!r}")
     data = _get()
     disabled = data.setdefault("profile_sync_disabled", {})
     profiles: list = disabled.setdefault(browser, [])

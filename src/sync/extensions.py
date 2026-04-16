@@ -73,14 +73,34 @@ def _dir_version(version_dir: Path) -> tuple[int, ...]:
     return _parse_version(raw_name)
 
 
+def _resolve_msg(version_dir: Path, msg_key: str) -> str:
+    key = msg_key.removeprefix("__MSG_").removesuffix("__").lower()
+    locales_dir = version_dir / "_locales"
+    for locale_dir in locales_dir.iterdir() if locales_dir.exists() else []:
+        messages_file = locale_dir / "messages.json"
+        if messages_file.exists():
+            try:
+                messages = json.loads(messages_file.read_text(encoding="utf-8"))
+                for k, v in messages.items():
+                    if k.lower() == key:
+                        return v.get("message", "")
+            except (OSError, json.JSONDecodeError):
+                pass
+    return ""
+
+
 def _extension_name(version_dir: Path) -> str:
     manifest = version_dir / "manifest.json"
     if manifest.exists():
         try:
             data = json.loads(manifest.read_text(encoding="utf-8"))
             name = data.get("name", "")
-            if name and not name.startswith("__MSG_"):
-                return name
+            if name:
+                if not name.startswith("__MSG_"):
+                    return name
+                resolved = _resolve_msg(version_dir, name)
+                if resolved:
+                    return resolved
         except (OSError, json.JSONDecodeError):
             pass
     return version_dir.parent.name
@@ -103,7 +123,6 @@ def _sync_extension_id(
     check_dir = profile_best if profile_best else sync_best
     if check_dir and _is_webstore_extension(check_dir):
         webstore_ids.add(ext_id)
-        return 0, 1
 
     profile_ver = _dir_version(profile_best) if profile_best else (0,)
     sync_ver = _dir_version(sync_best) if sync_best else (0,)
@@ -116,7 +135,7 @@ def _sync_extension_id(
             dest = sync_id_dir / profile_best.name
             ext_name = _extension_name(profile_best)
             _LOG.info(
-                "Extension %s (%s): unpacked, profile %s > sync %s — syncing",
+                "Extension %s (%s): profile %s > sync %s — syncing",
                 ext_name, ext_id, profile_ver, sync_ver,
             )
             sync_id_dir.mkdir(parents=True, exist_ok=True)
@@ -128,7 +147,7 @@ def _sync_extension_id(
             dest = profile_id_dir / sync_best.name
             ext_name = _extension_name(sync_best)
             _LOG.info(
-                "Extension %s (%s): unpacked, sync %s > profile %s — syncing",
+                "Extension %s (%s): sync %s > profile %s — syncing",
                 ext_name, ext_id, sync_ver, profile_ver,
             )
             profile_id_dir.mkdir(parents=True, exist_ok=True)
@@ -189,6 +208,33 @@ def sync_extensions(
     return total_synced, total_skipped
 
 
+def update_webstore_manifest(profile_dir: Path, sync_dir: Path) -> None:
+    profile_ext_dir = profile_dir / "Extensions"
+    if not profile_ext_dir.exists():
+        return
+    manifest_path = sync_dir / "webstore_extensions.json"
+    existing: dict[str, str] = {}
+    if manifest_path.exists():
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            existing = data if isinstance(data, dict) else {e: "" for e in data}
+        except (json.JSONDecodeError, OSError):
+            pass
+    webstore_map: dict[str, str] = {k: v for k, v in existing.items() if k != v}
+    for id_dir in profile_ext_dir.iterdir():
+        if not id_dir.is_dir():
+            continue
+        best = _best_version_dir(id_dir)
+        if best and _is_webstore_extension(best):
+            name = _extension_name(best)
+            if name != id_dir.name:
+                webstore_map[id_dir.name] = name
+    if webstore_map != existing:
+        sync_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(webstore_map), encoding="utf-8")
+        _LOG.info("Updated webstore manifest: %d extensions", len(webstore_map))
+
+
 def install_external_extensions(
     sync_profile_path: Path,
     browser: object,
@@ -221,7 +267,7 @@ def install_external_extensions(
                 getattr(browser, "name", "unknown"),
             )
 
-    update_url = "https://clients2.google.com/service/update2/crx"
+    update_url = browser.web_store_update_url
     on_windows = platform.system() == "Windows"
     reg_key = browser.windows_extensions_registry_key() if on_windows else None
 
@@ -239,24 +285,18 @@ def install_external_extensions(
         ext_dir = browser.external_extensions_dir()
         if ext_dir is not None:
             _install_via_stubs(ext_ids, ext_dir, update_url)
+        else:
+            _LOG.info(
+                "%s: extension auto-install not supported — %d extension(s) need manual install:",
+                getattr(browser, "name", "unknown"),
+                len(ext_ids),
+            )
+            for ext_id in ext_ids:
+                _LOG.info("  https://chromewebstore.google.com/detail/%s", ext_id)
 
 
 def _install_via_registry(ext_ids: list[str], reg_subkey: str, update_url: str) -> None:
     import winreg
-
-    ext_id_set = set(ext_ids)
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_subkey) as base:
-            existing = _winreg_enum_subkeys(base)
-        for old_id in existing:
-            if old_id not in ext_id_set:
-                try:
-                    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, rf"{reg_subkey}\{old_id}")
-                    _LOG.info("Removed stale registry extension: %s", old_id)
-                except OSError:
-                    _LOG.warning("Failed to remove stale registry extension: %s", old_id)
-    except FileNotFoundError:
-        pass
 
     for ext_id in ext_ids:
         key_path = rf"{reg_subkey}\{ext_id}"
