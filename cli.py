@@ -90,9 +90,9 @@ def cmd_restore(args: argparse.Namespace) -> int:
         return 1
 
     sf = _require_sync_folder()
-    archive_path = sf / "current.tar"
+    archive_path = sf / _archive.ARCHIVE_NAME
     if not archive_path.exists():
-        print(json.dumps({"error": "No current.tar in sync folder — nothing to restore"}))
+        print(json.dumps({"error": f"No {_archive.ARCHIVE_NAME} in sync folder"}))
         return 1
 
     profiles = browser.discover_profiles()
@@ -113,13 +113,23 @@ def cmd_restore(args: argparse.Namespace) -> int:
         _archive.unpack_archive(archive_path, work_dir)
         engine = SyncEngine(sf)
         ungoogled_only_ext_ids = config.get_ungoogled_only_extensions()
+        ext_restrictions = config.get_extension_browser_restrictions()
+        aliases = browser.ext_id_aliases
         for profile_path in profiles:
             _progress(f"{browser.name}/{profile_path.name}")
-            engine.restore_profile_from_backup(
-                profile_path, work_dir, browser=browser, on_progress=_progress,
-            )
+            if aliases:
+                engine._translate_ext_aliases(work_dir, aliases, to_alias=True)
+            try:
+                engine.restore_profile_from_backup(
+                    profile_path, work_dir, browser=browser, on_progress=_progress,
+                )
+            finally:
+                if aliases:
+                    engine._translate_ext_aliases(work_dir, aliases, to_alias=False)
             install_external_extensions(
-                work_dir, browser, ungoogled_only_ext_ids=ungoogled_only_ext_ids,
+                work_dir, browser,
+                ungoogled_only_ext_ids=ungoogled_only_ext_ids,
+                browser_restrictions=ext_restrictions,
             )
     finally:
         shutil.rmtree(work_dir)

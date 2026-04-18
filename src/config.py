@@ -213,10 +213,7 @@ _DEFAULT_EXCLUDED_EXT_SETTINGS: list[str] = [
 
 
 def get_excluded_ext_settings_ids() -> list[str]:
-    cfg = _get()
-    if "excluded_ext_settings_ids" not in cfg:
-        return list(_DEFAULT_EXCLUDED_EXT_SETTINGS)
-    return cfg["excluded_ext_settings_ids"]
+    return _get().get("excluded_ext_settings_ids", list(_DEFAULT_EXCLUDED_EXT_SETTINGS))
 
 
 def set_excluded_ext_settings_ids(ext_ids: list[str]) -> None:

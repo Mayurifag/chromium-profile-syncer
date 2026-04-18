@@ -5,6 +5,8 @@ from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
+from src.sync.archive import ARCHIVE_NAME
+
 PySide6 = pytest.importorskip("PySide6")
 
 
@@ -225,7 +227,7 @@ def test_file_watcher_ignores_changes_when_paused(qapp, tmp_path):
     tray._watcher_paused = True
 
     # File changed event should be ignored (no debounce scheduled)
-    tray._on_file_changed(str(tmp_path / "current.tar"))
+    tray._on_file_changed(str(tmp_path / ARCHIVE_NAME))
     assert not tray._debounce_timer.isActive()
 
     # Directory changed event should be ignored
@@ -234,7 +236,7 @@ def test_file_watcher_ignores_changes_when_paused(qapp, tmp_path):
 
     # When not paused, events should trigger debounce
     tray._watcher_paused = False
-    tray._on_file_changed(str(tmp_path / "current.tar"))
+    tray._on_file_changed(str(tmp_path / ARCHIVE_NAME))
     assert tray._debounce_timer.isActive()
 
 
@@ -258,6 +260,7 @@ def test_debounce_resets_on_repeated_events(qapp, tmp_path):
 
     assert tray._debounce_timer.isActive()
 
+    tray._browser_monitor.any_running = MagicMock(return_value=False)
     with patch("src.config.get_enabled_profiles", return_value={"Browser": ["Profile"]}), \
          patch("src.config.is_profile_sync_enabled", return_value=True):
         QCoreApplication.processEvents()

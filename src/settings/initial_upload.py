@@ -8,7 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import QDialog, QLabel, QProgressBar, QVBoxLayout
 
-from src.sync.archive import pack_to_archive
+from src.sync.archive import ARCHIVE_NAME, pack_to_archive
 from src.sync_engine import SyncEngine
 
 
@@ -16,10 +16,13 @@ class _InitialUploadWorker(QThread):
     step = Signal(str)
     done = Signal()
 
-    def __init__(self, src: Path, folder: Path) -> None:
+    def __init__(
+        self, src: Path, folder: Path, ext_id_aliases: dict[str, str] | None = None
+    ) -> None:
         super().__init__()
         self._src = src
         self._folder = folder
+        self._ext_id_aliases = ext_id_aliases
 
     def run(self) -> None:
         engine = SyncEngine(self._folder)
@@ -27,10 +30,11 @@ class _InitialUploadWorker(QThread):
         try:
             engine.sync_browser_profile(
                 self._src, work_dir, direction="push",
-                on_progress=lambda desc: self.step.emit(desc),
+                on_progress=self.step.emit,
+                ext_id_aliases=self._ext_id_aliases,
             )
             self.step.emit("Packing archive...")
-            pack_to_archive(work_dir, self._folder / "current.tar")
+            pack_to_archive(work_dir, self._folder / ARCHIVE_NAME)
         finally:
             shutil.rmtree(work_dir)
         self.done.emit()
@@ -47,6 +51,7 @@ class InitialUploadDialog(QDialog):
         folder: Path,
         browser_name: str,
         profile_name: str,
+        ext_id_aliases: dict[str, str] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Uploading Profile")
@@ -70,7 +75,7 @@ class InitialUploadDialog(QDialog):
         self._count = 0
         self._start = 0.0
 
-        self._worker = _InitialUploadWorker(profile_path, folder)
+        self._worker = _InitialUploadWorker(profile_path, folder, ext_id_aliases)
         self._worker.step.connect(self._on_step)
         self._worker.done.connect(self._on_done)
 

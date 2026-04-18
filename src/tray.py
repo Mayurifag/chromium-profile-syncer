@@ -15,8 +15,10 @@ from src import autostart
 from src.browser_monitor import BrowserMonitor
 from src.browsers import ALL_BROWSERS
 from src.dracula import APP_ICON_SVG, ICON_COLORS
+from src.help_dialog import HelpDialog
 from src.rclone import find_rclone
 from src.settings import SettingsDialog
+from src.sync.archive import ARCHIVE_NAME as _ARCHIVE_NAME
 from src.sync_engine import SyncEngine
 from src.sync_worker import SyncWorker
 
@@ -68,6 +70,8 @@ class TrayApp(QSystemTrayIcon):
         self._menu = QMenu()
         self._action_settings = self._menu.addAction("Settings")
         self._action_settings.triggered.connect(self.open_settings)
+        self._action_help = self._menu.addAction("Usage notes")
+        self._action_help.triggered.connect(self._open_help)
         self._menu.addSeparator()
         self._action_quit = self._menu.addAction("Quit")
         self._action_quit.triggered.connect(QApplication.quit)
@@ -171,14 +175,18 @@ class TrayApp(QSystemTrayIcon):
         if self._last_tar_mtime is not None:
             sync_folder = self._config.get_sync_folder()
             if sync_folder is not None:
-                tar = sync_folder / "current.tar"
+                tar = sync_folder / _ARCHIVE_NAME
                 if tar.exists():
                     try:
                         if tar.stat().st_mtime == self._last_tar_mtime:
-                            logger.debug("Watcher fired but current.tar unchanged — skipping")
+                            logger.debug("Watcher fired but %s unchanged — skipping", _ARCHIVE_NAME)
                             return
                     except OSError:
                         pass
+
+        if self._browser_monitor.any_running():
+            logger.debug("Watcher fired but a browser is running — deferring to browser close")
+            return
 
         enabled_profiles = _config.get_enabled_profiles()
         if not any(
@@ -193,6 +201,13 @@ class TrayApp(QSystemTrayIcon):
         self._trigger_sync()
 
     def _resume_watcher(self) -> None:
+        sync_folder = self._config.get_sync_folder()
+        if sync_folder is not None:
+            tar = sync_folder / _ARCHIVE_NAME
+            try:
+                self._last_tar_mtime = tar.stat().st_mtime if tar.exists() else None
+            except OSError:
+                pass
         self._watcher_paused = False
         logger.debug("File watcher resumed")
 
@@ -217,6 +232,9 @@ class TrayApp(QSystemTrayIcon):
 
         dialog.exec()
 
+    def _open_help(self) -> None:
+        HelpDialog().exec()
+
     def _on_settings_closed(self) -> None:
         self._settings_dialog = None
 
@@ -231,7 +249,7 @@ class TrayApp(QSystemTrayIcon):
         self._engine = SyncEngine(sync_folder)
         logger.info("Settings saved — engine rebuilt with folder %s", sync_folder)
 
-        tar = sync_folder / "current.tar"
+        tar = sync_folder / _ARCHIVE_NAME
         try:
             self._last_tar_mtime = tar.stat().st_mtime if tar.exists() else None
         except OSError:
@@ -334,7 +352,7 @@ class TrayApp(QSystemTrayIcon):
 
         sync_folder = self._config.get_sync_folder()
         if sync_folder is not None:
-            tar = sync_folder / "current.tar"
+            tar = sync_folder / _ARCHIVE_NAME
             try:
                 self._last_tar_mtime = tar.stat().st_mtime if tar.exists() else None
             except OSError:

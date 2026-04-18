@@ -8,6 +8,7 @@ from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import QLabel
 
 from src.dracula import NOT_RUNNING_DOT, RUNNING_DOT, RUNNING_GLOW
+from src.sync.archive import ARCHIVE_NAME as _ARCHIVE_NAME
 
 _CLOSE_BROWSER_HINT = (
     "Close browser from the system tray to allow sync"
@@ -42,7 +43,7 @@ def _make_status_indicator(is_running: bool) -> QLabel:
 
 
 def _sync_folder_has_data(folder: Path) -> bool:
-    return (folder / "current.tar").is_file()
+    return (folder / _ARCHIVE_NAME).is_file()
 
 
 _sync_folder_has_profile = _sync_folder_has_data

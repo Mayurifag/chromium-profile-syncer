@@ -11,6 +11,7 @@ import time
 from src import config
 from src.browsers.helium import Helium
 from src.browsers.thorium import Thorium
+from src.sync.archive import ARCHIVE_NAME
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -80,7 +81,7 @@ def main() -> None:
 
     # ── 4. Restore current.tar → Thorium ──────────────────────────────────
     _sep("4/5  Restore backup → Thorium")
-    current_archive = sync_folder / "current.tar"
+    current_archive = sync_folder / ARCHIVE_NAME
     _run(["--restore-from", str(current_archive), "--browser", "Thorium"])
 
     # ── 5. Launch Thorium for inspection ──────────────────────────────────

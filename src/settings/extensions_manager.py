@@ -97,10 +97,10 @@ class ExtensionsManagerDialog(QDialog):
     def _setup_work_dir(self) -> None:
         import tempfile
 
-        from src.sync.archive import unpack_archive
+        from src.sync.archive import ARCHIVE_NAME, unpack_archive
 
         self._work_dir = Path(tempfile.mkdtemp(prefix="cps-ext-"))
-        unpack_archive(self._sync_folder / "current.tar", self._work_dir)
+        unpack_archive(self._sync_folder / ARCHIVE_NAME, self._work_dir)
 
     def _read_extensions(self) -> dict[str, str]:
         assert self._work_dir
@@ -232,12 +232,13 @@ class ExtensionsManagerDialog(QDialog):
                 d = self._work_dir / subdir / ext_id
                 if d.exists():
                     shutil.rmtree(d, ignore_errors=True)
-            idb = self._work_dir / "IndexedDB"
-            if idb.exists():
-                for d in list(idb.iterdir()):
-                    if d.name.startswith(f"chrome-extension_{ext_id}_"):
-                        shutil.rmtree(d, ignore_errors=True)
             self._restrictions.pop(ext_id, None)
+        idb = self._work_dir / "IndexedDB"
+        if idb.exists():
+            prefixes = tuple(f"chrome-extension_{e}_" for e in self._deleted)
+            for d in list(idb.iterdir()):
+                if d.name.startswith(prefixes):
+                    shutil.rmtree(d, ignore_errors=True)
 
     def _save(self) -> None:
         from PySide6.QtWidgets import QApplication
@@ -246,8 +247,8 @@ class ExtensionsManagerDialog(QDialog):
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             try:
                 self._apply_deletions()
-                from src.sync.archive import pack_to_archive
-                pack_to_archive(self._work_dir, self._sync_folder / "current.tar")
+                from src.sync.archive import ARCHIVE_NAME, pack_to_archive
+                pack_to_archive(self._work_dir, self._sync_folder / ARCHIVE_NAME)
             finally:
                 QApplication.restoreOverrideCursor()
 

@@ -14,7 +14,7 @@ import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from src.rclone import find_rclone
-from src.sync.archive import pack_to_archive, unpack_archive
+from src.sync.archive import ARCHIVE_NAME, pack_to_archive, unpack_archive
 from src.sync.extensions import _parse_version, install_external_extensions, sync_extensions
 from src.sync.leveldb import copy_atomic, sync_dir
 from src.sync.shortcuts import (
@@ -37,7 +37,7 @@ def _make_archive(sync_folder: Path, files: dict[str, str]) -> Path:
         p = tmp / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
-    archive = sync_folder / "current.tar"
+    archive = sync_folder / ARCHIVE_NAME
     pack_to_archive(tmp, archive)
     shutil.rmtree(tmp)
     return archive
@@ -81,6 +81,7 @@ def _make_browser(
     mock.windows_extensions_registry_key.return_value = None
     mock.windows_force_list_registry_key.return_value = None
     mock.web_store_update_url = "https://clients2.google.com/service/update2/crx"
+    mock.ext_id_aliases = {}
     return mock
 
 
@@ -292,7 +293,7 @@ def test_sync_all_uses_direction_from_config(tmp_path: Path) -> None:
     tmp_dir.mkdir()
     _write_file(tmp_dir / "Bookmarks", "sync-data", mtime=1000.0)
     _write_file(tmp_dir / "Preferences", "{}", mtime=1000.0)
-    pack_to_archive(tmp_dir, sync_folder / "current.tar")
+    pack_to_archive(tmp_dir, sync_folder / ARCHIVE_NAME)
     shutil.rmtree(tmp_dir)
 
     browser = _make_browser(
@@ -307,7 +308,7 @@ def test_sync_all_uses_direction_from_config(tmp_path: Path) -> None:
         engine.sync_all()
 
     # Push: profile (newer) → archive updated
-    assert _read_from_archive(sync_folder / "current.tar", "Bookmarks") == "profile-data"
+    assert _read_from_archive(sync_folder / ARCHIVE_NAME, "Bookmarks") == "profile-data"
     # Profile itself must not be overwritten (push skips reverse copy)
     assert (profile / "Bookmarks").read_text() == "profile-data"
 
@@ -614,8 +615,8 @@ def test_sync_all_processes_installed_idle_browser(tmp_path: Path) -> None:
          patch("src.config.get_profile_directions", return_value={}):
         engine.sync_all()
 
-    assert (sync_folder / "current.tar").is_file()
-    assert _read_from_archive(sync_folder / "current.tar", "Bookmarks") == '{"roots":{}}'
+    assert (sync_folder / ARCHIVE_NAME).is_file()
+    assert _read_from_archive(sync_folder / ARCHIVE_NAME, "Bookmarks") == '{"roots":{}}'
 
 
 def test_sync_all_no_profiles_found(tmp_path: Path) -> None:
@@ -657,7 +658,7 @@ def test_sync_all_filters_profiles(tmp_path: Path) -> None:
     with patch("src.config.get_enabled_profiles", return_value={"TB": ["Default"]}):
         engine.sync_all()
 
-    assert _file_in_archive(sync_folder / "current.tar", "preferences.json")
+    assert _file_in_archive(sync_folder / ARCHIVE_NAME, "preferences.json")
 
 
 # ---------------------------------------------------------------------------
@@ -787,7 +788,7 @@ def test_full_round_trip(tmp_path: Path) -> None:
         engine.sync_all()
 
     # Verify archive contains Bookmarks
-    archive = sync_folder / "current.tar"
+    archive = sync_folder / ARCHIVE_NAME
     assert archive.is_file()
     assert _read_from_archive(archive, "Bookmarks") == "v1"
 
@@ -831,7 +832,7 @@ def test_sync_all_with_empty_config_skips_browser(tmp_path: Path) -> None:
         engine.sync_all()
 
     # No profiles should be synced when browser has no config entry
-    assert not (sync_folder / "current.tar").exists()
+    assert not (sync_folder / ARCHIVE_NAME).exists()
 
 
 def test_restore_only_deletes_items_present_in_backup(tmp_path: Path) -> None:

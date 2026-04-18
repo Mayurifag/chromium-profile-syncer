@@ -33,6 +33,7 @@ from src.settings._helpers import (
 )
 from src.settings.initial_upload import InitialUploadDialog
 from src.shortcuts_editor import ShortcutsEditorDialog
+from src.sync.archive import ARCHIVE_NAME
 
 _LOG = logging.getLogger(__name__)
 
@@ -269,12 +270,14 @@ class SettingsDialog(QDialog):
             self._rebuild_profiles(folder)
             return
 
+        browser_obj = next((b for b in ALL_BROWSERS if b.name == browser_name), None)
         dlg = InitialUploadDialog(
             self,
             profile_path=profile_path,
             folder=folder,
             browser_name=browser_name,
             profile_name=profile_name,
+            ext_id_aliases=browser_obj.ext_id_aliases if browser_obj else None,
         )
         dlg.upload_done.connect(
             lambda bn, pn, cnt, el: self._on_upload_done(folder, bn, pn, cnt, el)
@@ -559,7 +562,7 @@ class SettingsDialog(QDialog):
         config_module.remove_browser_profile(browser_name)
 
         if folder:
-            archive = folder / "current.tar"
+            archive = folder / ARCHIVE_NAME
             if archive.is_file():
                 archive.unlink()
                 _LOG.info("Deleted archive: %s", archive)
@@ -622,7 +625,7 @@ class SettingsDialog(QDialog):
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-        target = folder / "current.tar"
+        target = folder / ARCHIVE_NAME
         try:
             if target.is_file():
                 target.unlink()
@@ -637,6 +640,22 @@ class SettingsDialog(QDialog):
         if self._folder_edit:
             self._folder_edit.textChanged.emit(folder_text)
 
+    def _get_archive_or_warn(self) -> Path | None:
+        from PySide6.QtWidgets import QMessageBox
+
+        sync_folder = config_module.get_sync_folder()
+        if not sync_folder or not sync_folder.exists():
+            QMessageBox.warning(self, "No Sync Folder", "Please configure a sync folder first.")
+            return None
+        archive = sync_folder / ARCHIVE_NAME
+        if not archive.exists():
+            QMessageBox.information(
+                self, "No Backup",
+                "No backup archive found.\n\nRun a sync first to create the backup.",
+            )
+            return None
+        return archive
+
     def _open_shortcuts_editor(self) -> None:
         import shutil
         import tempfile
@@ -645,17 +664,8 @@ class SettingsDialog(QDialog):
 
         from src.sync.archive import pack_to_archive, unpack_archive
 
-        sync_folder = config_module.get_sync_folder()
-        if not sync_folder or not sync_folder.exists():
-            QMessageBox.warning(self, "No Sync Folder", "Please configure a sync folder first.")
-            return
-
-        archive = sync_folder / "current.tar"
-        if not archive.exists():
-            QMessageBox.information(
-                self, "No Backup",
-                "No backup archive found.\n\nRun a sync first to create the backup.",
-            )
+        archive = self._get_archive_or_warn()
+        if archive is None:
             return
 
         work_dir = Path(tempfile.mkdtemp(prefix="cps-edit-"))
@@ -680,19 +690,11 @@ class SettingsDialog(QDialog):
 
         from src.settings.extensions_manager import ExtensionsManagerDialog
 
-        sync_folder = config_module.get_sync_folder()
-        if not sync_folder or not sync_folder.exists():
-            QMessageBox.warning(self, "No Sync Folder", "Please configure a sync folder first.")
+        archive = self._get_archive_or_warn()
+        if archive is None:
             return
 
-        archive = sync_folder / "current.tar"
-        if not archive.exists():
-            QMessageBox.information(
-                self, "No Backup",
-                "No backup archive found.\n\nRun a sync first to create the backup.",
-            )
-            return
-
+        sync_folder = archive.parent
         browser_names = [b.name for b in self._browsers]
         try:
             dlg = ExtensionsManagerDialog(

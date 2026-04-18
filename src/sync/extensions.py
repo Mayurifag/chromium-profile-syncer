@@ -45,20 +45,23 @@ def _parse_version(v: str) -> tuple[int, ...]:
 
 
 def _is_webstore_extension(version_dir: Path) -> bool:
-    return (version_dir / "_metadata" / "verified_contents.json").exists()
+    if (version_dir / "_metadata" / "verified_contents.json").exists():
+        return True
+    manifest = version_dir / "manifest.json"
+    if manifest.exists():
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            return bool(data.get("update_url"))
+        except (OSError, json.JSONDecodeError):
+            pass
+    return False
 
 
 def _best_version_dir(id_dir: Path) -> Path | None:
     if not id_dir.exists():
         return None
-    candidates: list[tuple[tuple[int, ...], Path]] = []
-    for d in id_dir.iterdir():
-        if d.is_dir():
-            candidates.append((_dir_version(d), d))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    return candidates[0][1]
+    dirs = [d for d in id_dir.iterdir() if d.is_dir()]
+    return max(dirs, key=_dir_version, default=None)
 
 
 def _dir_version(version_dir: Path) -> tuple[int, ...]:
@@ -140,7 +143,7 @@ def _sync_extension_id(
     if profile_best is None and sync_best is None:
         return 0, 0
 
-    check_dir = profile_best if profile_best else sync_best
+    check_dir = profile_best or sync_best
     if check_dir and _is_webstore_extension(check_dir):
         webstore_ids.add(ext_id)
 
@@ -228,7 +231,9 @@ def sync_extensions(
     return total_synced, total_skipped
 
 
-def update_webstore_manifest(profile_dir: Path, sync_dir: Path) -> None:
+def update_webstore_manifest(
+    profile_dir: Path, sync_dir: Path, aliases: dict[str, str] | None = None
+) -> None:
     profile_ext_dir = profile_dir / "Extensions"
     if not profile_ext_dir.exists():
         return
@@ -240,15 +245,22 @@ def update_webstore_manifest(profile_dir: Path, sync_dir: Path) -> None:
             existing = data if isinstance(data, dict) else {e: "" for e in data}
         except (json.JSONDecodeError, OSError):
             pass
-    webstore_map: dict[str, str] = {k: v for k, v in existing.items() if k != v}
+    webstore_map: dict[str, str] = dict(existing)
     for id_dir in profile_ext_dir.iterdir():
         if not id_dir.is_dir():
             continue
+        ext_id = id_dir.name
+        canonical = (aliases or {}).get(ext_id, ext_id)
         best = _best_version_dir(id_dir)
         if best and _is_webstore_extension(best):
             name = _extension_name(best)
-            if name != id_dir.name:
-                webstore_map[id_dir.name] = name
+            webstore_map[canonical] = name if name != ext_id else existing.get(canonical, ext_id)
+        elif canonical != ext_id:
+            name = _extension_name(best) if best else ""
+            webstore_map[canonical] = name
+    for alias_id, canonical_id in (aliases or {}).items():
+        if canonical_id not in webstore_map:
+            webstore_map[canonical_id] = existing.get(canonical_id, "")
     if webstore_map != existing:
         sync_dir.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(json.dumps(webstore_map), encoding="utf-8")
@@ -350,7 +362,25 @@ def install_external_extensions(
 def _install_via_registry(ext_ids: list[str], reg_subkey: str, update_url: str) -> None:
     import winreg
 
+    ext_id_set = set(ext_ids)
+    existing: set[str] = set()
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_subkey) as base:
+            existing = set(_winreg_enum_subkeys(base))
+    except FileNotFoundError:
+        pass
+
+    for stale_id in existing:
+        if stale_id not in ext_id_set:
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, rf"{reg_subkey}\{stale_id}")
+                _LOG.info("Removed stale registry extension: %s", stale_id)
+            except OSError:
+                _LOG.warning("Failed to remove stale registry extension: %s", stale_id)
+
     for ext_id in ext_ids:
+        if ext_id in existing:
+            continue
         key_path = rf"{reg_subkey}\{ext_id}"
         try:
             with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
@@ -363,15 +393,40 @@ def _install_via_registry(ext_ids: list[str], reg_subkey: str, update_url: str) 
 def _install_via_force_list(ext_ids: list[str], force_key: str, update_url: str) -> None:
     import winreg
 
+    target_set = set(ext_ids)
+    existing_map: dict[str, str] = {}  # ext_id -> value_name
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, force_key) as key:
+            for name in _winreg_enum_values(key):
+                try:
+                    val, _ = winreg.QueryValueEx(key, name)
+                    ext_id = val.split(";")[0]
+                    existing_map[ext_id] = name
+                except OSError:
+                    pass
+    except FileNotFoundError:
+        pass
+
     try:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, force_key) as key:
-            for name in _winreg_enum_values(key):
-                winreg.DeleteValue(key, name)
-            for i, ext_id in enumerate(ext_ids, start=1):
-                winreg.SetValueEx(key, str(i), 0, winreg.REG_SZ, f"{ext_id};{update_url}")
-        _LOG.info("Wrote ExtensionInstallForcelist with %d entries", len(ext_ids))
+            for ext_id, val_name in existing_map.items():
+                if ext_id not in target_set:
+                    winreg.DeleteValue(key, val_name)
+                    _LOG.info("Removed stale force-list entry: %s", ext_id)
+
+            used_names = {v for k, v in existing_map.items() if k in target_set}
+            next_i = 1
+            for ext_id in ext_ids:
+                if ext_id in existing_map:
+                    continue
+                while str(next_i) in used_names:
+                    next_i += 1
+                winreg.SetValueEx(key, str(next_i), 0, winreg.REG_SZ, f"{ext_id};{update_url}")
+                used_names.add(str(next_i))
+                _LOG.info("Added force-list entry: %s", ext_id)
+                next_i += 1
     except OSError:
-        _LOG.warning("Failed to write ExtensionInstallForcelist")
+        _LOG.warning("Failed to update ExtensionInstallForcelist")
 
 
 def _install_via_stubs(ext_ids: list[str], ext_dir: Path, update_url: str) -> None:

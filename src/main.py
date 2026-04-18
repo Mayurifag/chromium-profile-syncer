@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 
 from src import autostart, config, single_instance
 from src.dracula import DRACULA_STYLESHEET
+from src.sync.archive import ARCHIVE_NAME as _ARCHIVE_NAME
 from src.sync_engine import SyncEngine
 from src.tray import TrayApp, make_app_icon
 
@@ -73,7 +74,7 @@ def main() -> None:
         config.remove_browser_profile(browser.name)
         sync_folder = config.get_sync_folder()
         if sync_folder:
-            archive = sync_folder / "current.tar"
+            archive = sync_folder / _ARCHIVE_NAME
             if archive.is_file():
                 archive.unlink()
                 print(f"Deleted {archive}")

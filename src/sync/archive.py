@@ -9,6 +9,8 @@ from pathlib import Path
 
 _LOG = logging.getLogger(__name__)
 
+ARCHIVE_NAME = "current.tar.gz"
+
 
 def validate_archive_content(work_dir: Path) -> bool:
     def _dir_nonempty(p: Path) -> bool:
@@ -27,8 +29,8 @@ def validate_archive_content(work_dir: Path) -> bool:
         "custom_dictionary": (work_dir / "Custom Dictionary.txt").is_file(),
         "preferences": (work_dir / "preferences.json").is_file(),
         "search_shortcuts": (work_dir / "search_shortcuts.json").is_file(),
-        "favicons": (work_dir / "Favicons").is_file(),
         "omnibox_shortcuts": (work_dir / "Shortcuts").is_file(),
+        "typed_urls": (work_dir / "typed_urls.json").is_file(),
     }
 
     for item, present in checks.items():
@@ -58,15 +60,22 @@ def validate_archive_content(work_dir: Path) -> bool:
     return True
 
 
+def _tar_filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
+    name = info.name.split("/")[-1]
+    if name in ("LOG", "LOG.old", "LOCK"):
+        return None
+    return info
+
+
 def pack_to_archive(src_dir: Path, dst_archive: Path) -> None:
     with tempfile.NamedTemporaryFile(suffix=".tar.tmp", delete=False) as ntf:
         tmp = Path(ntf.name)
     try:
-        with tarfile.open(str(tmp), "w:") as tf:
-            tf.add(str(src_dir), arcname=".")
+        with tarfile.open(tmp, "w:gz", compresslevel=6) as tf:
+            tf.add(src_dir, arcname=".", filter=_tar_filter)
         for attempt in range(6):
             try:
-                shutil.copy2(str(tmp), dst_archive)
+                shutil.copy2(tmp, dst_archive)
                 break
             except PermissionError:
                 if attempt == 5:
@@ -78,5 +87,5 @@ def pack_to_archive(src_dir: Path, dst_archive: Path) -> None:
 
 def unpack_archive(src_archive: Path, dst_dir: Path) -> None:
     dst_dir.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(str(src_archive)) as tf:
-        tf.extractall(str(dst_dir), filter="data")
+    with tarfile.open(src_archive) as tf:
+        tf.extractall(dst_dir, filter="data")
