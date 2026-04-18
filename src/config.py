@@ -207,7 +207,6 @@ def set_ungoogled_only_extensions(ext_ids: list[str]) -> None:
 
 
 _DEFAULT_EXCLUDED_EXT_SETTINGS: list[str] = [
-    "cjpalhdlnbpafiamejdnhcphjbkeiagm",  # uBlock Origin
     "eimadpbcbfnmbkopoojfekhnkhdbieeh",  # Dark Reader (Newsmaker cache; theme in Sync)
     "jnpglhiolmmfchhpoipnknmffmpmogmc",  # Twitter location cache helper
 ]

@@ -15,6 +15,10 @@ class Helium(BrowserBase):
         return True
 
     @property
+    def ext_id_aliases(self) -> dict[str, str]:
+        return {"blockjmkbacgjkknlgpkjjiijinjdanf": "cjpalhdlnbpafiamejdnhcphjbkeiagm"}
+
+    @property
     def web_store_update_url(self) -> str:
         return "https://services.helium.imput.net/service/update2/crx"
 

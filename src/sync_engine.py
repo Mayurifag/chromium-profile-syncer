@@ -63,6 +63,15 @@ class SyncEngine:
         shutil.copy2(src, dst)
         self._synced_count += 1
 
+    def _sync_leveldb(
+        self, profile_dir: Path, sync_path: Path, subpath: str, direction: str, **kwargs
+    ) -> None:
+        s, sk = _leveldb.sync_dir(
+            profile_dir, sync_path, subpath, direction, self._report, **kwargs
+        )
+        self._synced_count += s
+        self._skipped_count += sk
+
     def _sync_file(self, src: Path, dst: Path, direction: str = "both") -> None:
         src_mtime = src.stat().st_mtime if src.exists() else 0.0
         dst_mtime = dst.stat().st_mtime if dst.exists() else 0.0
@@ -101,37 +110,23 @@ class SyncEngine:
             if direction in ("push", "both"):
                 _extensions.update_webstore_manifest(profile_path, sync_profile_path)
 
-            s, sk = _leveldb.sync_dir(
+            self._sync_leveldb(
                 profile_path, sync_profile_path, "Local Extension Settings", direction,
-                self._report,
                 name_filter=lambda n, ex=excluded_ext_ids: n not in ex,
             )
-            self._synced_count += s
-            self._skipped_count += sk
-
-            s, sk = _leveldb.sync_dir(
-                profile_path, sync_profile_path, "Sync Extension Settings", direction,
-                self._report,
+            self._sync_leveldb(
+                profile_path, sync_profile_path, "Sync Extension Settings", direction
             )
-            self._synced_count += s
-            self._skipped_count += sk
-
-            s, sk = _leveldb.sync_dir(
-                profile_path, sync_profile_path, "IndexedDB", direction, self._report,
+            self._sync_leveldb(
+                profile_path, sync_profile_path, "IndexedDB", direction,
                 name_filter=lambda n, ex=excluded_ext_ids: (
                     n.startswith("chrome-extension_")
                     and not any(n.startswith(f"chrome-extension_{e}_") for e in ex)
                 ),
             )
-            self._synced_count += s
-            self._skipped_count += sk
 
         if dt.get("local_storage", True):
-            s, sk = _leveldb.sync_dir(
-                profile_path, sync_profile_path, "Local Storage/leveldb", direction, self._report,
-            )
-            self._synced_count += s
-            self._skipped_count += sk
+            self._sync_leveldb(profile_path, sync_profile_path, "Local Storage/leveldb", direction)
 
         s, sk = _prefs.sync_preferences_json(
             profile_path, sync_profile_path, direction, self._report
@@ -172,7 +167,7 @@ class SyncEngine:
         sync_profile_path: Path,
         data_types: dict[str, bool] | None = None,
         *,
-        browser: object | None = None,
+        browser: BrowserBase | None = None,
         on_progress: Callable[[str], None] | None = None,
     ) -> None:
         self._progress_cb = on_progress
@@ -204,7 +199,7 @@ class SyncEngine:
                 dst.unlink()
                 self._synced_count += 1
 
-        is_ungoogled = getattr(browser, "ungoogled", True)
+        is_ungoogled = browser.ungoogled if browser is not None else True
         excluded_ext_ids: list[str] = (
             [] if is_ungoogled else _config.get_ungoogled_only_extensions()
         )
@@ -244,6 +239,59 @@ class SyncEngine:
 
         _LOG.info("Profile restore complete: %s", profile_path.name)
 
+    def restore_from_archive(
+        self,
+        tar_path: Path,
+        browsers: list[BrowserBase],
+        on_progress: Callable[[str], None] | None = None,
+    ) -> None:
+        work_dir = Path(tempfile.mkdtemp(prefix="cps-restore-"))
+        try:
+            _archive.unpack_archive(tar_path, work_dir)
+            ungoogled_only = _config.get_ungoogled_only_extensions()
+            ext_restrictions = _config.get_extension_browser_restrictions()
+            for b in browsers:
+                if not b.is_installed():
+                    _LOG.info("%s: not installed — skipping", b.name)
+                    continue
+                profiles = b.discover_profiles()
+                if not profiles:
+                    _LOG.info("%s: no profiles found — skipping", b.name)
+                    continue
+                for profile_path in profiles:
+                    self.restore_profile_from_backup(
+                        profile_path, work_dir, browser=b, on_progress=on_progress,
+                    )
+                    _extensions.install_external_extensions(
+                        work_dir, b,
+                        ungoogled_only_ext_ids=ungoogled_only,
+                        browser_restrictions=ext_restrictions,
+                    )
+        finally:
+            shutil.rmtree(work_dir)
+
+    def _translate_ext_aliases(
+        self, work_dir: Path, aliases: dict[str, str], *, to_alias: bool
+    ) -> None:
+        for subdir in ("Local Extension Settings", "Sync Extension Settings"):
+            base = work_dir / subdir
+            if not base.exists():
+                continue
+            for alias_id, canonical_id in aliases.items():
+                src_name = canonical_id if to_alias else alias_id
+                dst_name = alias_id if to_alias else canonical_id
+                src, dst = base / src_name, base / dst_name
+                if not src.exists():
+                    continue
+                if dst.exists():
+                    if _leveldb.dir_mtime(src) > _leveldb.dir_mtime(dst):
+                        shutil.rmtree(dst)
+                        src.rename(dst)
+                    else:
+                        shutil.rmtree(src)
+                else:
+                    src.rename(dst)
+
     def _prune_excluded_from_work(self, work_dir: Path, excluded_ext_ids: list[str]) -> None:
         for ext_id in excluded_ext_ids:
             stale = work_dir / "Local Extension Settings" / ext_id
@@ -269,29 +317,36 @@ class SyncEngine:
         ungoogled_only_ext_ids: list[str],
         ext_browser_restrictions: dict[str, list[str]],
     ) -> None:
-        if needs_restore:
-            self.restore_profile_from_backup(
-                profile_path, work_dir, data_types,
-                browser=browser, on_progress=self._progress_cb,
-            )
-            _extensions.install_external_extensions(
-                work_dir, browser,
-                ungoogled_only_ext_ids=ungoogled_only_ext_ids,
-                browser_restrictions=ext_browser_restrictions,
-            )
-            if force_direction != "pull":
-                _config.clear_restore_flag(browser.name, profile_path.name)
-        else:
-            self.sync_browser_profile(
-                profile_path, work_dir, data_types,
-                direction=direction, on_progress=self._progress_cb,
-            )
-            if direction in ("pull", "both"):
+        aliases = browser.ext_id_aliases
+        if aliases:
+            self._translate_ext_aliases(work_dir, aliases, to_alias=True)
+        try:
+            if needs_restore:
+                self.restore_profile_from_backup(
+                    profile_path, work_dir, data_types,
+                    browser=browser, on_progress=self._progress_cb,
+                )
                 _extensions.install_external_extensions(
                     work_dir, browser,
                     ungoogled_only_ext_ids=ungoogled_only_ext_ids,
                     browser_restrictions=ext_browser_restrictions,
                 )
+                if force_direction != "pull":
+                    _config.clear_restore_flag(browser.name, profile_path.name)
+            else:
+                self.sync_browser_profile(
+                    profile_path, work_dir, data_types,
+                    direction=direction, on_progress=self._progress_cb,
+                )
+                if direction in ("pull", "both"):
+                    _extensions.install_external_extensions(
+                        work_dir, browser,
+                        ungoogled_only_ext_ids=ungoogled_only_ext_ids,
+                        browser_restrictions=ext_browser_restrictions,
+                    )
+        finally:
+            if aliases:
+                self._translate_ext_aliases(work_dir, aliases, to_alias=False)
 
     def sync_all(
         self,

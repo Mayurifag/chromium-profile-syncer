@@ -70,9 +70,7 @@ def _set_nested(d: dict, keys: list[str], value: object) -> None:
 
 def merge_prefs(target: dict, source: dict) -> None:
     for key, value in source.items():
-        if key not in target:
-            continue
-        if isinstance(value, dict) and isinstance(target[key], dict):
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
             merge_prefs(target[key], value)
         else:
             target[key] = value

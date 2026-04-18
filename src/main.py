@@ -27,6 +27,11 @@ def main() -> None:
         help="Delete browser profile from disk, remove from config, delete archive, then exit",
     )
     parser.add_argument(
+        "--sync",
+        action="store_true",
+        help="Run sync (respects config; combine with --browser/--profile/--direction), then exit",
+    )
+    parser.add_argument(
         "--restore-from",
         metavar="TAR",
         help="Restore profile data from a tar archive, then exit",
@@ -34,18 +39,29 @@ def main() -> None:
     parser.add_argument(
         "--browser",
         metavar="BROWSER",
-        help="Target browser for --restore-from",
+        help="Target browser (for --sync or --restore-from)",
+    )
+    parser.add_argument(
+        "--profile",
+        metavar="PROFILE",
+        help="Target profile name (for --sync)",
+    )
+    parser.add_argument(
+        "--direction",
+        metavar="DIRECTION",
+        choices=["push", "pull", "both"],
+        default=None,
+        help="Sync direction for --sync: push, pull, or both",
     )
     args = parser.parse_args()
 
     if args.remove_profile:
         import shutil
 
-        from src.browsers import ALL_BROWSERS
-        browser_name = args.remove_profile
-        browser = next((b for b in ALL_BROWSERS if b.name.lower() == browser_name.lower()), None)
+        from src.browsers import get_browser
+        browser = get_browser(args.remove_profile)
         if browser is None:
-            print(f"Unknown browser: {browser_name}")
+            print(f"Unknown browser: {args.remove_profile}")
             sys.exit(1)
         enabled = config.get_enabled_profiles().get(browser.name, [])
         root = browser.profile_root()
@@ -64,12 +80,26 @@ def main() -> None:
         print(f"Profile '{browser.name}' removed. Start the app to upload fresh.")
         sys.exit(0)
 
-    if args.restore_from:
-        import shutil
+    if args.sync:
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+        sync_folder = config.get_sync_folder()
+        if sync_folder is None:
+            print("ERROR: sync_folder not configured — run the app first")
+            sys.exit(1)
+        engine = SyncEngine(sync_folder)
+        result = engine.sync_all(
+            only_browser=args.browser,
+            only_profile=args.profile,
+            force_direction=args.direction,
+            on_progress=lambda m: print(f"  {m}"),
+        )
+        skipped = result.get("skipped_running", [])
+        if skipped:
+            print(f"Skipped (running): {', '.join(skipped)}")
+        sys.exit(0)
 
-        from src.browsers import ALL_BROWSERS
-        from src.sync import archive as _archive
-        from src.sync import extensions as _extensions
+    if args.restore_from:
+        from src.browsers import ALL_BROWSERS, get_browser
 
         logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -78,47 +108,20 @@ def main() -> None:
             print(f"Archive not found: {tar_path}")
             sys.exit(1)
 
-        browser_name = args.browser
-        if browser_name:
-            target_browsers = [b for b in ALL_BROWSERS if b.name.lower() == browser_name.lower()]
-            if not target_browsers:
-                print(f"Unknown browser: {browser_name}")
+        if args.browser:
+            browser = get_browser(args.browser)
+            if browser is None:
+                print(f"Unknown browser: {args.browser}")
                 sys.exit(1)
+            target_browsers = [browser]
         else:
             target_browsers = list(ALL_BROWSERS)
 
-        work_dir = pathlib.Path(tempfile.mkdtemp(prefix="cps-restore-"))
-        try:
-            print(f"Unpacking {tar_path}...")
-            _archive.unpack_archive(tar_path, work_dir)
-
-            engine = SyncEngine(tar_path.parent)
-            ungoogled_only = config.get_ungoogled_only_extensions()
-            ext_restrictions = config.get_extension_browser_restrictions()
-
-            for b in target_browsers:
-                if not b.is_installed():
-                    print(f"{b.name}: not installed — skipping")
-                    continue
-                profiles = b.discover_profiles()
-                if not profiles:
-                    print(f"{b.name}: no profiles found — skipping")
-                    continue
-                for profile_path in profiles:
-                    print(f"Restoring {b.name}/{profile_path.name}...")
-                    engine.restore_profile_from_backup(
-                        profile_path, work_dir,
-                        browser=b,
-                        on_progress=lambda msg: print(f"  {msg}"),
-                    )
-                    _extensions.install_external_extensions(
-                        work_dir, b,
-                        ungoogled_only_ext_ids=ungoogled_only,
-                        browser_restrictions=ext_restrictions,
-                    )
-            print("Restore complete.")
-        finally:
-            shutil.rmtree(work_dir)
+        engine = SyncEngine(tar_path.parent)
+        engine.restore_from_archive(
+            tar_path, target_browsers, on_progress=lambda m: print(f"  {m}"),
+        )
+        print("Restore complete.")
         sys.exit(0)
 
     logging.basicConfig(

@@ -6,19 +6,20 @@ import logging
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
-from pathlib import Path
 
 from src import config
 from src.browsers.helium import Helium
 from src.browsers.thorium import Thorium
-from src.sync import archive as _archive
-from src.sync import extensions as _extensions
-from src.sync_engine import SyncEngine
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
+
+CLI = [sys.executable, "-m", "src.main"]
+
+
+def _run(args: list[str]) -> None:
+    subprocess.run([*CLI, *args], check=True)
 
 
 def _sep(label: str) -> None:
@@ -42,34 +43,9 @@ def main() -> None:
 
     # ── 1. Backup Helium Default → current.tar ────────────────────────────
     _sep("1/5  Backup Helium → current.tar")
-    helium_profiles = helium.discover_profiles()
-    if not helium_profiles:
-        sys.exit("ERROR: Helium has no profiles")
-    profile_path = next((p for p in helium_profiles if p.name == "Default"), helium_profiles[0])
-    log.info("Source profile: %s", profile_path)
-
     if helium.is_running():
         sys.exit("ERROR: Helium is running — close it first")
-
-    current_archive = sync_folder / "current.tar"
-    work_dir = Path(tempfile.mkdtemp(prefix="cps-e2e-bk-"))
-    try:
-        if current_archive.exists():
-            log.info("Seeding work_dir from existing archive...")
-            _archive.unpack_archive(current_archive, work_dir)
-        engine = SyncEngine(sync_folder)
-        engine.sync_browser_profile(
-            profile_path, work_dir,
-            direction="push",
-            on_progress=lambda m: log.info("  push: %s", m),
-        )
-        if _archive.validate_archive_content(work_dir):
-            _archive.pack_to_archive(work_dir, current_archive)
-            log.info("Packed → %s", current_archive)
-        else:
-            sys.exit("ERROR: archive validation failed after push")
-    finally:
-        shutil.rmtree(work_dir)
+    _run(["--sync", "--browser", "Helium", "--direction", "push"])
 
     # ── 2. Kill + nuke Thorium profile ────────────────────────────────────
     _sep("2/5  Nuke Thorium profile")
@@ -104,31 +80,8 @@ def main() -> None:
 
     # ── 4. Restore current.tar → Thorium ──────────────────────────────────
     _sep("4/5  Restore backup → Thorium")
-    thorium_profiles = thorium.discover_profiles()
-    if not thorium_profiles:
-        sys.exit("ERROR: Thorium has no profiles after fresh launch")
-
-    work_dir = Path(tempfile.mkdtemp(prefix="cps-e2e-rs-"))
-    try:
-        _archive.unpack_archive(current_archive, work_dir)
-        restore_engine = SyncEngine(sync_folder)
-        ungoogled_only = config.get_ungoogled_only_extensions()
-        ext_restrictions = config.get_extension_browser_restrictions()
-
-        for tp in thorium_profiles:
-            log.info("Restoring → %s", tp)
-            restore_engine.restore_profile_from_backup(
-                tp, work_dir,
-                browser=thorium,
-                on_progress=lambda m: log.info("  restore: %s", m),
-            )
-            _extensions.install_external_extensions(
-                work_dir, thorium,
-                ungoogled_only_ext_ids=ungoogled_only,
-                browser_restrictions=ext_restrictions,
-            )
-    finally:
-        shutil.rmtree(work_dir)
+    current_archive = sync_folder / "current.tar"
+    _run(["--restore-from", str(current_archive), "--browser", "Thorium"])
 
     # ── 5. Launch Thorium for inspection ──────────────────────────────────
     _sep("5/5  Launching Thorium — inspect, then close manually")

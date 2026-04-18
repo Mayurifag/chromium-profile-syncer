@@ -72,29 +72,17 @@ def sync_dir(
             skipped_list.append(1)
             return
 
-        if direction == "push":
-            if profile_mtime > sync_mtime:
-                sync_base.mkdir(parents=True, exist_ok=True)
-                copy_atomic(profile_unit, sync_unit, report)
-                synced_list.append(1)
-            else:
-                skipped_list.append(1)
-        elif direction == "pull":
-            if sync_mtime > profile_mtime:
-                profile_base.mkdir(parents=True, exist_ok=True)
-                copy_atomic(sync_unit, profile_unit, report)
-                synced_list.append(1)
-            else:
-                skipped_list.append(1)
+        profile_newer = profile_mtime > sync_mtime
+        if profile_newer and direction in ("push", "both"):
+            sync_base.mkdir(parents=True, exist_ok=True)
+            copy_atomic(profile_unit, sync_unit, report)
+            synced_list.append(1)
+        elif not profile_newer and direction in ("pull", "both"):
+            profile_base.mkdir(parents=True, exist_ok=True)
+            copy_atomic(sync_unit, profile_unit, report)
+            synced_list.append(1)
         else:
-            if profile_mtime > sync_mtime:
-                sync_base.mkdir(parents=True, exist_ok=True)
-                copy_atomic(profile_unit, sync_unit, report)
-                synced_list.append(1)
-            else:
-                profile_base.mkdir(parents=True, exist_ok=True)
-                copy_atomic(sync_unit, profile_unit, report)
-                synced_list.append(1)
+            skipped_list.append(1)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         for fut in as_completed({pool.submit(_sync_unit, n): n for n in unit_names}):

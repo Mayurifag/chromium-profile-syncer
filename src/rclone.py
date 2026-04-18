@@ -62,7 +62,7 @@ def run(cmd: list[str], description: str, report: Callable[[str], None]) -> None
                 report(f"{description}..." if description else "Syncing...")
         process.wait()
         if process.returncode != 0:
-            error_output = "\n".join(output_lines[-10:]) if output_lines else "No output"
+            error_output = "\n".join(output_lines) if output_lines else "No output"
             _LOG.error("rclone failed:\n%s", error_output)
             raise subprocess.CalledProcessError(process.returncode, cmd, output=error_output)
         _LOG.debug("rclone complete: %s", description or cmd[1])

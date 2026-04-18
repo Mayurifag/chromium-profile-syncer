@@ -43,6 +43,11 @@ class BrowserBase(ABC):
         return False
 
     @property
+    def ext_id_aliases(self) -> dict[str, str]:
+        """Maps browser-internal extension IDs to their canonical Web Store IDs."""
+        return {}
+
+    @property
     def web_store_update_url(self) -> str:
         return "https://clients2.google.com/service/update2/crx"
 

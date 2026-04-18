@@ -6,14 +6,18 @@ import platform
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from src.sync import _noop
 from src.sync.leveldb import copy_atomic
 
+if TYPE_CHECKING:
+    from src.browsers.base import BrowserBase
+
 _LOG = logging.getLogger(__name__)
 
 
-def _winreg_enum(fn, key) -> list:
+def _winreg_enum(fn: Callable[..., Any], key: Any) -> list:
     names, i = [], 0
     while True:
         try:
@@ -268,7 +272,7 @@ def collect_webstore_extensions(profile_dir: Path) -> dict[str, str]:
 
 def install_external_extensions(
     sync_profile_path: Path,
-    browser: object,
+    browser: BrowserBase,
     *,
     ungoogled_only_ext_ids: list[str],
     browser_restrictions: dict[str, list[str]] | None = None,
@@ -286,8 +290,15 @@ def install_external_extensions(
     if not ext_ids:
         return
 
-    is_ungoogled = getattr(browser, "ungoogled", True)
-    if not is_ungoogled and ungoogled_only_ext_ids:
+    internal_ids = set(browser.ext_id_aliases.values())
+    if internal_ids:
+        before = len(ext_ids)
+        ext_ids = [e for e in ext_ids if e not in internal_ids]
+        skipped = before - len(ext_ids)
+        if skipped:
+            _LOG.info("Skipping %d internally-bundled extension(s) for %s", skipped, browser.name)
+
+    if not browser.ungoogled and ungoogled_only_ext_ids:
         ungoogled_set = set(ungoogled_only_ext_ids)
         before = len(ext_ids)
         ext_ids = [e for e in ext_ids if e not in ungoogled_set]
@@ -295,23 +306,18 @@ def install_external_extensions(
         if skipped:
             _LOG.info(
                 "Skipping %d ungoogled-only extension(s) for non-ungoogled browser %s",
-                skipped,
-                getattr(browser, "name", "unknown"),
+                skipped, browser.name,
             )
 
     if browser_restrictions:
-        browser_name = getattr(browser, "name", "")
         before = len(ext_ids)
         ext_ids = [
             e for e in ext_ids
-            if not browser_restrictions.get(e) or browser_name in browser_restrictions[e]
+            if not browser_restrictions.get(e) or browser.name in browser_restrictions[e]
         ]
         skipped = before - len(ext_ids)
         if skipped:
-            _LOG.info(
-                "Skipping %d browser-restricted extension(s) for %s",
-                skipped, getattr(browser, "name", "unknown"),
-            )
+            _LOG.info("Skipping %d browser-restricted extension(s) for %s", skipped, browser.name)
 
     update_url = browser.web_store_update_url
     on_windows = platform.system() == "Windows"
@@ -334,7 +340,7 @@ def install_external_extensions(
         else:
             _LOG.info(
                 "%s: extension auto-install not supported — %d extension(s) need manual install:",
-                getattr(browser, "name", "unknown"),
+                browser.name,
                 len(ext_ids),
             )
             for ext_id in ext_ids:
@@ -385,7 +391,7 @@ def _install_via_stubs(ext_ids: list[str], ext_dir: Path, update_url: str) -> No
             _LOG.info("Registered Web Store extension via stub: %s", ext_id)
 
 
-def clean_external_extensions(browsers: list) -> None:
+def clean_external_extensions(browsers: list[BrowserBase]) -> None:
     on_windows = platform.system() == "Windows"
     for browser in browsers:
         reg_key = browser.windows_extensions_registry_key() if on_windows else None
