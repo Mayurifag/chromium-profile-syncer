@@ -67,6 +67,7 @@ class SettingsDialog(QDialog):
         self._browser_status_indicators: dict[str, QLabel] = {}
         self._apply_backup_buttons: dict[tuple[str, str], QPushButton] = {}
         self._sync_toggle_buttons: dict[tuple[str, str], QPushButton] = {}
+        self._remove_profile_buttons: dict[tuple[str, str], QPushButton] = {}
         self._selects_row: QWidget | None = None
         self._syncing: bool = False
 
@@ -90,8 +91,11 @@ class SettingsDialog(QDialog):
         self._clean_btn = QPushButton("Clean")
         self._clean_btn.clicked.connect(self._clean_sync_folder)
         self._clean_btn.setVisible(False)
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(self._refresh_profiles)
         folder_layout.addWidget(self._folder_edit)
         folder_layout.addWidget(browse_btn)
+        folder_layout.addWidget(refresh_btn)
         folder_layout.addWidget(self._clean_btn)
         root.addWidget(folder_group)
 
@@ -130,7 +134,7 @@ class SettingsDialog(QDialog):
         edit_shortcuts_btn.clicked.connect(self._open_shortcuts_editor)
         selects_layout.addWidget(edit_shortcuts_btn)
 
-        view_ext_btn = QPushButton("View Extensions")
+        view_ext_btn = QPushButton("Edit Extensions")
         view_ext_btn.clicked.connect(self._open_extension_links)
         selects_layout.addWidget(view_ext_btn)
 
@@ -298,6 +302,7 @@ class SettingsDialog(QDialog):
         is_running: bool,
         is_enabled: bool,
         prefix_widgets: list,
+        profile_path: Path | None = None,
     ) -> None:
         row = QWidget()
         row.setObjectName("profile_row")
@@ -313,6 +318,27 @@ class SettingsDialog(QDialog):
 
         for w in prefix_widgets:
             top_layout.addWidget(w)
+
+        if browser_name == "Thorium" and profile_path is not None:
+            remove_btn = QPushButton("Remove Profile")
+            remove_btn.setFixedWidth(110)
+            remove_btn.setEnabled(not is_running)
+            if is_running:
+                remove_btn.setToolTip(_CLOSE_BROWSER_HINT)
+            self._remove_profile_buttons[(browser_name, profile_name)] = remove_btn
+            top_layout.addWidget(remove_btn)
+
+            def _on_remove_clicked(
+                checked: bool = False,
+                bn: str = browser_name,
+                pn: str = profile_name,
+                pp: Path = profile_path,
+                f: Path | None = folder,
+            ) -> None:
+                self._do_remove_profile(bn, pn, pp, f)
+
+            remove_btn.clicked.connect(_on_remove_clicked)
+
         top_layout.addStretch()
 
         sync_toggle_btn = QPushButton()
@@ -403,6 +429,7 @@ class SettingsDialog(QDialog):
         self._browser_status_indicators.clear()
         self._apply_backup_buttons.clear()
         self._sync_toggle_buttons.clear()
+        self._remove_profile_buttons.clear()
 
         saved_profiles = config_module.get_enabled_profiles()
         found_any = False
@@ -430,6 +457,7 @@ class SettingsDialog(QDialog):
                 self._add_profile_row(
                     layout, browser.name, profile_name, folder, is_running, is_enabled,
                     prefix_widgets=[indicator, QLabel(f"<b>{browser.name}</b>")],
+                    profile_path=profiles[0],
                 )
             else:
                 header_row = QWidget()
@@ -462,6 +490,7 @@ class SettingsDialog(QDialog):
                     self._add_profile_row(
                         layout, browser.name, profile_name, folder, is_running, is_enabled,
                         prefix_widgets=[spacer, QLabel(f"• {display}")],
+                        profile_path=profile_path,
                     )
 
         if not found_any:
@@ -491,6 +520,55 @@ class SettingsDialog(QDialog):
         data["enabled_browsers"] = enabled_browsers
         config_module.save(data)
         _LOG.info("Profile configuration updated")
+
+    def _refresh_profiles(self) -> None:
+        folder_text = self._folder_edit.text().strip() if self._folder_edit else ""
+        if folder_text and (folder := Path(folder_text)).is_dir():
+            self._rebuild_profiles(folder)
+
+    def _do_remove_profile(
+        self, browser_name: str, profile_name: str, profile_path: Path, folder: Path | None
+    ) -> None:
+        import shutil
+
+        from PySide6.QtWidgets import QMessageBox
+
+        is_running = (
+            self._browser_monitor.is_running(browser_name)
+            if self._browser_monitor else False
+        )
+        if is_running:
+            QMessageBox.warning(self, "Browser Running", _CLOSE_BROWSER_HINT)
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Remove Profile",
+            f"Permanently delete {browser_name} profile '{profile_name}' from disk?\n\n"
+            f"{profile_path}\n\nThis cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        if profile_path.is_dir():
+            shutil.rmtree(profile_path)
+            _LOG.info("Deleted profile directory: %s", profile_path)
+
+        config_module.remove_browser_profile(browser_name)
+
+        if folder:
+            archive = folder / "current.tar"
+            if archive.is_file():
+                archive.unlink()
+                _LOG.info("Deleted archive: %s", archive)
+            if self._clean_btn:
+                self._clean_btn.setVisible(False)
+
+        folder_text = self._folder_edit.text().strip() if self._folder_edit else ""
+        if folder_text:
+            self._folder_edit.textChanged.emit(folder_text)
 
     def update_profile_progress(
         self, browser: str, profile: str, direction: str, count: int, elapsed: float
@@ -598,64 +676,32 @@ class SettingsDialog(QDialog):
             shutil.rmtree(work_dir, ignore_errors=True)
 
     def _open_extension_links(self) -> None:
-        import json
-        import shutil
-        import tempfile
-        import webbrowser
-
         from PySide6.QtWidgets import QMessageBox
 
-        from src.sync.archive import unpack_archive
+        from src.settings.extensions_manager import ExtensionsManagerDialog
 
         sync_folder = config_module.get_sync_folder()
         if not sync_folder or not sync_folder.exists():
-            QMessageBox.warning(self, "No Sync Folder", "Configure a sync folder first.")
+            QMessageBox.warning(self, "No Sync Folder", "Please configure a sync folder first.")
             return
 
         archive = sync_folder / "current.tar"
         if not archive.exists():
-            QMessageBox.information(self, "No Backup", "No backup archive found. Run a sync first.")
+            QMessageBox.information(
+                self, "No Backup",
+                "No backup archive found.\n\nRun a sync first to create the backup.",
+            )
             return
 
-        work_dir = Path(tempfile.mkdtemp(prefix="cps-extlinks-"))
-        ext_map: dict[str, str] = {}
+        browser_names = [b.name for b in self._browsers]
         try:
-            unpack_archive(archive, work_dir)
-            manifest_path = work_dir / "webstore_extensions.json"
-            if not manifest_path.exists():
-                QMessageBox.information(self, "No Extensions", "No web store extensions in backup.")
-                return
-            data = json.loads(manifest_path.read_text(encoding="utf-8"))
-            ext_map = data if isinstance(data, dict) else {e: "" for e in data}
-        except Exception:
-            _LOG.exception("Failed to read extension manifest")
+            dlg = ExtensionsManagerDialog(
+                self, sync_folder=sync_folder, available_browsers=browser_names
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"Failed to open extensions manager:\n{exc}")
             return
-        finally:
-            shutil.rmtree(work_dir, ignore_errors=True)
-
-        if not ext_map:
-            QMessageBox.information(self, "No Extensions", "No web store extensions found.")
-            return
-
-        base_url = "https://chromewebstore.google.com/detail"
-        rows = "\n".join(
-            f'<tr><td>{name or ext_id}</td>'
-            f'<td><a href="{base_url}/{ext_id}" target="_blank">Install</a></td></tr>'
-            for ext_id, name in sorted(ext_map.items(), key=lambda x: (x[1] or x[0]).lower())
-        )
-        html = (
-            "<!DOCTYPE html><html><head><title>Extensions</title>"
-            "<style>body{font-family:sans-serif;padding:16px}"
-            "table{border-collapse:collapse}"
-            "td{padding:6px 12px;border-bottom:1px solid #ddd}"
-            "a{color:#1a0dab}</style></head><body>"
-            f"<h2>Web Store Extensions ({len(ext_map)})</h2>"
-            f"<table><tr><th>Name</th><th></th></tr>\n{rows}\n</table>"
-            "</body></html>"
-        )
-        html_path = Path(tempfile.gettempdir()) / "cps_extensions.html"
-        html_path.write_text(html, encoding="utf-8")
-        webbrowser.open(html_path.as_uri())
+        dlg.exec()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._activity_log.cleanup()

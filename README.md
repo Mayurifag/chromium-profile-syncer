@@ -146,5 +146,10 @@ is preserved — it just is not applied to browsers that don't need it.
 
 # TODO
 
-- helium - extensions dont install. Make sure that it is ungoogled, so lingvist has to be installed. internal ublock origin was not deleted
+- view extension links - open in browser which latest applied settings. also check if its possible to construct link to install extension
+- add thorium removing profile (also in cli)
+- how to auto-enable third-party extensions? check on thorium
+- restore all settings in helium and test restoration settings in thorium (easier to check because extensions auto install)
 - search shortcut gru by default
+- helium - extensions dont install - Make sure that it is ungoogled, so lingvist has to be installed
+- helium - internal ublock origin was not deleted

@@ -94,7 +94,17 @@ Extracts user-created search engines (`prepopulate_id = 0`) from `Web Data` SQLi
 - Default engine: `sync_guid` must match `Preferences["default_search_provider"]["guid"]`
 - All others: `sync_guid = ""` (local-only; Chrome deletes unknown UUIDs on reconciliation)
 
-**Restore scope:** `DELETE FROM keywords WHERE prepopulate_id = 0` — never touch built-ins.
+**Restore scope:** `DELETE FROM keywords` — wipe all engines (built-ins included), reinsert only synced shortcuts starting at ID 1.
+
+**Choice screen:** Helium (and Chromium 127+) enables a search-engine choice screen. Until all three completion keys are present in Preferences, `GetChoiceCompletionMetadata` returns an error and the service wipes the record, ignoring `default_search_provider.guid`:
+- `default_search_provider.choice_screen_completion_timestamp` — **JSON string** (not int!), seconds since Windows epoch (1601-01-01); integer type silently fails validation
+- `default_search_provider.choice_screen_completion_version` — String, browser version (e.g. `"146.0.7680.177"`), must have same component count as running binary
+- `default_search_provider.choice_screen_completion_program` — Int, `Program::kWaffle = 3` for Helium (all regions forced to kWaffle by its patch)
+- `default_search_provider.reset_occurred` — must be `false`; absence triggers reset on launch
+
+Only write these when `choice_screen_random_shuffle_seed` is already present (signals choice screen is active). Read version from `User Data/Last Version`. None of these keys are MAC-protected.
+
+**`default_search_provider_data.mirrored_template_url_data`:** `DefaultSearchManager` uses this as the authoritative DSE cache. Must be written on restore with Helium's full schema — key differences from minimal builds: `input_encodings` is an array (not string), `id`/`date_created`/`last_modified`/`last_visited` are strings, `synced_guid` (not `sync_guid`), `suggestions_url` (not `suggest_url`), plus extra fields: `doodle_url`, `preconnect_to_search_url`, `prefetch_likely_navigations`, `image_translate_url`, `policy_origin`, `originating_url`, `usage_count`, `search_intent_params`, `contextual_search_url`, `logo_url`. See `_build_mirror_dict` in `src/sync/shortcuts.py`.
 
 ### First-Sync Detection
 

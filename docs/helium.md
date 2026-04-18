@@ -56,9 +56,31 @@ Additionally, the backup's `search_shortcuts.json` may not have a matching entry
 for the exact search engine Helium uses as its default (different `prepopulate_id`
 or different URL template), so the round-trip fails silently.
 
-**Result:** After applying a backup and launching Helium, the default search engine
-reverts to whatever Helium considers its own default, regardless of what was
-restored.
+**Root cause:** Helium enables Chromium's EU search-engine choice screen globally
+(`force-eu-search-features.patch`, `CountryIdToProgram()` → always `kWaffle=3`).
+`GetChoiceCompletionMetadata()` validates three keys together — if any is absent or
+invalid, the service wipes the record and ignores `default_search_provider.guid`:
+
+1. `choice_screen_completion_timestamp` — stored as **JSON string** (not integer), seconds since
+   Windows epoch (1601-01-01). Type mismatch (int) silently fails validation.
+2. `choice_screen_completion_version` — browser version string, component count must match binary
+3. `choice_screen_completion_program` — Int, must equal `Program::kWaffle = 3` for Helium
+
+Additionally, `DefaultSearchManager` reads `default_search_provider_data.mirrored_template_url_data`
+as the authoritative DSE cache. This dict must be written in Helium's exact schema — notably
+`input_encodings` as an array, numeric IDs and timestamps as strings, and all fields present
+(missing fields cause Helium to ignore the mirror and fall back to re-populating DDG).
+
+Also: `default_search_provider.reset_occurred` must be set to `false`; otherwise Helium
+interprets the absence as a pending reset and overwrites the guid on launch.
+
+**Fix:** `restore_search_shortcuts` now:
+- Wipes all keywords rows (`DELETE FROM keywords`), not just user-defined, because Helium
+  re-injects its built-in engines (DDG, prepopulate_id=92) on every launch
+- Writes all three choice-screen completion keys (timestamp as string)
+- Writes `mirrored_template_url_data` with the full Helium schema
+- Writes `reset_occurred: false` to `default_search_provider`
+Version is read from `User Data/Last Version`.
 
 ---
 
@@ -69,7 +91,7 @@ restored.
 | Extension install via file stubs    | ✗ Not working                      |
 | Extension install via registry      | ✗ Not working (tested)             |
 | Built-in extension (uBlock) removal | ✗ Not possible — Helium re-injects |
-| Default search engine restore       | ✗ Helium overrides on launch       |
+| Default search engine restore       | ✓ Fixed (timestamp as string + mirrored_template_url_data + reset_occurred) |
 | Bookmarks sync                      | ✓ Works                            |
 | Custom Dictionary sync              | ✓ Works                            |
 | Local Storage sync                  | ✓ Works                            |

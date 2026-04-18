@@ -76,16 +76,32 @@ def _dir_version(version_dir: Path) -> tuple[int, ...]:
 def _resolve_msg(version_dir: Path, msg_key: str) -> str:
     key = msg_key.removeprefix("__MSG_").removesuffix("__").lower()
     locales_dir = version_dir / "_locales"
-    for locale_dir in locales_dir.iterdir() if locales_dir.exists() else []:
+    if not locales_dir.exists():
+        return ""
+
+    def _read_locale(locale_dir: Path) -> str:
         messages_file = locale_dir / "messages.json"
-        if messages_file.exists():
-            try:
-                messages = json.loads(messages_file.read_text(encoding="utf-8"))
-                for k, v in messages.items():
-                    if k.lower() == key:
-                        return v.get("message", "")
-            except (OSError, json.JSONDecodeError):
-                pass
+        if not messages_file.exists():
+            return ""
+        try:
+            messages = json.loads(messages_file.read_text(encoding="utf-8"))
+            for k, v in messages.items():
+                if k.lower() == key:
+                    return v.get("message", "")
+        except (OSError, json.JSONDecodeError):
+            pass
+        return ""
+
+    for locale in ("en", "en_US", "en_GB", "ru_RU"):
+        result = _read_locale(locales_dir / locale)
+        if result:
+            return result
+
+    for locale_dir in locales_dir.iterdir():
+        result = _read_locale(locale_dir)
+        if result:
+            return result
+
     return ""
 
 
@@ -235,11 +251,27 @@ def update_webstore_manifest(profile_dir: Path, sync_dir: Path) -> None:
         _LOG.info("Updated webstore manifest: %d extensions", len(webstore_map))
 
 
+def collect_webstore_extensions(profile_dir: Path) -> dict[str, str]:
+    ext_dir = profile_dir / "Extensions"
+    result: dict[str, str] = {}
+    if not ext_dir.exists():
+        return result
+    for id_dir in ext_dir.iterdir():
+        if not id_dir.is_dir():
+            continue
+        best = _best_version_dir(id_dir)
+        if best and _is_webstore_extension(best):
+            name = _extension_name(best)
+            result[id_dir.name] = name if name != id_dir.name else ""
+    return result
+
+
 def install_external_extensions(
     sync_profile_path: Path,
     browser: object,
     *,
     ungoogled_only_ext_ids: list[str],
+    browser_restrictions: dict[str, list[str]] | None = None,
 ) -> None:
     manifest_path = sync_profile_path / "webstore_extensions.json"
     if not manifest_path.exists():
@@ -265,6 +297,20 @@ def install_external_extensions(
                 "Skipping %d ungoogled-only extension(s) for non-ungoogled browser %s",
                 skipped,
                 getattr(browser, "name", "unknown"),
+            )
+
+    if browser_restrictions:
+        browser_name = getattr(browser, "name", "")
+        before = len(ext_ids)
+        ext_ids = [
+            e for e in ext_ids
+            if not browser_restrictions.get(e) or browser_name in browser_restrictions[e]
+        ]
+        skipped = before - len(ext_ids)
+        if skipped:
+            _LOG.info(
+                "Skipping %d browser-restricted extension(s) for %s",
+                skipped, getattr(browser, "name", "unknown"),
             )
 
     update_url = browser.web_store_update_url

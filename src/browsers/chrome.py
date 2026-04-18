@@ -27,6 +27,10 @@ class Chrome(BrowserBase):
     def _linux_path(self) -> Path:
         return Path.home() / ".config" / "google-chrome"
 
+    @property
+    def windows_executable_name(self) -> str | None:
+        return "chrome.exe"
+
     def windows_extensions_registry_key(self) -> str | None:
         return r"SOFTWARE\Google\Chrome\Extensions"
 

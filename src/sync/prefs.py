@@ -26,6 +26,8 @@ PREFERENCES_KEYS: tuple[str, ...] = (
     "omnibox",
     "toolbar",
     "bookmark_bar",
+    "custom_links",
+    "extensions.pinned_extensions",
     "browser.enable_spellchecking",
     "browser.theme",
     "savefile",

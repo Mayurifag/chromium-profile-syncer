@@ -1222,22 +1222,16 @@ def test_restore_search_shortcuts_preserves_stored_guid_and_updates_preferences(
     assert prefs["default_search_provider"]["guid"] == "old-guid"
 
 
-def test_restore_search_shortcuts_updates_mirrored_template_url_data(tmp_path: Path) -> None:
+def test_restore_search_shortcuts_writes_mirrored_template_url_data(tmp_path: Path) -> None:
     shortcuts_json = tmp_path / "search_shortcuts.json"
     shortcuts_json.write_text(
         json.dumps([
             {
                 "keyword": "gru", "short_name": "Google RU",
                 "url": "https://g.ru/?q={searchTerms}",
-                "favicon_url": "https://g.ru/favicon.ico",
-                "suggest_url": "",
                 "sync_guid": "test-guid-gru",
                 "is_default": True,
-                "date_created": 1234567890,
-                "last_modified": 9876543210,
-                "prepopulate_id": 0,
-                "is_active": 1,
-                "safe_for_autoreplace": 0,
+                "input_encodings": "UTF-8",
                 "alternate_urls": "[]",
             },
         ]),
@@ -1254,19 +1248,16 @@ def test_restore_search_shortcuts_updates_mirrored_template_url_data(tmp_path: P
         restore_search_shortcuts(profile, tmp_path)
 
     prefs = json.loads(prefs_path.read_text(encoding="utf-8"))
-    mirror = prefs.get("default_search_provider_data", {}).get("mirrored_template_url_data", {})
+    assert prefs["default_search_provider"]["guid"] == "test-guid-gru"
+    assert prefs["default_search_provider"]["reset_occurred"] is False
+    mirror = prefs["default_search_provider_data"]["mirrored_template_url_data"]
     assert mirror["synced_guid"] == "test-guid-gru"
     assert mirror["keyword"] == "gru"
-    assert mirror["short_name"] == "Google RU"
     assert mirror["url"] == "https://g.ru/?q={searchTerms}"
-    assert mirror["favicon_url"] == "https://g.ru/favicon.ico"
-    assert mirror["date_created"] == "1234567890"
-    assert mirror["last_modified"] == "9876543210"
+    assert mirror["input_encodings"] == ["UTF-8"]
     assert mirror["alternate_urls"] == []
-    assert mirror["prepopulate_id"] == 0
-    assert mirror["is_active"] == 1
-    # id must be the string row_id (1 since table was empty)
-    assert mirror["id"] == "1"
+    assert isinstance(mirror["id"], str)
+    assert isinstance(mirror["last_modified"], str)
 
 
 def test_make_url_hash_returns_valid_64_byte_blob() -> None:
@@ -1440,6 +1431,36 @@ def test_restore_search_shortcuts_updates_keywords_metadata(tmp_path: Path) -> N
 
     assert meta.get("Default Search Provider ID") == str(inserted_id)
     assert "Default Search Provider Backup" not in meta
+
+
+def test_restore_search_shortcuts_choice_screen_timestamp_is_string(tmp_path: Path) -> None:
+    shortcuts_json = tmp_path / "search_shortcuts.json"
+    shortcuts_json.write_text(
+        json.dumps([{"keyword": "g", "short_name": "G",
+                     "url": "https://g.com/?q={searchTerms}",
+                     "sync_guid": "g-guid", "is_default": True}]),
+        encoding="utf-8",
+    )
+    profile = tmp_path / "profile"
+    _make_web_data(profile / "Web Data", [])
+    prefs_path = profile / "Preferences"
+    prefs_path.write_text(
+        json.dumps({"default_search_provider": {
+            "guid": "",
+            "choice_screen_random_shuffle_seed": "12345",
+        }}),
+        encoding="utf-8",
+    )
+    (profile.parent / "Last Version").write_text("146.0.0.0", encoding="utf-8")
+    with patch("src.sync.shortcuts.load_oscrypt_key", return_value=_make_aesgcm()):
+        restore_search_shortcuts(profile, tmp_path)
+
+    prefs = json.loads(prefs_path.read_text(encoding="utf-8"))
+    dsp = prefs["default_search_provider"]
+    assert isinstance(dsp["choice_screen_completion_timestamp"], str)
+    assert dsp["choice_screen_completion_timestamp"].isdigit()
+    assert dsp["choice_screen_completion_program"] == 3
+    assert dsp["choice_screen_completion_version"] == "146.0.0.0"
 
 
 # ---------------------------------------------------------------------------

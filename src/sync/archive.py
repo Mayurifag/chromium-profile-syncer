@@ -27,6 +27,8 @@ def validate_archive_content(work_dir: Path) -> bool:
         "custom_dictionary": (work_dir / "Custom Dictionary.txt").is_file(),
         "preferences": (work_dir / "preferences.json").is_file(),
         "search_shortcuts": (work_dir / "search_shortcuts.json").is_file(),
+        "favicons": (work_dir / "Favicons").is_file(),
+        "omnibox_shortcuts": (work_dir / "Shortcuts").is_file(),
     }
 
     for item, present in checks.items():
@@ -62,14 +64,14 @@ def pack_to_archive(src_dir: Path, dst_archive: Path) -> None:
     try:
         with tarfile.open(str(tmp), "w:") as tf:
             tf.add(str(src_dir), arcname=".")
-        for attempt in range(20):
+        for attempt in range(6):
             try:
                 shutil.copy2(str(tmp), dst_archive)
                 break
             except PermissionError:
-                if attempt == 19:
+                if attempt == 5:
                     raise
-                time.sleep(0.5)
+                time.sleep(0.3)
     finally:
         tmp.unlink(missing_ok=True)
 

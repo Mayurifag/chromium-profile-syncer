@@ -35,6 +35,10 @@ class Helium(BrowserBase):
     def _linux_path(self) -> Path:
         return Path.home() / ".config" / "net.imput.helium"
 
+    @property
+    def windows_executable_name(self) -> str | None:
+        return "Helium.exe"
+
     def windows_extensions_registry_key(self) -> str | None:
         return r"SOFTWARE\Chromium\Extensions"
 

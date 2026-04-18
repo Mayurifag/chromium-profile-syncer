@@ -26,3 +26,7 @@ class Yandex(BrowserBase):
 
     def _linux_path(self) -> Path:
         return Path.home() / ".config" / "yandex-browser"
+
+    @property
+    def windows_executable_name(self) -> str | None:
+        return "browser.exe"

@@ -215,9 +215,6 @@ class TrayApp(QSystemTrayIcon):
         if find_rclone() is None:
             self._warn_rclone_missing()
 
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
         dialog.exec()
 
     def _on_settings_closed(self) -> None:

@@ -93,6 +93,22 @@ class BrowserBase(ABC):
     def windows_force_list_registry_key(self) -> str | None:
         return None
 
+    @property
+    def windows_executable_name(self) -> str | None:
+        return None
+
+    def executable(self) -> Path | None:
+        if sys.platform != "win32":
+            return None
+        exe_name = self.windows_executable_name
+        if not exe_name:
+            return None
+        root = self.profile_root()
+        if not root:
+            return None
+        exe = root.parent / "Application" / exe_name
+        return exe if exe.exists() else None
+
     def _name_from_local_state(self, profile_dir_name: str) -> str | None:
         root = self.profile_root()
         if not root:

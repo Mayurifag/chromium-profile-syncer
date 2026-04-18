@@ -12,6 +12,7 @@ import src.config as _config
 from src import rclone as _rclone
 from src.sync import archive as _archive
 from src.sync import extensions as _extensions
+from src.sync import favicons as _favicons
 from src.sync import leveldb as _leveldb
 from src.sync import prefs as _prefs
 from src.sync import shortcuts as _shortcuts
@@ -29,6 +30,8 @@ DEFAULT_DATA_TYPES: dict[str, bool] = {
     "custom_dictionary": True,
     "local_storage": True,
     "search_shortcuts": True,
+    "favicons": True,
+    "omnibox_shortcuts": True,
 }
 
 _LOG = logging.getLogger(__name__)
@@ -45,7 +48,6 @@ class SyncEngine:
             from src.browsers import ALL_BROWSERS
             browsers = ALL_BROWSERS
         self.browsers = browsers
-        self.logger = logging.getLogger(f"{__name__}.SyncEngine")
         self._progress_cb: Callable[[str], None] | None = None
         self._synced_count: int = 0
         self._skipped_count: int = 0
@@ -57,7 +59,7 @@ class SyncEngine:
     def _copy(self, src: Path, dst: Path) -> None:
         dst.parent.mkdir(parents=True, exist_ok=True)
         self._report(src.name)
-        self.logger.info("Copying file: %s → %s", src.name, dst)
+        _LOG.info("Copying file: %s → %s", src.name, dst)
         shutil.copy2(src, dst)
         self._synced_count += 1
 
@@ -92,7 +94,7 @@ class SyncEngine:
         self._progress_cb = on_progress
         dt = data_types or {}
         sync_profile_path.mkdir(parents=True, exist_ok=True)
-        self.logger.info("Syncing profile: %s ↔ %s", profile_path, sync_profile_path)
+        _LOG.info("Syncing profile: %s ↔ %s", profile_path, sync_profile_path)
 
         if dt.get("extensions", True):
             excluded_ext_ids = set(_config.get_excluded_ext_settings_ids())
@@ -140,6 +142,7 @@ class SyncEngine:
         plain_files: list[tuple[str, str | None]] = [
             ("Bookmarks", "bookmarks"),
             ("Custom Dictionary.txt", "custom_dictionary"),
+            ("Shortcuts", "omnibox_shortcuts"),
         ]
         for filename, key in plain_files:
             if key is not None and not dt.get(key, True):
@@ -155,7 +158,13 @@ class SyncEngine:
             if direction in ("pull", "both"):
                 _shortcuts.restore_search_shortcuts(profile_path, sync_profile_path, self._report)
 
-        self.logger.info("Profile sync complete: %s", profile_path.name)
+        if dt.get("favicons", True):
+            if direction in ("push", "both"):
+                _favicons.extract_favicons(profile_path, sync_profile_path, self._report)
+            elif direction == "pull":
+                _favicons.restore_favicons(profile_path, sync_profile_path, self._report)
+
+        _LOG.info("Profile sync complete: %s", profile_path.name)
 
     def restore_profile_from_backup(
         self,
@@ -170,22 +179,30 @@ class SyncEngine:
         dt = data_types or {}
 
         if not sync_profile_path.exists():
-            self.logger.warning("Backup does not exist at %s — cannot restore", sync_profile_path)
+            _LOG.warning("Backup does not exist at %s — cannot restore", sync_profile_path)
             return
 
-        self.logger.info("Restoring profile from backup: %s → %s", sync_profile_path, profile_path)
+        _LOG.info("Restoring profile from backup: %s → %s", sync_profile_path, profile_path)
 
+        _ext_parents = {"Local Extension Settings", "Sync Extension Settings", "IndexedDB"}
         for src in sync_profile_path.iterdir():
             dst = profile_path / src.name
             if not dst.exists():
                 continue
-            if dst.is_dir():
-                self.logger.debug("Deleting directory: %s", dst)
+            if src.name in _ext_parents and src.is_dir() and dst.is_dir():
+                for ext_sub in src.iterdir():
+                    ext_dst = dst / ext_sub.name
+                    if ext_dst.exists():
+                        shutil.rmtree(ext_dst)
+                        self._synced_count += 1
+            elif dst.is_dir():
+                _LOG.debug("Deleting directory: %s", dst)
                 shutil.rmtree(dst)
+                self._synced_count += 1
             else:
-                self.logger.debug("Deleting file: %s", dst)
+                _LOG.debug("Deleting file: %s", dst)
                 dst.unlink()
-            self._synced_count += 1
+                self._synced_count += 1
 
         is_ungoogled = getattr(browser, "ungoogled", True)
         excluded_ext_ids: list[str] = (
@@ -220,25 +237,25 @@ class SyncEngine:
                 saved.get("extensions", {}).pop("settings", None)
             _prefs.merge_prefs(prefs, saved)
             prefs_path.write_bytes(json.dumps(prefs, separators=(",", ":")).encode())
-            self.logger.info("Merged preferences.json into %s", prefs_path)
+            _LOG.info("Merged preferences.json into %s", prefs_path)
 
         if dt.get("search_shortcuts", True):
             _shortcuts.restore_search_shortcuts(profile_path, sync_profile_path, self._report)
 
-        self.logger.info("Profile restore complete: %s", profile_path.name)
+        _LOG.info("Profile restore complete: %s", profile_path.name)
 
     def _prune_excluded_from_work(self, work_dir: Path, excluded_ext_ids: list[str]) -> None:
         for ext_id in excluded_ext_ids:
             stale = work_dir / "Local Extension Settings" / ext_id
             if stale.exists():
                 shutil.rmtree(stale)
-                self.logger.info("Pruned excluded ext settings: %s", ext_id)
+                _LOG.info("Pruned excluded ext settings: %s", ext_id)
             indexed_db = work_dir / "IndexedDB"
             if indexed_db.exists():
                 for entry in indexed_db.iterdir():
                     if entry.is_dir() and entry.name.startswith(f"chrome-extension_{ext_id}_"):
                         shutil.rmtree(entry)
-                        self.logger.info("Pruned excluded ext IndexedDB: %s", entry.name)
+                        _LOG.info("Pruned excluded ext IndexedDB: %s", entry.name)
 
     def _sync_single_profile(
         self,
@@ -250,6 +267,7 @@ class SyncEngine:
         force_direction: str | None,
         data_types: dict[str, bool],
         ungoogled_only_ext_ids: list[str],
+        ext_browser_restrictions: dict[str, list[str]],
     ) -> None:
         if needs_restore:
             self.restore_profile_from_backup(
@@ -257,7 +275,9 @@ class SyncEngine:
                 browser=browser, on_progress=self._progress_cb,
             )
             _extensions.install_external_extensions(
-                work_dir, browser, ungoogled_only_ext_ids=ungoogled_only_ext_ids,
+                work_dir, browser,
+                ungoogled_only_ext_ids=ungoogled_only_ext_ids,
+                browser_restrictions=ext_browser_restrictions,
             )
             if force_direction != "pull":
                 _config.clear_restore_flag(browser.name, profile_path.name)
@@ -268,7 +288,9 @@ class SyncEngine:
             )
             if direction in ("pull", "both"):
                 _extensions.install_external_extensions(
-                    work_dir, browser, ungoogled_only_ext_ids=ungoogled_only_ext_ids,
+                    work_dir, browser,
+                    ungoogled_only_ext_ids=ungoogled_only_ext_ids,
+                    browser_restrictions=ext_browser_restrictions,
                 )
 
     def sync_all(
@@ -291,9 +313,9 @@ class SyncEngine:
         skipped_running: list[str] = []
 
         if is_first_sync:
-            self.logger.info("Starting initial sync (first-time setup)")
+            _LOG.info("Starting initial sync (first-time setup)")
         else:
-            self.logger.info(
+            _LOG.info(
                 "Starting sync_all (only_browser=%s, only_profile=%s, force_direction=%s)",
                 only_browser, only_profile, force_direction,
             )
@@ -309,7 +331,7 @@ class SyncEngine:
         ]
         if manageable and all(b.is_running() for b in manageable):
             running_names = [b.name for b in manageable]
-            self.logger.warning(
+            _LOG.warning(
                 "All targeted browsers running (%s) — skipping sync",
                 ", ".join(running_names),
             )
@@ -320,6 +342,7 @@ class SyncEngine:
 
         ungoogled_only_ext_ids = _config.get_ungoogled_only_extensions()
         excluded_ext_ids = _config.get_excluded_ext_settings_ids()
+        ext_browser_restrictions = _config.get_extension_browser_restrictions()
 
         success = False
         try:
@@ -331,13 +354,13 @@ class SyncEngine:
 
             for browser in browsers_to_sync:
                 if enabled_browsers.get(browser.name) is False:
-                    self.logger.debug("Browser %s disabled in settings — skipping", browser.name)
+                    _LOG.debug("Browser %s disabled in settings — skipping", browser.name)
                     continue
                 if not browser.is_installed():
-                    self.logger.debug("Browser %s not installed — skipping", browser.name)
+                    _LOG.debug("Browser %s not installed — skipping", browser.name)
                     continue
                 if browser.is_running():
-                    self.logger.warning(
+                    _LOG.warning(
                         "Browser %s is running — skipping to avoid data corruption", browser.name,
                     )
                     skipped_running.append(browser.name)
@@ -345,12 +368,12 @@ class SyncEngine:
 
                 profiles = browser.discover_profiles()
                 if not profiles:
-                    self.logger.info("Browser %s: no profiles found", browser.name)
+                    _LOG.info("Browser %s: no profiles found", browser.name)
                     continue
 
                 allowed = enabled_profiles.get(browser.name)
                 if not allowed:
-                    self.logger.info(
+                    _LOG.info(
                         "Browser %s: no enabled profiles in config — skipping", browser.name
                     )
                     continue
@@ -359,12 +382,12 @@ class SyncEngine:
                 if only_profile:
                     profiles = [p for p in profiles if p.name == only_profile]
                 if not profiles:
-                    self.logger.info(
+                    _LOG.info(
                         "Browser %s: no matching profiles — skipping", browser.name
                     )
                     continue
 
-                self.logger.info("Browser %s: syncing %d profile(s)", browser.name, len(profiles))
+                _LOG.info("Browser %s: syncing %d profile(s)", browser.name, len(profiles))
                 for profile_path in profiles:
                     self._report(f"{browser.name}/{profile_path.name}")
                     direction = force_direction or directions.get(browser.name, {}).get(
@@ -378,9 +401,10 @@ class SyncEngine:
                         self._sync_single_profile(
                             browser, profile_path, work_dir, direction, needs_restore,
                             force_direction, data_types, ungoogled_only_ext_ids,
+                            ext_browser_restrictions,
                         )
                     except OSError:
-                        self.logger.exception(
+                        _LOG.exception(
                             "Failed to sync profile %s for browser %s",
                             profile_path.name, browser.name,
                         )
@@ -388,7 +412,7 @@ class SyncEngine:
                             raise
             success = True
         finally:
-            if success and self._synced_count > 0 and any(work_dir.iterdir()):
+            if success and any(work_dir.iterdir()):
                 if _archive.validate_archive_content(work_dir):
                     self._report("Packing...")
                     _archive.pack_to_archive(work_dir, current_archive)
@@ -399,8 +423,8 @@ class SyncEngine:
             f"Skipped: {self._skipped_count} items (unchanged)"
         )
         if is_first_sync:
-            self.logger.info("Initial sync complete — %s", summary)
+            _LOG.info("Initial sync complete — %s", summary)
         else:
-            self.logger.info("Sync complete — %s", summary)
+            _LOG.info("Sync complete — %s", summary)
 
         return {"is_first_sync": is_first_sync, "skipped_running": skipped_running}

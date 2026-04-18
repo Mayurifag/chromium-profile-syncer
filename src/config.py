@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from pathlib import Path
 
 _LOG = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ CONFIG_PATH: Path = CONFIG_DIR / "config.json"
 
 _data: dict | None = None
 _loaded_from: Path | None = None
+_lock = threading.Lock()
 
 
 def _get() -> dict:
@@ -44,10 +46,11 @@ def _get() -> dict:
 
 def _flush() -> None:
     global _loaded_from
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(_data, indent=2), encoding="utf-8")
-    _loaded_from = CONFIG_PATH
-    _LOG.debug("Config saved to %s", CONFIG_PATH)
+    with _lock:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text(json.dumps(_data, indent=2), encoding="utf-8")
+        _loaded_from = CONFIG_PATH
+        _LOG.debug("Config saved to %s", CONFIG_PATH)
 
 
 def load() -> dict:
@@ -175,6 +178,15 @@ def set_profile_sync_enabled(browser: str, profile: str, enabled: bool) -> None:
         _LOG.info("Auto-sync enabled for %s/%s", browser, profile)
 
 
+def remove_browser_profile(browser: str) -> None:
+    data = _get()
+    for key in ("enabled_profiles", "enabled_browsers", "profile_sync_disabled",
+                "profiles_needing_restore", "profile_directions"):
+        data.get(key, {}).pop(browser, None)
+    _flush()
+    _LOG.info("Removed %s from config", browser)
+
+
 def get_last_sync() -> str:
     return _get().get("last_sync", "")
 
@@ -212,3 +224,13 @@ def set_excluded_ext_settings_ids(ext_ids: list[str]) -> None:
     _get()["excluded_ext_settings_ids"] = ext_ids
     _flush()
     _LOG.info("excluded_ext_settings_ids updated: %s", ext_ids)
+
+
+def get_extension_browser_restrictions() -> dict[str, list[str]]:
+    return _get().get("extension_browser_restrictions", {})
+
+
+def set_extension_browser_restrictions(restrictions: dict[str, list[str]]) -> None:
+    _get()["extension_browser_restrictions"] = restrictions
+    _flush()
+    _LOG.info("extension_browser_restrictions updated")
