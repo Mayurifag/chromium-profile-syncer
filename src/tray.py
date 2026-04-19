@@ -58,6 +58,7 @@ class TrayApp(QSystemTrayIcon):
         self._last_sync: str = self._config.get_last_sync()
         self._last_error: str = ""
         self._last_tar_mtime: float | None = None
+        self._last_tar_size: int | None = None
 
         installed_browsers = [b for b in ALL_BROWSERS if b.is_installed()]
         self._browser_monitor = BrowserMonitor(installed_browsers, parent=self)
@@ -172,14 +173,18 @@ class TrayApp(QSystemTrayIcon):
         logger.debug("Debounce timer reset (2s)")
 
     def _on_debounce_fired(self) -> None:
-        if self._last_tar_mtime is not None:
+        if self._last_tar_mtime is not None or self._last_tar_size is not None:
             sync_folder = self._config.get_sync_folder()
             if sync_folder is not None:
                 tar = sync_folder / _ARCHIVE_NAME
                 if tar.exists():
                     try:
-                        if tar.stat().st_mtime == self._last_tar_mtime:
+                        st = tar.stat()
+                        if st.st_mtime == self._last_tar_mtime:
                             logger.debug("Watcher fired but %s unchanged — skipping", _ARCHIVE_NAME)
+                            return
+                        if self._last_tar_size is not None and st.st_size == self._last_tar_size:
+                            logger.debug("cloud touched mtime but size unchanged — skipping")
                             return
                     except OSError:
                         pass
@@ -205,7 +210,13 @@ class TrayApp(QSystemTrayIcon):
         if sync_folder is not None:
             tar = sync_folder / _ARCHIVE_NAME
             try:
-                self._last_tar_mtime = tar.stat().st_mtime if tar.exists() else None
+                if tar.exists():
+                    st = tar.stat()
+                    self._last_tar_mtime = st.st_mtime
+                    self._last_tar_size = st.st_size
+                else:
+                    self._last_tar_mtime = None
+                    self._last_tar_size = None
             except OSError:
                 pass
         self._watcher_paused = False
@@ -251,9 +262,16 @@ class TrayApp(QSystemTrayIcon):
 
         tar = sync_folder / _ARCHIVE_NAME
         try:
-            self._last_tar_mtime = tar.stat().st_mtime if tar.exists() else None
+            if tar.exists():
+                st = tar.stat()
+                self._last_tar_mtime = st.st_mtime
+                self._last_tar_size = st.st_size
+            else:
+                self._last_tar_mtime = None
+                self._last_tar_size = None
         except OSError:
             self._last_tar_mtime = None
+            self._last_tar_size = None
 
         self._teardown_watcher()
         self._setup_watcher(sync_folder)
@@ -354,9 +372,16 @@ class TrayApp(QSystemTrayIcon):
         if sync_folder is not None:
             tar = sync_folder / _ARCHIVE_NAME
             try:
-                self._last_tar_mtime = tar.stat().st_mtime if tar.exists() else None
+                if tar.exists():
+                    st = tar.stat()
+                    self._last_tar_mtime = st.st_mtime
+                    self._last_tar_size = st.st_size
+                else:
+                    self._last_tar_mtime = None
+                    self._last_tar_size = None
             except OSError:
                 self._last_tar_mtime = None
+                self._last_tar_size = None
             self._config.set_last_sync(last_sync)
 
         if is_first_sync:

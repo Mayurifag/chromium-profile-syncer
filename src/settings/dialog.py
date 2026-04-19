@@ -336,9 +336,8 @@ class SettingsDialog(QDialog):
                 bn: str = browser_name,
                 pn: str = profile_name,
                 pp: Path = profile_path,
-                f: Path | None = folder,
             ) -> None:
-                self._do_remove_profile(bn, pn, pp, f)
+                self._do_remove_profile(bn, pn, pp)
 
             remove_btn.clicked.connect(_on_remove_clicked)
 
@@ -529,9 +528,7 @@ class SettingsDialog(QDialog):
         if folder_text and (folder := Path(folder_text)).is_dir():
             self._rebuild_profiles(folder)
 
-    def _do_remove_profile(
-        self, browser_name: str, profile_name: str, profile_path: Path, folder: Path | None
-    ) -> None:
+    def _do_remove_profile(self, browser_name: str, profile_name: str, profile_path: Path) -> None:
         import shutil
 
         from PySide6.QtWidgets import QMessageBox
@@ -560,14 +557,6 @@ class SettingsDialog(QDialog):
             _LOG.info("Deleted profile directory: %s", profile_path)
 
         config_module.remove_browser_profile(browser_name)
-
-        if folder:
-            archive = folder / ARCHIVE_NAME
-            if archive.is_file():
-                archive.unlink()
-                _LOG.info("Deleted archive: %s", archive)
-            if self._clean_btn:
-                self._clean_btn.setVisible(False)
 
         folder_text = self._folder_edit.text().strip() if self._folder_edit else ""
         if folder_text:

@@ -130,7 +130,8 @@ def extract_search_shortcuts(
                        sync_guid, safe_for_autoreplace, input_encodings, alternate_urls
                 FROM keywords
                 WHERE prepopulate_id = 0
-                  AND is_active = 1
+                  AND is_active != 2
+                  AND starter_pack_id = 0
                 ORDER BY keyword
                 """
             )
