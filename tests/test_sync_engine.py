@@ -3,10 +3,8 @@ from __future__ import annotations
 import json
 import os
 import platform
-import shutil
 import sqlite3
 import sys
-import tarfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -14,7 +12,6 @@ import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from src.rclone import find_rclone
-from src.sync.archive import ARCHIVE_NAME, pack_to_archive, unpack_archive
 from src.sync.extensions import _parse_version, install_external_extensions, sync_extensions
 from src.sync.leveldb import copy_atomic, sync_dir
 from src.sync.shortcuts import (
@@ -22,44 +19,12 @@ from src.sync.shortcuts import (
     make_url_hash,
     restore_search_shortcuts,
 )
+from src.sync.sync_dir import SYNC_DIR_NAME
 from src.sync_engine import NEVER_SYNC, SyncEngine
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_archive(sync_folder: Path, files: dict[str, str]) -> Path:
-    """Pack files dict {rel_path: content} into sync_folder/current.tar."""
-    tmp = sync_folder / "_tmp_setup"
-    tmp.mkdir(exist_ok=True)
-    for rel, content in files.items():
-        p = tmp / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
-    archive = sync_folder / ARCHIVE_NAME
-    pack_to_archive(tmp, archive)
-    shutil.rmtree(tmp)
-    return archive
-
-
-def _file_in_archive(archive: Path, rel_path: str) -> bool:
-    """Return True if rel_path exists inside a tar archive."""
-    if not archive.is_file():
-        return False
-    with tarfile.open(str(archive)) as tf:
-        names = tf.getnames()
-    normalized = "./" + rel_path if not rel_path.startswith("./") else rel_path
-    return normalized in names
-
-
-def _read_from_archive(archive: Path, rel_path: str) -> str:
-    """Read and return the decoded content of rel_path from a tar archive."""
-    with tarfile.open(str(archive)) as tf:
-        normalized = "./" + rel_path if not rel_path.startswith("./") else rel_path
-        member = tf.extractfile(normalized)
-        assert member is not None, f"{rel_path} not in archive"
-        return member.read().decode("utf-8")
 
 
 def _make_engine(sync_folder: Path, browsers: list | None = None) -> SyncEngine:
@@ -287,15 +252,6 @@ def test_sync_all_uses_direction_from_config(tmp_path: Path) -> None:
     sync_folder = tmp_path / "sync"
     sync_folder.mkdir()
 
-    # Pre-populate archive with older data
-    engine = _make_engine(sync_folder)
-    tmp_dir = sync_folder / "_setup"
-    tmp_dir.mkdir()
-    _write_file(tmp_dir / "Bookmarks", "sync-data", mtime=1000.0)
-    _write_file(tmp_dir / "Preferences", "{}", mtime=1000.0)
-    pack_to_archive(tmp_dir, sync_folder / ARCHIVE_NAME)
-    shutil.rmtree(tmp_dir)
-
     browser = _make_browser(
         name="TestBrowser", installed=True, running=False, profiles=[profile]
     )
@@ -307,8 +263,8 @@ def test_sync_all_uses_direction_from_config(tmp_path: Path) -> None:
          patch("src.config.get_profile_directions", return_value=directions):
         engine.sync_all()
 
-    # Push: profile (newer) → archive updated
-    assert _read_from_archive(sync_folder / ARCHIVE_NAME, "Bookmarks") == "profile-data"
+    # Push: profile data → sync_dir
+    assert (sync_folder / SYNC_DIR_NAME / "Bookmarks").read_text() == "profile-data"
     # Profile itself must not be overwritten (push skips reverse copy)
     assert (profile / "Bookmarks").read_text() == "profile-data"
 
@@ -615,8 +571,8 @@ def test_sync_all_processes_installed_idle_browser(tmp_path: Path) -> None:
          patch("src.config.get_profile_directions", return_value={}):
         engine.sync_all()
 
-    assert (sync_folder / ARCHIVE_NAME).is_file()
-    assert _read_from_archive(sync_folder / ARCHIVE_NAME, "Bookmarks") == '{"roots":{}}'
+    assert (sync_folder / SYNC_DIR_NAME).is_dir()
+    assert (sync_folder / SYNC_DIR_NAME / "Bookmarks").read_text() == '{"roots":{}}'
 
 
 def test_sync_all_no_profiles_found(tmp_path: Path) -> None:
@@ -658,7 +614,7 @@ def test_sync_all_filters_profiles(tmp_path: Path) -> None:
     with patch("src.config.get_enabled_profiles", return_value={"TB": ["Default"]}):
         engine.sync_all()
 
-    assert _file_in_archive(sync_folder / ARCHIVE_NAME, "preferences.json")
+    assert (sync_folder / SYNC_DIR_NAME / "preferences.json").is_file()
 
 
 # ---------------------------------------------------------------------------
@@ -770,7 +726,7 @@ def test_never_sync_files_excluded(tmp_path: Path) -> None:
 
 
 def test_full_round_trip(tmp_path: Path) -> None:
-    """Write profile files → sync → modify archive → sync back → verify profile updated."""
+    """Write profile files → sync to current/ → modify current/ → restore → verify updated."""
     profile = tmp_path / "profile"
     profile.mkdir()
     sync_folder = tmp_path / "sync"
@@ -787,22 +743,16 @@ def test_full_round_trip(tmp_path: Path) -> None:
          patch("src.config.get_profile_directions", return_value={}):
         engine.sync_all()
 
-    # Verify archive contains Bookmarks
-    archive = sync_folder / ARCHIVE_NAME
-    assert archive.is_file()
-    assert _read_from_archive(archive, "Bookmarks") == "v1"
+    # Verify current/ contains Bookmarks v1
+    current_dir = sync_folder / SYNC_DIR_NAME
+    assert current_dir.is_dir()
+    assert (current_dir / "Bookmarks").read_text() == "v1"
 
-    # Step 2: simulate user editing the archive content (unpack, modify, repack)
-    edit_dir = tmp_path / "_edit"
-    unpack_archive(archive, edit_dir)
-    _write_file(edit_dir / "Bookmarks", "v2", mtime=3000.0)
-    pack_to_archive(edit_dir, archive)
-    shutil.rmtree(edit_dir)
+    # Step 2: simulate remote change — directly write v2 into current/
+    _write_file(current_dir / "Bookmarks", "v2", mtime=3000.0)
 
-    with patch("src.config.get_enabled_browsers", return_value={"Chrome": True}), \
-         patch("src.config.get_enabled_profiles", return_value={"Chrome": [profile.name]}), \
-         patch("src.config.get_profile_directions", return_value={}):
-        engine.sync_all()
+    # Step 3: restore from sync folder (simulates watcher-triggered pull)
+    engine.restore_profile_from_backup(profile, current_dir)
 
     # Verify profile was updated with v2
     assert bk_profile.read_text() == "v2"
@@ -832,7 +782,7 @@ def test_sync_all_with_empty_config_skips_browser(tmp_path: Path) -> None:
         engine.sync_all()
 
     # No profiles should be synced when browser has no config entry
-    assert not (sync_folder / ARCHIVE_NAME).exists()
+    assert not (sync_folder / SYNC_DIR_NAME).exists()
 
 
 def test_restore_only_deletes_items_present_in_backup(tmp_path: Path) -> None:

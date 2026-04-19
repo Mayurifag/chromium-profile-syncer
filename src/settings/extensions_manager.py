@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
@@ -97,10 +96,9 @@ class ExtensionsManagerDialog(QDialog):
         self._build_ui()
 
     def _setup_work_dir(self) -> None:
-        from src.sync.archive import ARCHIVE_NAME, unpack_archive
+        from src.sync.sync_dir import SYNC_DIR_NAME
 
-        self._work_dir = Path(tempfile.mkdtemp(prefix="cps-ext-"))
-        unpack_archive(self._sync_folder / ARCHIVE_NAME, self._work_dir)
+        self._work_dir = self._sync_folder / SYNC_DIR_NAME
 
     def _read_extensions(self) -> dict[str, str]:
         assert self._work_dir
@@ -227,15 +225,11 @@ class ExtensionsManagerDialog(QDialog):
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             try:
                 self._apply_deletions()
-                from src.sync.archive import ARCHIVE_NAME, pack_to_archive
-                pack_to_archive(self._work_dir, self._sync_folder / ARCHIVE_NAME)
             finally:
                 QApplication.restoreOverrideCursor()
 
         self.accept()
 
     def done(self, result: int) -> None:
-        if self._work_dir:
-            shutil.rmtree(self._work_dir, ignore_errors=True)
-            self._work_dir = None
+        self._work_dir = None
         super().done(result)

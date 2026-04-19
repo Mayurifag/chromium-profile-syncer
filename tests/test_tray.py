@@ -5,7 +5,7 @@ from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
-from src.sync.archive import ARCHIVE_NAME
+from src.sync.sync_dir import SYNC_DIR_NAME
 
 PySide6 = pytest.importorskip("PySide6")
 
@@ -227,7 +227,7 @@ def test_file_watcher_ignores_changes_when_paused(qapp, tmp_path):
     tray._watcher_paused = True
 
     # File changed event should be ignored (no debounce scheduled)
-    tray._on_file_changed(str(tmp_path / ARCHIVE_NAME))
+    tray._on_file_changed(str(tmp_path / SYNC_DIR_NAME / "metadata.json"))
     assert not tray._debounce_timer.isActive()
 
     # Directory changed event should be ignored
@@ -236,7 +236,7 @@ def test_file_watcher_ignores_changes_when_paused(qapp, tmp_path):
 
     # When not paused, events should trigger debounce
     tray._watcher_paused = False
-    tray._on_file_changed(str(tmp_path / ARCHIVE_NAME))
+    tray._on_file_changed(str(tmp_path / SYNC_DIR_NAME / "metadata.json"))
     assert tray._debounce_timer.isActive()
 
 

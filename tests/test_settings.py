@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 import src.config as config_module
-from src.sync.archive import ARCHIVE_NAME
+from src.sync.sync_dir import SYNC_DIR_NAME
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -193,7 +193,7 @@ def test_settings_dialog_profile_states_populated(qapp, tmp_path):
 
     sync_folder = tmp_path / "sync"
     sync_folder.mkdir()
-    (sync_folder / ARCHIVE_NAME).touch()
+    (sync_folder / SYNC_DIR_NAME).mkdir()
     config_module.set_sync_folder(sync_folder)
 
     mock = _MockBrowser("Chrome", profiles=["Default", "Profile 1", "Profile 2"])
@@ -209,7 +209,7 @@ def test_rebuild_profiles_synced_profile_enabled(qapp, tmp_path):
 
     sync_folder = tmp_path / "sync"
     sync_folder.mkdir()
-    (sync_folder / ARCHIVE_NAME).touch()
+    (sync_folder / SYNC_DIR_NAME).mkdir()
 
     # Save Default profile to config (simulating user enabling it)
     config_module.set_enabled_profiles({"Chrome": ["Default"]})
@@ -265,12 +265,14 @@ def test_initial_upload_only_one_profile_enabled(qapp, tmp_path):
     # Simulate initial upload of ONLY Default profile
     import shutil
 
-    from src.sync.archive import pack_to_archive
+    from src.sync.sync_dir import merge_to_sync_dir
     engine = SyncEngine(sync_folder)
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     engine.sync_browser_profile(default, work_dir, direction="push")
-    pack_to_archive(work_dir, sync_folder / ARCHIVE_NAME)
+    current_dir = sync_folder / SYNC_DIR_NAME
+    merge_to_sync_dir(work_dir, current_dir)
+    (current_dir / "metadata.json").write_text("{}", encoding="utf-8")
     shutil.rmtree(work_dir)
 
     # Save Default profile to config (this is what initial upload dialog does)
@@ -295,7 +297,7 @@ def test_initial_upload_only_one_profile_enabled(qapp, tmp_path):
 
 
 def test_sync_folder_has_profile(qapp, tmp_path):
-    """_sync_folder_has_profile detects current.tar."""
+    """_sync_folder_has_profile detects current/ directory."""
     from src.settings import _sync_folder_has_profile
 
     sync_folder = tmp_path / "sync"
@@ -304,7 +306,7 @@ def test_sync_folder_has_profile(qapp, tmp_path):
     sync_folder.mkdir()
     assert not _sync_folder_has_profile(sync_folder)
 
-    (sync_folder / ARCHIVE_NAME).touch()
+    (sync_folder / SYNC_DIR_NAME).mkdir()
     assert _sync_folder_has_profile(sync_folder)
 
 
@@ -325,15 +327,17 @@ def test_clean_then_upload_clears_old_profiles(qapp, tmp_path):
         p.mkdir(parents=True)
         (p / "Preferences").write_text("{}", encoding="utf-8")
 
-    # Sync Default initially to current.tar
+    # Sync Default initially to current/
     import shutil
 
-    from src.sync.archive import pack_to_archive
+    from src.sync.sync_dir import merge_to_sync_dir
     engine = SyncEngine(sync_folder)
     work_dir = tmp_path / "work1"
     work_dir.mkdir()
     engine.sync_browser_profile(default, work_dir, direction="push")
-    pack_to_archive(work_dir, sync_folder / ARCHIVE_NAME)
+    current_dir = sync_folder / SYNC_DIR_NAME
+    merge_to_sync_dir(work_dir, current_dir)
+    (current_dir / "metadata.json").write_text("{}", encoding="utf-8")
     shutil.rmtree(work_dir)
 
     # Save to config
@@ -343,7 +347,7 @@ def test_clean_then_upload_clears_old_profiles(qapp, tmp_path):
     assert _sync_folder_has_profile(sync_folder)
 
     # Simulate Clean button: delete sync data and clear config
-    (sync_folder / ARCHIVE_NAME).unlink()
+    shutil.rmtree(sync_folder / SYNC_DIR_NAME)
     config_module.set_enabled_profiles({})
     config_module.set_enabled_browsers({})
 
@@ -355,7 +359,9 @@ def test_clean_then_upload_clears_old_profiles(qapp, tmp_path):
     work_dir2 = tmp_path / "work2"
     work_dir2.mkdir()
     engine.sync_browser_profile(default, work_dir2, direction="push")
-    pack_to_archive(work_dir2, sync_folder / ARCHIVE_NAME)
+    current_dir2 = sync_folder / SYNC_DIR_NAME
+    merge_to_sync_dir(work_dir2, current_dir2)
+    (current_dir2 / "metadata.json").write_text("{}", encoding="utf-8")
     shutil.rmtree(work_dir2)
 
     # Save Default to config (simulating initial upload dialog)
@@ -410,7 +416,7 @@ def test_load_current_settings_with_data_calls_rebuild_not_upload(qapp, tmp_path
 
     sync_folder = tmp_path / "sync"
     sync_folder.mkdir()
-    (sync_folder / ARCHIVE_NAME).touch()
+    (sync_folder / SYNC_DIR_NAME).mkdir()
     config_module.set_sync_folder(sync_folder)
 
     mock = _MockBrowser("Chrome", profiles=["Default"])

@@ -18,7 +18,7 @@ from src.dracula import APP_ICON_SVG, ICON_COLORS
 from src.help_dialog import HelpDialog
 from src.rclone import find_rclone
 from src.settings import SettingsDialog
-from src.sync.archive import ARCHIVE_NAME as _ARCHIVE_NAME
+from src.sync.sync_dir import SYNC_DIR_NAME as _SYNC_DIR_NAME
 from src.sync_engine import SyncEngine
 from src.sync_worker import SyncWorker
 
@@ -57,8 +57,7 @@ class TrayApp(QSystemTrayIcon):
         self._settings_dialog: SettingsDialog | None = None
         self._last_sync: str = self._config.get_last_sync()
         self._last_error: str = ""
-        self._last_tar_mtime: float | None = None
-        self._last_tar_size: int | None = None
+        self._last_metadata_mtime: float | None = None
 
         installed_browsers = [b for b in ALL_BROWSERS if b.is_installed()]
         self._browser_monitor = BrowserMonitor(installed_browsers, parent=self)
@@ -173,18 +172,15 @@ class TrayApp(QSystemTrayIcon):
         logger.debug("Debounce timer reset (2s)")
 
     def _on_debounce_fired(self) -> None:
-        if self._last_tar_mtime is not None or self._last_tar_size is not None:
+        if self._last_metadata_mtime is not None:
             sync_folder = self._config.get_sync_folder()
             if sync_folder is not None:
-                tar = sync_folder / _ARCHIVE_NAME
-                if tar.exists():
+                metadata = sync_folder / _SYNC_DIR_NAME / "metadata.json"
+                if metadata.exists():
                     try:
-                        st = tar.stat()
-                        if st.st_mtime == self._last_tar_mtime:
-                            logger.debug("Watcher fired but %s unchanged — skipping", _ARCHIVE_NAME)
-                            return
-                        if self._last_tar_size is not None and st.st_size == self._last_tar_size:
-                            logger.debug("cloud touched mtime but size unchanged — skipping")
+                        st = metadata.stat()
+                        if st.st_mtime == self._last_metadata_mtime:
+                            logger.debug("Watcher fired but metadata.json unchanged — skipping")
                             return
                     except OSError:
                         pass
@@ -208,15 +204,12 @@ class TrayApp(QSystemTrayIcon):
     def _resume_watcher(self) -> None:
         sync_folder = self._config.get_sync_folder()
         if sync_folder is not None:
-            tar = sync_folder / _ARCHIVE_NAME
+            metadata = sync_folder / _SYNC_DIR_NAME / "metadata.json"
             try:
-                if tar.exists():
-                    st = tar.stat()
-                    self._last_tar_mtime = st.st_mtime
-                    self._last_tar_size = st.st_size
+                if metadata.exists():
+                    self._last_metadata_mtime = metadata.stat().st_mtime
                 else:
-                    self._last_tar_mtime = None
-                    self._last_tar_size = None
+                    self._last_metadata_mtime = None
             except OSError:
                 pass
         self._watcher_paused = False
@@ -260,18 +253,14 @@ class TrayApp(QSystemTrayIcon):
         self._engine = SyncEngine(sync_folder)
         logger.info("Settings saved — engine rebuilt with folder %s", sync_folder)
 
-        tar = sync_folder / _ARCHIVE_NAME
+        metadata = sync_folder / _SYNC_DIR_NAME / "metadata.json"
         try:
-            if tar.exists():
-                st = tar.stat()
-                self._last_tar_mtime = st.st_mtime
-                self._last_tar_size = st.st_size
+            if metadata.exists():
+                self._last_metadata_mtime = metadata.stat().st_mtime
             else:
-                self._last_tar_mtime = None
-                self._last_tar_size = None
+                self._last_metadata_mtime = None
         except OSError:
-            self._last_tar_mtime = None
-            self._last_tar_size = None
+            self._last_metadata_mtime = None
 
         self._teardown_watcher()
         self._setup_watcher(sync_folder)
@@ -370,18 +359,14 @@ class TrayApp(QSystemTrayIcon):
 
         sync_folder = self._config.get_sync_folder()
         if sync_folder is not None:
-            tar = sync_folder / _ARCHIVE_NAME
+            metadata = sync_folder / _SYNC_DIR_NAME / "metadata.json"
             try:
-                if tar.exists():
-                    st = tar.stat()
-                    self._last_tar_mtime = st.st_mtime
-                    self._last_tar_size = st.st_size
+                if metadata.exists():
+                    self._last_metadata_mtime = metadata.stat().st_mtime
                 else:
-                    self._last_tar_mtime = None
-                    self._last_tar_size = None
+                    self._last_metadata_mtime = None
             except OSError:
-                self._last_tar_mtime = None
-                self._last_tar_size = None
+                self._last_metadata_mtime = None
             self._config.set_last_sync(last_sync)
 
         if is_first_sync:

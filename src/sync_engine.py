@@ -10,12 +10,12 @@ from typing import TYPE_CHECKING
 
 import src.config as _config
 from src import rclone as _rclone
-from src.sync import archive as _archive
 from src.sync import extensions as _extensions
 from src.sync import history as _history
 from src.sync import leveldb as _leveldb
 from src.sync import prefs as _prefs
 from src.sync import shortcuts as _shortcuts
+from src.sync import sync_dir as _sync_dir
 
 if TYPE_CHECKING:
     from src.browsers.base import BrowserBase
@@ -253,36 +253,31 @@ class SyncEngine:
 
         _LOG.info("Profile restore complete: %s", profile_path.name)
 
-    def restore_from_archive(
+    def restore_from_sync_folder(
         self,
-        tar_path: Path,
         browsers: list[BrowserBase],
         on_progress: Callable[[str], None] | None = None,
     ) -> None:
-        work_dir = Path(tempfile.mkdtemp(prefix="cps-restore-"))
-        try:
-            _archive.unpack_archive(tar_path, work_dir)
-            ungoogled_only = _config.get_ungoogled_only_extensions()
-            windows_only = _config.get_windows_only_extensions()
-            for b in browsers:
-                if not b.is_installed():
-                    _LOG.info("%s: not installed — skipping", b.name)
-                    continue
-                profiles = b.discover_profiles()
-                if not profiles:
-                    _LOG.info("%s: no profiles found — skipping", b.name)
-                    continue
-                for profile_path in profiles:
-                    self.restore_profile_from_backup(
-                        profile_path, work_dir, browser=b, on_progress=on_progress,
-                    )
-                    _extensions.install_external_extensions(
-                        work_dir, b,
-                        ungoogled_only_ext_ids=ungoogled_only,
-                        windows_only_ext_ids=windows_only,
-                    )
-        finally:
-            shutil.rmtree(work_dir)
+        current_dir = self.sync_folder / _sync_dir.SYNC_DIR_NAME
+        ungoogled_only = _config.get_ungoogled_only_extensions()
+        windows_only = _config.get_windows_only_extensions()
+        for b in browsers:
+            if not b.is_installed():
+                _LOG.info("%s: not installed — skipping", b.name)
+                continue
+            profiles = b.discover_profiles()
+            if not profiles:
+                _LOG.info("%s: no profiles found — skipping", b.name)
+                continue
+            for profile_path in profiles:
+                self.restore_profile_from_backup(
+                    profile_path, current_dir, browser=b, on_progress=on_progress,
+                )
+                _extensions.install_external_extensions(
+                    current_dir, b,
+                    ungoogled_only_ext_ids=ungoogled_only,
+                    windows_only_ext_ids=windows_only,
+                )
 
     def _translate_ext_aliases(
         self, work_dir: Path, aliases: dict[str, str], *, to_alias: bool
@@ -354,16 +349,18 @@ class SyncEngine:
         windows_only_ext_ids: list[str],
     ) -> None:
         aliases = browser.ext_id_aliases
+        current_dir = self.sync_folder / _sync_dir.SYNC_DIR_NAME
+        restore_src = current_dir if needs_restore else work_dir
         if aliases:
-            self._translate_ext_aliases(work_dir, aliases, to_alias=True)
+            self._translate_ext_aliases(restore_src, aliases, to_alias=True)
         try:
             if needs_restore:
                 self.restore_profile_from_backup(
-                    profile_path, work_dir, data_types,
+                    profile_path, current_dir, data_types,
                     browser=browser, on_progress=self._progress_cb,
                 )
                 _extensions.install_external_extensions(
-                    work_dir, browser,
+                    current_dir, browser,
                     ungoogled_only_ext_ids=ungoogled_only_ext_ids,
                     windows_only_ext_ids=windows_only_ext_ids,
                 )
@@ -383,7 +380,7 @@ class SyncEngine:
                     )
         finally:
             if aliases:
-                self._translate_ext_aliases(work_dir, aliases, to_alias=False)
+                self._translate_ext_aliases(restore_src, aliases, to_alias=False)
 
     def sync_all(
         self,
@@ -399,7 +396,7 @@ class SyncEngine:
         profiles_needing_restore = _config.get_profiles_needing_restore()
         data_types = DEFAULT_DATA_TYPES
 
-        is_first_sync = not (self.sync_folder / _archive.ARCHIVE_NAME).exists()
+        is_first_sync = not (self.sync_folder / _sync_dir.SYNC_DIR_NAME / "metadata.json").exists()
         self._synced_count = 0
         self._skipped_count = 0
         skipped_running: list[str] = []
@@ -429,7 +426,7 @@ class SyncEngine:
             )
             return {"is_first_sync": is_first_sync, "skipped_running": running_names}
 
-        current_archive = self.sync_folder / _archive.ARCHIVE_NAME
+        current_dir = self.sync_folder / _sync_dir.SYNC_DIR_NAME
         work_dir = Path(tempfile.mkdtemp(prefix="cps-work-"))
 
         ungoogled_only_ext_ids = _config.get_ungoogled_only_extensions()
@@ -438,10 +435,6 @@ class SyncEngine:
 
         success = False
         try:
-            if current_archive.exists():
-                self._report("Unpacking...")
-                _archive.unpack_archive(current_archive, work_dir)
-
             self._prune_excluded_from_work(work_dir, excluded_ext_ids)
 
             for browser in browsers_to_sync:
@@ -505,9 +498,9 @@ class SyncEngine:
             success = True
         finally:
             if success and any(work_dir.iterdir()):
-                if _archive.validate_archive_content(work_dir):
-                    self._report("Packing...")
-                    _archive.pack_to_archive(work_dir, current_archive)
+                self._report("Syncing to folder...")
+                _sync_dir.merge_to_sync_dir(work_dir, current_dir)
+                (current_dir / "metadata.json").write_text("{}", encoding="utf-8")
             shutil.rmtree(work_dir)
 
         summary = (

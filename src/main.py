@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication
 
 from src import autostart, config, single_instance
 from src.dracula import DRACULA_STYLESHEET
-from src.sync.archive import ARCHIVE_NAME as _ARCHIVE_NAME
+from src.sync.sync_dir import SYNC_DIR_NAME as _SYNC_DIR_NAME
 from src.sync_engine import SyncEngine
 from src.tray import TrayApp, make_app_icon
 
@@ -25,7 +25,7 @@ def main() -> None:
     parser.add_argument(
         "--remove-profile",
         metavar="BROWSER",
-        help="Delete browser profile from disk, remove from config, delete archive, then exit",
+        help="Delete browser profile from disk, remove from config, delete sync data, then exit",
     )
     parser.add_argument(
         "--sync",
@@ -33,14 +33,9 @@ def main() -> None:
         help="Run sync (respects config; combine with --browser/--profile/--direction), then exit",
     )
     parser.add_argument(
-        "--restore-from",
-        metavar="TAR",
-        help="Restore profile data from a tar archive, then exit",
-    )
-    parser.add_argument(
         "--browser",
         metavar="BROWSER",
-        help="Target browser (for --sync or --restore-from)",
+        help="Target browser (for --sync)",
     )
     parser.add_argument(
         "--profile",
@@ -74,10 +69,10 @@ def main() -> None:
         config.remove_browser_profile(browser.name)
         sync_folder = config.get_sync_folder()
         if sync_folder:
-            archive = sync_folder / _ARCHIVE_NAME
-            if archive.is_file():
-                archive.unlink()
-                print(f"Deleted {archive}")
+            current_dir = sync_folder / _SYNC_DIR_NAME
+            if current_dir.is_dir():
+                shutil.rmtree(current_dir)
+                print(f"Deleted {current_dir}")
         print(f"Profile '{browser.name}' removed. Start the app to upload fresh.")
         sys.exit(0)
 
@@ -97,32 +92,6 @@ def main() -> None:
         skipped = result.get("skipped_running", [])
         if skipped:
             print(f"Skipped (running): {', '.join(skipped)}")
-        sys.exit(0)
-
-    if args.restore_from:
-        from src.browsers import ALL_BROWSERS, get_browser
-
-        logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-
-        tar_path = pathlib.Path(args.restore_from).expanduser().resolve()
-        if not tar_path.exists():
-            print(f"Archive not found: {tar_path}")
-            sys.exit(1)
-
-        if args.browser:
-            browser = get_browser(args.browser)
-            if browser is None:
-                print(f"Unknown browser: {args.browser}")
-                sys.exit(1)
-            target_browsers = [browser]
-        else:
-            target_browsers = list(ALL_BROWSERS)
-
-        engine = SyncEngine(tar_path.parent)
-        engine.restore_from_archive(
-            tar_path, target_browsers, on_progress=lambda m: print(f"  {m}"),
-        )
-        print("Restore complete.")
         sys.exit(0)
 
     logging.basicConfig(

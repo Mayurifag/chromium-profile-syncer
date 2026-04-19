@@ -33,7 +33,7 @@ from src.settings._helpers import (
 )
 from src.settings.initial_upload import InitialUploadDialog
 from src.shortcuts_editor import ShortcutsEditorDialog
-from src.sync.archive import ARCHIVE_NAME
+from src.sync.sync_dir import SYNC_DIR_NAME
 
 _LOG = logging.getLogger(__name__)
 
@@ -614,11 +614,12 @@ class SettingsDialog(QDialog):
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-        target = folder / ARCHIVE_NAME
+        target = folder / SYNC_DIR_NAME
         try:
-            if target.is_file():
-                target.unlink()
-                _LOG.info("Deleted file: %s", target)
+            if target.is_dir():
+                import shutil
+                shutil.rmtree(target)
+                _LOG.info("Deleted folder: %s", target)
         except OSError:
             _LOG.exception("Failed to delete: %s", target)
 
@@ -629,63 +630,51 @@ class SettingsDialog(QDialog):
         if self._folder_edit:
             self._folder_edit.textChanged.emit(folder_text)
 
-    def _get_archive_or_warn(self) -> Path | None:
+    def _get_sync_dir_or_warn(self) -> Path | None:
         from PySide6.QtWidgets import QMessageBox
 
         sync_folder = config_module.get_sync_folder()
         if not sync_folder or not sync_folder.exists():
             QMessageBox.warning(self, "No Sync Folder", "Please configure a sync folder first.")
             return None
-        archive = sync_folder / ARCHIVE_NAME
-        if not archive.exists():
+        current_dir = sync_folder / SYNC_DIR_NAME
+        if not current_dir.is_dir():
             QMessageBox.information(
                 self, "No Backup",
-                "No backup archive found.\n\nRun a sync first to create the backup.",
+                "No backup found.\n\nRun a sync first to create the backup.",
             )
             return None
-        return archive
+        return current_dir
 
     def _open_shortcuts_editor(self) -> None:
-        import shutil
-        import tempfile
-
         from PySide6.QtWidgets import QMessageBox
 
-        from src.sync.archive import pack_to_archive, unpack_archive
-
-        archive = self._get_archive_or_warn()
-        if archive is None:
+        current_dir = self._get_sync_dir_or_warn()
+        if current_dir is None:
             return
 
-        work_dir = Path(tempfile.mkdtemp(prefix="cps-edit-"))
-        try:
-            unpack_archive(archive, work_dir)
-            shortcuts_json_path = work_dir / "search_shortcuts.json"
-            if not shortcuts_json_path.exists():
-                QMessageBox.information(
-                    self, "No Shortcuts Yet",
-                    "Search shortcuts haven't been extracted yet.\n\n"
-                    "They will be created on the next sync.",
-                )
-                return
-            editor = ShortcutsEditorDialog(self, shortcuts_json_path=shortcuts_json_path)
-            if editor.exec() == QDialog.DialogCode.Accepted:
-                pack_to_archive(work_dir, archive)
-        finally:
-            shutil.rmtree(work_dir, ignore_errors=True)
+        shortcuts_json_path = current_dir / "search_shortcuts.json"
+        if not shortcuts_json_path.exists():
+            QMessageBox.information(
+                self, "No Shortcuts Yet",
+                "Search shortcuts haven't been extracted yet.\n\n"
+                "They will be created on the next sync.",
+            )
+            return
+        editor = ShortcutsEditorDialog(self, shortcuts_json_path=shortcuts_json_path)
+        editor.exec()
 
     def _open_extension_links(self) -> None:
         from PySide6.QtWidgets import QMessageBox
 
         from src.settings.extensions_manager import ExtensionsManagerDialog
 
-        archive = self._get_archive_or_warn()
-        if archive is None:
+        current_dir = self._get_sync_dir_or_warn()
+        if current_dir is None:
             return
 
-        sync_folder = archive.parent
         try:
-            dlg = ExtensionsManagerDialog(self, sync_folder=sync_folder)
+            dlg = ExtensionsManagerDialog(self, sync_folder=current_dir.parent)
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to open extensions manager:\n{exc}")
             return
