@@ -135,7 +135,7 @@ class SettingsDialog(QDialog):
         edit_shortcuts_btn.clicked.connect(self._open_shortcuts_editor)
         selects_layout.addWidget(edit_shortcuts_btn)
 
-        view_ext_btn = QPushButton("Edit Extensions")
+        view_ext_btn = QPushButton("Extensions")
         view_ext_btn.clicked.connect(self._open_extension_links)
         selects_layout.addWidget(view_ext_btn)
 
@@ -684,11 +684,8 @@ class SettingsDialog(QDialog):
             return
 
         sync_folder = archive.parent
-        browser_names = [b.name for b in self._browsers]
         try:
-            dlg = ExtensionsManagerDialog(
-                self, sync_folder=sync_folder, available_browsers=browser_names
-            )
+            dlg = ExtensionsManagerDialog(self, sync_folder=sync_folder)
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to open extensions manager:\n{exc}")
             return

@@ -34,6 +34,10 @@ DEFAULT_DATA_TYPES: dict[str, bool] = {
     "typed_urls": True,
 }
 
+_LDB_CACHE_SKIP_PREFIXES: dict[str, tuple[bytes, ...]] = {
+    "cjpalhdlnbpafiamejdnhcphjbkeiagm": (b"cache/", b"compiled/", b"selfie/"),
+}
+
 _LOG = logging.getLogger(__name__)
 
 
@@ -100,7 +104,6 @@ class SyncEngine:
         direction: str = "both",
         on_progress: Callable[[str], None] | None = None,
         ext_id_aliases: dict[str, str] | None = None,
-        browser_restricted_ext_ids: set[str] | None = None,
     ) -> None:
         self._progress_cb = on_progress
         dt = data_types or {}
@@ -108,16 +111,19 @@ class SyncEngine:
         _LOG.info("Syncing profile: %s ↔ %s", profile_path, sync_profile_path)
 
         if dt.get("extensions", True):
-            excluded_ext_ids = set(_config.get_excluded_ext_settings_ids())
-            skip = excluded_ext_ids | (browser_restricted_ext_ids or set())
+            skip = set(_config.get_excluded_ext_settings_ids())
             if direction in ("push", "both"):
                 _extensions.update_webstore_manifest(
                     profile_path, sync_profile_path, ext_id_aliases
                 )
 
+            les_key_filter = {
+                k: v for k, v in _LDB_CACHE_SKIP_PREFIXES.items() if k not in skip
+            }
             self._sync_leveldb(
                 profile_path, sync_profile_path, "Local Extension Settings", direction,
                 name_filter=lambda n, s=skip: n not in s,
+                key_skip_prefixes=les_key_filter or None,
             )
             self._sync_leveldb(
                 profile_path, sync_profile_path, "Sync Extension Settings", direction
@@ -174,7 +180,6 @@ class SyncEngine:
         *,
         browser: BrowserBase | None = None,
         on_progress: Callable[[str], None] | None = None,
-        browser_restricted_ext_ids: list[str] | None = None,
     ) -> None:
         self._progress_cb = on_progress
         dt = data_types or {}
@@ -226,10 +231,6 @@ class SyncEngine:
             cmd += ["--exclude", f"Local Extension Settings/{ext_id}/**"]
             cmd += ["--exclude", f"IndexedDB/chrome-extension_{ext_id}_*/**"]
 
-        for ext_id in (browser_restricted_ext_ids or []):
-            cmd += ["--exclude", f"Local Extension Settings/{ext_id}/**"]
-            cmd += ["--exclude", f"IndexedDB/chrome-extension_{ext_id}_*/**"]
-
         _rclone.run(cmd, "Restoring from backup", self._report)
 
         json_path = sync_profile_path / "preferences.json"
@@ -262,7 +263,7 @@ class SyncEngine:
         try:
             _archive.unpack_archive(tar_path, work_dir)
             ungoogled_only = _config.get_ungoogled_only_extensions()
-            ext_restrictions = _config.get_extension_browser_restrictions()
+            windows_only = _config.get_windows_only_extensions()
             for b in browsers:
                 if not b.is_installed():
                     _LOG.info("%s: not installed — skipping", b.name)
@@ -272,18 +273,13 @@ class SyncEngine:
                     _LOG.info("%s: no profiles found — skipping", b.name)
                     continue
                 for profile_path in profiles:
-                    browser_restricted = [
-                        eid for eid, browsers in ext_restrictions.items()
-                        if browsers and b.name not in browsers
-                    ]
                     self.restore_profile_from_backup(
                         profile_path, work_dir, browser=b, on_progress=on_progress,
-                        browser_restricted_ext_ids=browser_restricted,
                     )
                     _extensions.install_external_extensions(
                         work_dir, b,
                         ungoogled_only_ext_ids=ungoogled_only,
-                        browser_restrictions=ext_restrictions,
+                        windows_only_ext_ids=windows_only,
                     )
         finally:
             shutil.rmtree(work_dir)
@@ -355,13 +351,9 @@ class SyncEngine:
         force_direction: str | None,
         data_types: dict[str, bool],
         ungoogled_only_ext_ids: list[str],
-        ext_browser_restrictions: dict[str, list[str]],
+        windows_only_ext_ids: list[str],
     ) -> None:
         aliases = browser.ext_id_aliases
-        browser_restricted = [
-            eid for eid, browsers in ext_browser_restrictions.items()
-            if browsers and browser.name not in browsers
-        ]
         if aliases:
             self._translate_ext_aliases(work_dir, aliases, to_alias=True)
         try:
@@ -369,12 +361,11 @@ class SyncEngine:
                 self.restore_profile_from_backup(
                     profile_path, work_dir, data_types,
                     browser=browser, on_progress=self._progress_cb,
-                    browser_restricted_ext_ids=browser_restricted,
                 )
                 _extensions.install_external_extensions(
                     work_dir, browser,
                     ungoogled_only_ext_ids=ungoogled_only_ext_ids,
-                    browser_restrictions=ext_browser_restrictions,
+                    windows_only_ext_ids=windows_only_ext_ids,
                 )
                 if force_direction != "pull":
                     _config.clear_restore_flag(browser.name, profile_path.name)
@@ -383,13 +374,12 @@ class SyncEngine:
                     profile_path, work_dir, data_types,
                     direction=direction, on_progress=self._progress_cb,
                     ext_id_aliases=aliases or None,
-                    browser_restricted_ext_ids=set(browser_restricted),
                 )
                 if direction in ("pull", "both"):
                     _extensions.install_external_extensions(
                         work_dir, browser,
                         ungoogled_only_ext_ids=ungoogled_only_ext_ids,
-                        browser_restrictions=ext_browser_restrictions,
+                        windows_only_ext_ids=windows_only_ext_ids,
                     )
         finally:
             if aliases:
@@ -443,8 +433,8 @@ class SyncEngine:
         work_dir = Path(tempfile.mkdtemp(prefix="cps-work-"))
 
         ungoogled_only_ext_ids = _config.get_ungoogled_only_extensions()
+        windows_only_ext_ids = _config.get_windows_only_extensions()
         excluded_ext_ids = _config.get_excluded_ext_settings_ids()
-        ext_browser_restrictions = _config.get_extension_browser_restrictions()
 
         success = False
         try:
@@ -503,7 +493,7 @@ class SyncEngine:
                         self._sync_single_profile(
                             browser, profile_path, work_dir, direction, needs_restore,
                             force_direction, data_types, ungoogled_only_ext_ids,
-                            ext_browser_restrictions,
+                            windows_only_ext_ids,
                         )
                     except OSError:
                         _LOG.exception(

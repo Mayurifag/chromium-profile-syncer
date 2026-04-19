@@ -94,7 +94,7 @@ Extracts user-created search engines (`prepopulate_id = 0`) from `Web Data` SQLi
 - Default engine: `sync_guid` must match `Preferences["default_search_provider"]["guid"]`
 - All others: `sync_guid = ""` (local-only; Chrome deletes unknown UUIDs on reconciliation)
 
-**Restore scope:** `DELETE FROM keywords` — wipe all engines (built-ins included), reinsert only synced shortcuts starting at ID 1.
+**Restore scope:** `DELETE FROM keywords` — wipe all engines (built-ins included), reinsert only synced shortcuts starting at ID 1. Then bump `meta.'Builtin Keyword Version'` to `99999` — without this, Chromium/Helium detects missing built-ins on startup and repopulates them (Helium uses `meta` table, not `keywords_metadata`).
 
 **Choice screen:** Helium (and Chromium 127+) enables a search-engine choice screen. Until all three completion keys are present in Preferences, `GetChoiceCompletionMetadata` returns an error and the service wipes the record, ignoring `default_search_provider.guid`:
 - `default_search_provider.choice_screen_completion_timestamp` — **JSON string** (not int!), seconds since Windows epoch (1601-01-01); integer type silently fails validation

@@ -3,7 +3,13 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QVBoxLayout
 
-_CHEATSHEET = """<h3>After restoring to a new machine / fresh profile</h3>
+_CHEATSHEET = """<h3>Restoring to a new machine / fresh profile</h3>
+
+<b>Flow</b><br>
+1. Launch the target browser once to initialize its profile, then <b>close it completely</b>.<br>
+2. In this app, select the browser and profile, then click <i>Apply backup</i>.<br>
+3. Follow the steps below, then relaunch the browser.
+<br><br>
 
 <b>Extensions — Chrome / Thorium</b><br>
 Go to <code>chrome://extensions</code> and enable each extension manually (one by one).
@@ -18,11 +24,7 @@ The app generates install stubs, but Helium needs a user-initiated install per e
 1. Open Settings → <i>Edit Search Shortcuts</i>.<br>
 2. Check <i>Default</i> on your preferred shortcut.<br>
 3. Remove any bundled search engine you don't want.<br>
-4. Save.
-<br><br>
-
-<b>Favicons</b><br>
-Favicons are not synced. Visit your bookmarked and shortcut sites to restore them."""
+4. Save."""
 
 
 class HelpDialog(QDialog):

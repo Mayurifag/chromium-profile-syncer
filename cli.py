@@ -113,6 +113,7 @@ def cmd_restore(args: argparse.Namespace) -> int:
         _archive.unpack_archive(archive_path, work_dir)
         engine = SyncEngine(sf)
         ungoogled_only_ext_ids = config.get_ungoogled_only_extensions()
+        windows_only_ext_ids = config.get_windows_only_extensions()
         ext_restrictions = config.get_extension_browser_restrictions()
         aliases = browser.ext_id_aliases
         for profile_path in profiles:
@@ -129,6 +130,7 @@ def cmd_restore(args: argparse.Namespace) -> int:
             install_external_extensions(
                 work_dir, browser,
                 ungoogled_only_ext_ids=ungoogled_only_ext_ids,
+                windows_only_ext_ids=windows_only_ext_ids,
                 browser_restrictions=ext_restrictions,
             )
     finally:

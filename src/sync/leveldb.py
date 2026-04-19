@@ -36,7 +36,7 @@ def copy_atomic(
             shutil.rmtree(dst)
         shutil.move(str(tmp), dst)
     except OSError:
-        _LOG.exception("Atomic copy failed: %s → %s (dst untouched)", src, dst)
+        _LOG.exception("Atomic copy failed: %s -> %s (dst untouched)", src, dst)
 
 
 def sync_dir(
@@ -46,6 +46,7 @@ def sync_dir(
     direction: str = "both",
     report: Callable[[str], None] = _noop,
     name_filter: Callable[[str], bool] | None = None,
+    key_skip_prefixes: dict[str, tuple[bytes, ...]] | None = None,
 ) -> tuple[int, int]:
     profile_base = profile_dir / subpath
     sync_base = sync_path / subpath
@@ -58,7 +59,6 @@ def sync_dir(
     if name_filter is not None:
         unit_names = {n for n in unit_names if name_filter(n)}
 
-    # Use lists for thread-safe accumulation (list.append is GIL-protected)
     synced_list: list[int] = []
     skipped_list: list[int] = []
 
@@ -75,7 +75,12 @@ def sync_dir(
         profile_newer = profile_mtime > sync_mtime
         if profile_newer and direction in ("push", "both"):
             sync_base.mkdir(parents=True, exist_ok=True)
-            copy_atomic(profile_unit, sync_unit, report)
+            prefixes = (key_skip_prefixes or {}).get(name)
+            if prefixes and profile_unit.exists():
+                from src.sync.ldb_filter import copy_filtered
+                copy_filtered(profile_unit, sync_unit, prefixes)
+            else:
+                copy_atomic(profile_unit, sync_unit, report)
             synced_list.append(1)
         elif not profile_newer and direction in ("pull", "both"):
             profile_base.mkdir(parents=True, exist_ok=True)

@@ -257,6 +257,9 @@ def update_webstore_manifest(
             webstore_map[canonical] = name if name != ext_id else existing.get(canonical, ext_id)
         elif canonical != ext_id:
             name = _extension_name(best) if best else ""
+            # Don't store internal alias ID as the display name
+            if not name or name == ext_id:
+                name = existing.get(canonical, "")
             webstore_map[canonical] = name
     for alias_id, canonical_id in (aliases or {}).items():
         if canonical_id not in webstore_map:
@@ -287,7 +290,7 @@ def install_external_extensions(
     browser: BrowserBase,
     *,
     ungoogled_only_ext_ids: list[str],
-    browser_restrictions: dict[str, list[str]] | None = None,
+    windows_only_ext_ids: list[str] | None = None,
 ) -> None:
     manifest_path = sync_profile_path / "webstore_extensions.json"
     if not manifest_path.exists():
@@ -321,15 +324,13 @@ def install_external_extensions(
                 skipped, browser.name,
             )
 
-    if browser_restrictions:
+    if windows_only_ext_ids and platform.system() != "Windows":
+        windows_set = set(windows_only_ext_ids)
         before = len(ext_ids)
-        ext_ids = [
-            e for e in ext_ids
-            if not browser_restrictions.get(e) or browser.name in browser_restrictions[e]
-        ]
+        ext_ids = [e for e in ext_ids if e not in windows_set]
         skipped = before - len(ext_ids)
         if skipped:
-            _LOG.info("Skipping %d browser-restricted extension(s) for %s", skipped, browser.name)
+            _LOG.info("Skipping %d windows-only extension(s) on non-Windows platform", skipped)
 
     update_url = browser.web_store_update_url
     on_windows = platform.system() == "Windows"

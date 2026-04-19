@@ -56,29 +56,41 @@ INSTALL_DIR = _get_install_dir()
 INSTALL_PATH = _get_install_path()
 
 
-def _generate_icon() -> Path:
-    from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
+def _render_png(renderer, size: int) -> bytes:
+    from PySide6.QtCore import QBuffer, QIODevice, Qt
     from PySide6.QtGui import QPainter, QPixmap
-    from PySide6.QtSvg import QSvgRenderer
-    from PySide6.QtWidgets import QApplication
 
-    from src.dracula import APP_ICON_SVG
-
-    _app = QApplication.instance() or QApplication(sys.argv)
-
-    renderer = QSvgRenderer(QByteArray(APP_ICON_SVG.encode()))
-    pixmap = QPixmap(256, 256)
+    pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     renderer.render(painter)
     painter.end()
-
     buf = QBuffer()
     buf.open(QIODevice.OpenModeFlag.WriteOnly)
     pixmap.save(buf, "PNG")
-    png_data = bytes(buf.data())
+    data = bytes(buf.data())
     buf.close()
+    return data
 
+
+def _generate_icns(renderer) -> Path:
+    import tempfile
+
+    icns_path = Path("assets") / "icon.icns"
+    icns_path.parent.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        iconset = Path(tmp) / "icon.iconset"
+        iconset.mkdir()
+        for size in (16, 32, 64, 128, 256, 512):
+            (iconset / f"icon_{size}x{size}.png").write_bytes(_render_png(renderer, size))
+            if size * 2 <= 1024:
+                (iconset / f"icon_{size}x{size}@2x.png").write_bytes(_render_png(renderer, size * 2))
+        subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(icns_path)], check=True)
+    return icns_path
+
+
+def _generate_ico(renderer) -> Path:
+    png_data = _render_png(renderer, 256)
     # PNG-in-ICO (supported on Vista+)
     header = struct.pack("<HHH", 0, 1, 1)
     entry = struct.pack("<BBBBHHII", 0, 0, 0, 0, 1, 32, len(png_data), 22)
@@ -86,6 +98,21 @@ def _generate_icon() -> Path:
     ico_path.parent.mkdir(exist_ok=True)
     ico_path.write_bytes(header + entry + png_data)
     return ico_path
+
+
+def _generate_icon() -> Path:
+    from PySide6.QtCore import QByteArray
+    from PySide6.QtSvg import QSvgRenderer
+    from PySide6.QtWidgets import QApplication
+
+    from src.dracula import APP_ICON_SVG
+
+    _app = QApplication.instance() or QApplication(sys.argv)
+    renderer = QSvgRenderer(QByteArray(APP_ICON_SVG.encode()))
+
+    if sys.platform == "darwin":
+        return _generate_icns(renderer)
+    return _generate_ico(renderer)
 
 
 def build() -> Path:

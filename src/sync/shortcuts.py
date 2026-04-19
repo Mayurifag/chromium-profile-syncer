@@ -332,6 +332,15 @@ def restore_search_shortcuts(
                 except sqlite3.OperationalError:
                     _LOG.debug("keywords_metadata unavailable — skipping ID sync")
 
+            # Chromium re-adds missing built-ins on startup when meta.'Builtin Keyword Version'
+            # is below its internal version — bump it so the repopulation path is skipped.
+            try:
+                cursor.execute(
+                    "UPDATE meta SET value = '99999' WHERE key = 'Builtin Keyword Version'",
+                )
+            except sqlite3.OperationalError:
+                _LOG.debug("meta table unavailable — skipping Builtin Keyword Version patch")
+
             conn.commit()
         finally:
             conn.close()

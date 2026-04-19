@@ -206,9 +206,25 @@ def set_ungoogled_only_extensions(ext_ids: list[str]) -> None:
     _LOG.info("ungoogled_only_extensions updated: %s", ext_ids)
 
 
+_DEFAULT_WINDOWS_ONLY_EXTENSIONS: list[str] = [
+    "jhcpefjbhmbkgjgipkhndplfbhdecijh",  # Country Flag Fixer (Windows-only emoji rendering)
+]
+
+
+def get_windows_only_extensions() -> list[str]:
+    return _get().get("windows_only_extensions", list(_DEFAULT_WINDOWS_ONLY_EXTENSIONS))
+
+
+def set_windows_only_extensions(ext_ids: list[str]) -> None:
+    _get()["windows_only_extensions"] = ext_ids
+    _flush()
+    _LOG.info("windows_only_extensions updated: %s", ext_ids)
+
+
 _DEFAULT_EXCLUDED_EXT_SETTINGS: list[str] = [
     "eimadpbcbfnmbkopoojfekhnkhdbieeh",  # Dark Reader (Newsmaker cache; theme in Sync)
     "jnpglhiolmmfchhpoipnknmffmpmogmc",  # Twitter location cache helper
+    "blockjmkbacgjkknlgpkjjiijinjdanf",  # Helium built-in uBlock (IndexedDB filter cache only)
 ]
 
 
@@ -222,11 +238,3 @@ def set_excluded_ext_settings_ids(ext_ids: list[str]) -> None:
     _LOG.info("excluded_ext_settings_ids updated: %s", ext_ids)
 
 
-def get_extension_browser_restrictions() -> dict[str, list[str]]:
-    return _get().get("extension_browser_restrictions", {})
-
-
-def set_extension_browser_restrictions(restrictions: dict[str, list[str]]) -> None:
-    _get()["extension_browser_restrictions"] = restrictions
-    _flush()
-    _LOG.info("extension_browser_restrictions updated")
