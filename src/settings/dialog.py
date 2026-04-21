@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -37,33 +38,58 @@ from src.sync.sync_dir import SYNC_DIR_NAME
 
 _LOG = logging.getLogger(__name__)
 
+_USAGE_NOTES_HTML = (
+    "<b>Closing browsers</b><br>"
+    "Sync triggers only after browser is <b>fully closed</b>.<br><br>"
+    "On macOS, ✕ hides the window — use <b>⌘Q</b> to quit. "
+    'Or install <a href="https://swiftquit.com">Swift Quit</a> for '
+    "Windows-like behaviour (quits when last window closes).<br><br>"
+    "<b>Restoring to new machine</b><br>"
+    "1. Create fresh profile, close browser, run app.<br>"
+    "2. Select profile → click <i>Apply Backup</i>.<br>"
+    "3. Follow steps below, relaunch browser.<br><br>"
+    "<b>Extensions</b><br>"
+    "Go to Extensions page, enable each manually.<br><br>"
+    "If none, install each from Web Store manually (app generates stubs, "
+    "but ungoogled patches require user-initiated install per extension).<br><br>"
+    "<b>Search shortcuts</b><br>"
+    "After restoration, browsers tend to override your search default entry with theirs. "
+    "Set yours as default, remove bundled shortcut."
+)
+
 
 class SettingsDialog(QDialog):
     settings_saved = Signal()
     sync_requested = Signal()
     apply_backup_requested = Signal(str, str)  # browser, profile
 
-    def __init__(self, parent=None, *, browsers_list: list | None = None,
-                 browser_monitor: BrowserMonitor | None = None):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        browsers_list: list | None = None,
+        browser_monitor: BrowserMonitor | None = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Chromium Profile Syncer — Settings")
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(700)
         self.setSizeGripEnabled(False)
 
         self._browsers = (
-            browsers_list if browsers_list is not None
+            browsers_list
+            if browsers_list is not None
             else [b for b in ALL_BROWSERS if b.is_installed()]
         )
         self._browser_monitor = browser_monitor
 
         self._profile_states: dict[str, dict[str, bool]] = {}
         self._profile_progress: dict[tuple[str, str], tuple[QProgressBar, QLabel]] = {}
-        self._autostart_select: QComboBox | None = None
+        self._autostart_check: QCheckBox | None = None
         self._folder_edit: QLineEdit | None = None
         self._clean_btn: QPushButton | None = None
         self._profiles_group: QGroupBox | None = None
         self._profiles_scroll_layout: QVBoxLayout | None = None
-        self._activity_log_select: QComboBox | None = None
+        self._activity_log_check: QCheckBox | None = None
         self._activity_log: ActivityLogWidget
         self._browser_status_indicators: dict[str, QLabel] = {}
         self._apply_backup_buttons: dict[tuple[str, str], QPushButton] = {}
@@ -77,9 +103,27 @@ class SettingsDialog(QDialog):
         self._connect_browser_monitor()
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setSpacing(4)
+        root = QHBoxLayout(self)
+        root.setSpacing(8)
         root.setContentsMargins(8, 8, 8, 8)
+
+        notes_box = QGroupBox()
+        notes_box.setFixedWidth(260)
+        notes_vbox = QVBoxLayout(notes_box)
+        notes_vbox.setContentsMargins(4, 6, 4, 6)
+        notes_label = QLabel(_USAGE_NOTES_HTML)
+        notes_label.setWordWrap(True)
+        notes_label.setTextFormat(Qt.TextFormat.RichText)
+        notes_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        notes_label.setOpenExternalLinks(True)
+        notes_vbox.addWidget(notes_label)
+        notes_vbox.addStretch()
+        root.addWidget(notes_box)
+
+        right_widget = QWidget()
+        right = QVBoxLayout(right_widget)
+        right.setSpacing(4)
+        right.setContentsMargins(0, 0, 0, 0)
 
         folder_group = QGroupBox("Sync folder")
         folder_layout = QHBoxLayout(folder_group)
@@ -98,36 +142,30 @@ class SettingsDialog(QDialog):
         folder_layout.addWidget(browse_btn)
         folder_layout.addWidget(refresh_btn)
         folder_layout.addWidget(self._clean_btn)
-        root.addWidget(folder_group)
+        right.addWidget(folder_group)
 
         self._profiles_group = QGroupBox("Profiles")
         self._profiles_group.setVisible(False)
         self._profiles_scroll_layout = QVBoxLayout(self._profiles_group)
         self._profiles_scroll_layout.setSpacing(1)
-        root.addWidget(self._profiles_group)
+        right.addWidget(self._profiles_group)
 
         selects_row = QWidget()
         selects_layout = QHBoxLayout(selects_row)
         selects_layout.setContentsMargins(0, 0, 0, 0)
         selects_layout.setSpacing(6)
 
-        selects_layout.addWidget(QLabel("Show activity log:"))
-        self._activity_log_select = QComboBox()
-        self._activity_log_select.addItem("Yes", True)
-        self._activity_log_select.addItem("No", False)
-        self._activity_log_select.setCurrentIndex(0)
-        self._activity_log_select.currentIndexChanged.connect(self._on_activity_log_changed)
-        selects_layout.addWidget(self._activity_log_select)
+        self._activity_log_check = QCheckBox("Show activity log")
+        self._activity_log_check.setChecked(True)
+        self._activity_log_check.toggled.connect(self._on_activity_log_changed)
+        selects_layout.addWidget(self._activity_log_check)
 
         selects_layout.addSpacing(8)
 
-        selects_layout.addWidget(QLabel("Launch on login:"))
-        self._autostart_select = QComboBox()
-        self._autostart_select.addItem("Yes", True)
-        self._autostart_select.addItem("No", False)
-        self._autostart_select.setCurrentIndex(0)
-        self._autostart_select.currentIndexChanged.connect(self._on_autostart_changed)
-        selects_layout.addWidget(self._autostart_select)
+        self._autostart_check = QCheckBox("Launch on login")
+        self._autostart_check.setChecked(True)
+        self._autostart_check.toggled.connect(self._on_autostart_changed)
+        selects_layout.addWidget(self._autostart_check)
 
         selects_layout.addSpacing(8)
 
@@ -141,12 +179,14 @@ class SettingsDialog(QDialog):
 
         selects_layout.addStretch()
         selects_row.setVisible(False)
-        root.addWidget(selects_row)
+        right.addWidget(selects_row)
         self._selects_row = selects_row
 
         self._activity_log = ActivityLogWidget()
         self._activity_log.resized.connect(self.adjustSize)
-        root.addWidget(self._activity_log)
+        right.addWidget(self._activity_log)
+
+        root.addWidget(right_widget, 1)
 
     def _connect_browser_monitor(self) -> None:
         if self._browser_monitor is not None:
@@ -162,8 +202,7 @@ class SettingsDialog(QDialog):
     def _refresh_apply_backup_enabled(self) -> None:
         for (browser_name, _profile_name), btn in self._apply_backup_buttons.items():
             is_running = (
-                self._browser_monitor.is_running(browser_name)
-                if self._browser_monitor else False
+                self._browser_monitor.is_running(browser_name) if self._browser_monitor else False
             )
             btn.setEnabled(not is_running and not self._syncing)
             if is_running:
@@ -209,14 +248,13 @@ class SettingsDialog(QDialog):
         self._activity_log.setVisible(False)
         self.adjustSize()
 
-    def _on_activity_log_changed(self, _index: int) -> None:
-        if self._activity_log_select and self._activity_log_select.currentData():
+    def _on_activity_log_changed(self, checked: bool) -> None:
+        if checked:
             self._activity_log.enable()
         else:
             self._activity_log.disable()
 
-    def _on_autostart_changed(self, _index: int) -> None:
-        checked = self._autostart_select.currentData() if self._autostart_select else True
+    def _on_autostart_changed(self, checked: bool) -> None:
         config_module.set_autostart(checked)
         _LOG.info("Autostart %s", "enabled" if checked else "disabled")
 
@@ -375,18 +413,25 @@ class SettingsDialog(QDialog):
         row_layout.addWidget(info_label)
         layout.addWidget(row)
 
-        def _on_toggle_clicked(checked: bool = False, bn: str = browser_name,
-                               pn: str = profile_name, btn: QPushButton = sync_toggle_btn) -> None:
+        def _on_toggle_clicked(
+            checked: bool = False,
+            bn: str = browser_name,
+            pn: str = profile_name,
+            btn: QPushButton = sync_toggle_btn,
+        ) -> None:
             enabled = config_module.is_profile_sync_enabled(bn, pn)
             config_module.set_profile_sync_enabled(bn, pn, not enabled)
             btn.setText("Auto-sync: ON" if not enabled else "Auto-sync: OFF")
 
         sync_toggle_btn.clicked.connect(_on_toggle_clicked)
 
-        def _on_apply_clicked(checked: bool = False, bn: str = browser_name,
-                              pn: str = profile_name,
-                              s_btn: QPushButton = sync_toggle_btn,
-                              f: Path | None = folder) -> None:
+        def _on_apply_clicked(
+            checked: bool = False,
+            bn: str = browser_name,
+            pn: str = profile_name,
+            s_btn: QPushButton = sync_toggle_btn,
+            f: Path | None = folder,
+        ) -> None:
             _LOG.debug("Apply Backup clicked: %s/%s", bn, pn)
             try:
                 currently = self._profile_states[bn][pn]
@@ -405,6 +450,7 @@ class SettingsDialog(QDialog):
                 self.apply_backup_requested.emit(bn, pn)
             else:
                 from PySide6.QtWidgets import QMessageBox
+
                 reply = QMessageBox.question(
                     self,
                     "Apply Backup",
@@ -446,7 +492,8 @@ class SettingsDialog(QDialog):
             browser_saved = set(saved_profiles.get(browser.name, []))
             is_running = (
                 self._browser_monitor.is_running(browser.name)
-                if self._browser_monitor else browser.is_running()
+                if self._browser_monitor
+                else browser.is_running()
             )
 
             if len(profiles) == 1:
@@ -457,7 +504,12 @@ class SettingsDialog(QDialog):
                 indicator = _make_status_indicator(is_running)
                 self._browser_status_indicators[browser.name] = indicator
                 self._add_profile_row(
-                    layout, browser.name, profile_name, folder, is_running, is_enabled,
+                    layout,
+                    browser.name,
+                    profile_name,
+                    folder,
+                    is_running,
+                    is_enabled,
                     prefix_widgets=[indicator, QLabel(f"<b>{browser.name}</b>")],
                     profile_path=profiles[0],
                 )
@@ -490,7 +542,12 @@ class SettingsDialog(QDialog):
                     spacer = QLabel()
                     spacer.setFixedWidth(12)
                     self._add_profile_row(
-                        layout, browser.name, profile_name, folder, is_running, is_enabled,
+                        layout,
+                        browser.name,
+                        profile_name,
+                        folder,
+                        is_running,
+                        is_enabled,
                         prefix_widgets=[spacer, QLabel(f"• {display}")],
                         profile_path=profile_path,
                     )
@@ -504,15 +561,14 @@ class SettingsDialog(QDialog):
             self._profiles_group.setVisible(True)
         if self._selects_row:
             self._selects_row.setVisible(True)
-        if self._activity_log_select and self._activity_log_select.currentData():
+        if self._activity_log_check and self._activity_log_check.isChecked():
             self._activity_log.enable()
 
         self.adjustSize()
 
     def _save_profiles_config(self) -> None:
         enabled_profiles: dict[str, list[str]] = {
-            bn: [pn for pn, on in pm.items() if on]
-            for bn, pm in self._profile_states.items()
+            bn: [pn for pn, on in pm.items() if on] for bn, pm in self._profile_states.items()
         }
         enabled_browsers: dict[str, bool] = {
             bn: any(pm.values()) for bn, pm in self._profile_states.items()
@@ -534,8 +590,7 @@ class SettingsDialog(QDialog):
         from PySide6.QtWidgets import QMessageBox
 
         is_running = (
-            self._browser_monitor.is_running(browser_name)
-            if self._browser_monitor else False
+            self._browser_monitor.is_running(browser_name) if self._browser_monitor else False
         )
         if is_running:
             QMessageBox.warning(self, "Browser Running", _CLOSE_BROWSER_HINT)
@@ -618,6 +673,7 @@ class SettingsDialog(QDialog):
         try:
             if target.is_dir():
                 import shutil
+
                 shutil.rmtree(target)
                 _LOG.info("Deleted folder: %s", target)
         except OSError:
@@ -640,7 +696,8 @@ class SettingsDialog(QDialog):
         current_dir = sync_folder / SYNC_DIR_NAME
         if not current_dir.is_dir():
             QMessageBox.information(
-                self, "No Backup",
+                self,
+                "No Backup",
                 "No backup found.\n\nRun a sync first to create the backup.",
             )
             return None
@@ -656,7 +713,8 @@ class SettingsDialog(QDialog):
         shortcuts_json_path = current_dir / "search_shortcuts.json"
         if not shortcuts_json_path.exists():
             QMessageBox.information(
-                self, "No Shortcuts Yet",
+                self,
+                "No Shortcuts Yet",
                 "Search shortcuts haven't been extracted yet.\n\n"
                 "They will be created on the next sync.",
             )
@@ -702,5 +760,5 @@ class SettingsDialog(QDialog):
         else:
             self._hide_profiles()
 
-        if self._autostart_select is not None:
-            self._autostart_select.setCurrentIndex(0 if config_module.get_autostart() else 1)
+        if self._autostart_check is not None:
+            self._autostart_check.setChecked(config_module.get_autostart())

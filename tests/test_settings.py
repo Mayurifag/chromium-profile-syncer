@@ -176,7 +176,7 @@ def test_settings_dialog_has_expected_attributes(qapp, tmp_path):
 
     dlg = SettingsDialog(browsers_list=[_MockBrowser("Alpha"), _MockBrowser("Beta")])
     assert dlg._profile_states == {}
-    assert dlg._autostart_select is not None
+    assert dlg._autostart_check is not None
     dlg.close()
 
 
@@ -225,14 +225,13 @@ def test_rebuild_profiles_synced_profile_enabled(qapp, tmp_path):
 
 
 def test_settings_dialog_accept_saves_config(qapp, monkeypatch):
-    """Changing autostart select saves config immediately."""
+    """Changing autostart checkbox saves config immediately."""
     from src.settings import SettingsDialog
 
     mock = _MockBrowser("Thorium", profiles=["Default"])
     dlg = SettingsDialog(browsers_list=[mock])
 
-    # Simulate user changing autostart to "No" - should save immediately
-    dlg._autostart_select.setCurrentIndex(1)  # 1 = No
+    dlg._autostart_check.setChecked(False)
 
     assert config_module.get_autostart() is False
     dlg.close()

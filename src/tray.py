@@ -15,7 +15,6 @@ from src import autostart
 from src.browser_monitor import BrowserMonitor
 from src.browsers import ALL_BROWSERS
 from src.dracula import APP_ICON_SVG, ICON_COLORS
-from src.help_dialog import HelpDialog
 from src.rclone import find_rclone
 from src.settings import SettingsDialog
 from src.sync.sync_dir import SYNC_DIR_NAME as _SYNC_DIR_NAME
@@ -70,8 +69,6 @@ class TrayApp(QSystemTrayIcon):
         self._menu = QMenu()
         self._action_settings = self._menu.addAction("Settings")
         self._action_settings.triggered.connect(self.open_settings)
-        self._action_help = self._menu.addAction("Usage notes")
-        self._action_help.triggered.connect(self._open_help)
         self._menu.addSeparator()
         self._action_quit = self._menu.addAction("Quit")
         self._action_quit.triggered.connect(QApplication.quit)
@@ -235,9 +232,6 @@ class TrayApp(QSystemTrayIcon):
             self._warn_rclone_missing()
 
         dialog.exec()
-
-    def _open_help(self) -> None:
-        HelpDialog().exec()
 
     def _on_settings_closed(self) -> None:
         self._settings_dialog = None
