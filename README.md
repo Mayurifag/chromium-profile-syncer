@@ -1,4 +1,4 @@
- # chromium-profile-syncer
+# chromium-profile-syncer
 
 Highly vibecoded! Unstable! Proof of concept! Dont use (yet)!
 
@@ -94,6 +94,10 @@ extensions will also install to all used profiles of Chrome.
 For Windows extensions installed via registry keys, Linux/MacOS via external
 extensions `.json` files (no other ways to manage those, also not working
 on browsers based on some iridium patchsets).
+
+Some files are intentionally excluded being useless and taking a lot of space.
+For example, uBlock Origin rules compilated file has no need to be synced, it 
+might be generated on browser launch.
 
 #### Ungoogled browsers and extension exclusions
 
