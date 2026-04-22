@@ -5,6 +5,10 @@ Highly vibecoded! Unstable! Proof of concept! Dont use (yet)!
 Cross-platform (Windows/MacOS/Linux) Chromium-based browsers bidirectional
 profiles sync system to use with cloud folders (I use selfhosted OpenCloud).
 
+It will keep extensions (with their settings!) and some other stuff to be 
+identical across my systems. Google Sync makes a little part of that - also not 
+open-source and not available on Helium/Ungoogled Chromium.
+
 ## Supported Browsers
 
 - **Thorium**
@@ -13,18 +17,17 @@ profiles sync system to use with cloud folders (I use selfhosted OpenCloud).
 - **Yandex**
 
 The architecture supports adding more Chromium-derived browsers with minimal
-changes (one file per browser).
+changes (one file per browser) onto `src\browsers`.
 
 ## What Gets Synced
 
 | Data                             | Synced                                   |
 | -------------------------------- | ---------------------------------------- |
 | Bookmarks                        | Yes                                      |
-| Extensions (unpacked)            | Yes — full code synced                   |
-| Extensions (Web Store)           | IDs only — with autoinstall              |
+| Extensions                       | IDs only / unpacked ones sync full code  |
 | Extension settings/storage/cache | Yes (not 100% sure works for everything) |
 | Local Storage                    | Yes                                      |
-| Preferences                      | Yes — unencrypted ones                   |
+| Preferences                      | Yes — part of unencrypted ones           |
 | Custom Dictionary                | Yes                                      |
 | Search Shortcuts                 | Yes — user-created engines only          |
 | Themes                           | Yes — only active one                    |
@@ -44,8 +47,7 @@ Passwords, cookies, payment data, and browsing history are
 **intentionally excluded**. These are protected by OS-level encryption (e.g.
 macOS Keychain, Windows DPAPI) that ties the data to a specific machine.
 
-Sessions, autofill data/profiles, omnibox shortcuts - no need, annoying for my
-use cases.
+Sessions, autofill data/profiles - no need, annoying for my use cases.
 
 Favicons - not worth syncing.
 
@@ -71,15 +73,6 @@ make install
 4. Launches the app
 5. **(macOS only)** Removes Gatekeeper quarantine
 
-### Sync Folder Layout
-
-~~~
-sync-folder/
-├── current.tar              # Compressed tar archive of all synced profile data
-├── metadata.json            # Sync timestamps and version info
-└── search_shortcuts.json    # Custom search engines (shared across browsers)
-~~~
-
 ### Key Design Decisions
 
 #### Search shortcuts
@@ -91,12 +84,6 @@ silently dropped at startup. See
 [docs/search-shortcuts.md](./docs/search-shortcuts.md) for full implementation
 details.
 
-#### Profile saved into single file archive
-
-Profile intentionally saved in `.tar` archive to compress files and operate only
-one file, so there will be less `inotify` events in clouds (in other words
-clouds prefer one big file, than thousands small ones).
-
 #### Extensions installation system
 
 It's impossible to have identically working extensions installing system across
@@ -105,18 +92,8 @@ same registry paths to look for extensions, so if you start managing Thorium,
 extensions will also install to all used profiles of Chrome.
 
 For Windows extensions installed via registry keys, Linux/MacOS via external
-extensions `.json` files (no other ways to manage those).
-
-#### Archive integrity guard
-
-Before packing `current.tar` and placing it in the cloud folder, the sync
-engine validates that the staging directory contains at least one expected data
-type: extensions, bookmarks, preferences, or search shortcuts. If none are
-present, the pack step is skipped and an error is logged instead of overwriting
-a valid cloud archive with an empty or corrupted snapshot (which could happen if
-profile discovery fails entirely). This is a conservative safety check — it is
-not exhaustive, but catches the worst-case scenario where something went wrong
-before any profile data was synced.
+extensions `.json` files (no other ways to manage those, also not working
+on browsers based on some iridium patchsets).
 
 #### Ungoogled browsers and extension exclusions
 
