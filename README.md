@@ -146,9 +146,5 @@ is preserved — it just is not applied to browsers that don't need it.
 
 # TODO
 
-- view extension links - open in browser which latest applied settings. also check if its possible to construct link to install extension
-- how to auto-enable third-party extensions? check on thorium
-- search shortcut gru by default
-- helium - extensions dont install - Make sure that it is ungoogled, so lingvist has to be installed
-
-tar -xzf helium_default_profile_archive.tar.gz -C "C:\Users\Administrator\AppData\Local\imput\Helium\User Data"
+- search shortcut gru by default - is that possible to do automatically?
+- helium - extensions dont auto install - is that possible to make this work?

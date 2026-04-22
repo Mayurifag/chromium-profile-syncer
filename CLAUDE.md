@@ -32,13 +32,6 @@ Builds app, kills running instance, installs, launches.
 - **Python 3.12+** — no syntax/stdlib unavailable in 3.12.
 - **rclone** — required runtime dep for sync progress (install via system package manager).
 
-## Project Structure
-
-- `src/` — app source package
-- `tests/` — test files
-- `build.py` — PyInstaller build script
-- `pyproject.toml` — project metadata and tool config
-
 ## Code Style
 
 - Line length: 100 characters
@@ -56,29 +49,6 @@ and `_install_extensions_via_force_list` already manage.**
 
 Keys shared across all Chromium-based browsers. Bulk-deleting (e.g. browser cleanup) silently breaks extension install for unrelated browsers reading same paths.
 
-### Smart Extension Syncing
-
-**Detection:** Web Store extensions have `_metadata/verified_contents.json` (Google signature)
-- **Web Store extensions:** Save only extension ID to `webstore_extensions.json` manifest
-- **Unpacked extensions:** Sync full code (can't re-download)
-- **Auto-installation:** Generate External Extensions JSON stubs from manifest
-
-### Trash File Exclusion
-
-Files excluded from sync:
-- `._*` — macOS metadata on exFAT/FAT32 drives
-
-**Implementation:**
-- rclone: `--exclude "._*"`
-- shutil.copytree: `ignore=shutil.ignore_patterns("._*")`
-
-### Tar Archive Sync
-
-All profile data packed into single `current.tar` before sync:
-- Written to temp file outside sync folder, moved atomically
-- Unpacked to system temp during restore; cloud client sees only `current.tar` change
-- No backup rotation folders (`backup-1/`, `backup-2/`)
-
 ### Search Shortcuts Sync
 
 Extracts user-created search engines (`prepopulate_id = 0`) from `Web Data` SQLite, stores as `search_shortcuts.json` inside tar (at `work_dir` root).
@@ -94,7 +64,7 @@ Extracts user-created search engines (`prepopulate_id = 0`) from `Web Data` SQLi
 - Default engine: `sync_guid` must match `Preferences["default_search_provider"]["guid"]`
 - All others: `sync_guid = ""` (local-only; Chrome deletes unknown UUIDs on reconciliation)
 
-**Restore scope:** `DELETE FROM keywords` — wipe all engines (built-ins included), reinsert only synced shortcuts starting at ID 1. Then bump `meta.'Builtin Keyword Version'` to `99999` — without this, Chromium/Helium detects missing built-ins on startup and repopulates them (Helium uses `meta` table, not `keywords_metadata`).
+**Restore scope:** `DELETE FROM keywords` — wipe all engines (built-ins included), reinsert only synced shortcuts starting at ID 1. Then bump `meta.'Builtin Keyword Version'` to `99999` — without this, Chromium/Helium detects missing built-ins on startup and repopulates them (Helium uses `meta` table, not `keywords_metadata`). Also in same transaction: `UPDATE keywords_metadata SET value = <new_id> WHERE key = 'Default Search Provider ID'` and `DELETE FROM keywords_metadata WHERE key = 'Default Search Provider Backup'` — stale entries here override restored default (Backup blob silently rewrites `Preferences.default_search_provider.guid` on startup). Wrap in `try/except OperationalError` for older browsers.
 
 **Choice screen:** Helium (and Chromium 127+) enables a search-engine choice screen. Until all three completion keys are present in Preferences, `GetChoiceCompletionMetadata` returns an error and the service wipes the record, ignoring `default_search_provider.guid`:
 - `default_search_provider.choice_screen_completion_timestamp` — **JSON string** (not int!), seconds since Windows epoch (1601-01-01); integer type silently fails validation
@@ -106,17 +76,3 @@ Only write these when `choice_screen_random_shuffle_seed` is already present (si
 
 **`default_search_provider_data.mirrored_template_url_data`:** `DefaultSearchManager` uses this as the authoritative DSE cache. Must be written on restore with Helium's full schema — key differences from minimal builds: `input_encodings` is an array (not string), `id`/`date_created`/`last_modified`/`last_visited` are strings, `synced_guid` (not `sync_guid`), `suggestions_url` (not `suggest_url`), plus extra fields: `doodle_url`, `preconnect_to_search_url`, `prefetch_likely_navigations`, `image_translate_url`, `policy_origin`, `originating_url`, `usage_count`, `search_intent_params`, `contextual_search_url`, `logo_url`. See `_build_mirror_dict` in `src/sync/shortcuts.py`.
 
-### First-Sync Detection
-
-- Check if `metadata.json` exists before sync
-- Missing → first-time setup (shows "Initial setup complete")
-- Exists → regular sync (shows "Last sync: [timestamp]")
-- Prevents "sync complete" spam on clean slate
-
-### Clean Button (Settings Window)
-
-- Visible only when sync folder has data (`current.tar` exists or `current/` dir exists)
-- Deletes all synced data: `current.tar`, `current/` (legacy), `metadata.json` (`search_shortcuts.json` inside tar, deleted with it)
-- Clears enabled profiles and browsers from config
-- Shows confirmation dialog before deletion
-- After clean, triggers initial upload dialog to start fresh
