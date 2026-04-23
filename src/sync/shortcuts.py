@@ -96,17 +96,10 @@ def _row_to_shortcut(row: tuple, is_default: bool, sync_guid: str) -> dict:
 
 
 
-def extract_search_shortcuts(
-    profile_path: Path,
-    sync_folder_root: Path,
-    report: Callable[[str], None] = _noop,
-) -> None:
+def snapshot_shortcuts(profile_path: Path) -> list[dict] | None:
     web_data_src = profile_path / "Web Data"
-    shortcuts_json = sync_folder_root / "search_shortcuts.json"
-
     if not web_data_src.exists():
-        _LOG.debug("No Web Data database found at %s — skipping extract", web_data_src)
-        return
+        return None
 
     try:
         prefs_path = profile_path / "Preferences"
@@ -122,8 +115,7 @@ def extract_search_shortcuts(
 
         conn = sqlite3.connect(f"file:{web_data_src}?mode=ro&immutable=1", uri=True)
         try:
-            cursor = conn.cursor()
-            cursor.execute(
+            rows = conn.execute(
                 """
                 SELECT keyword, short_name, url, favicon_url, suggest_url,
                        prepopulate_id, is_active, date_created, last_modified,
@@ -134,27 +126,39 @@ def extract_search_shortcuts(
                   AND starter_pack_id = 0
                 ORDER BY keyword
                 """
-            )
-            rows = cursor.fetchall()
+            ).fetchall()
         finally:
             conn.close()
-
-        shortcuts = []
-        for row in rows:
-            sync_guid = row[9] or ""
-            is_default, sync_guid = _detect_default(
-                sync_guid, row[2], default_guid, default_engine_url
-            )
-            shortcuts.append(_row_to_shortcut(row, is_default, sync_guid))
-
-        if not write_text_if_changed(shortcuts_json, json.dumps(shortcuts, indent=2)):
-            _LOG.debug("search_shortcuts.json unchanged — skipping write")
-            return
-        report("search_shortcuts.json")
-        _LOG.info("Extracted %d user search shortcuts to %s", len(shortcuts), shortcuts_json)
-
     except sqlite3.Error as exc:
-        _LOG.warning("Failed to extract search shortcuts from %s: %s", web_data_src, exc)
+        _LOG.warning("Failed to snapshot shortcuts from %s: %s", web_data_src, exc)
+        return None
+
+    shortcuts = []
+    for row in rows:
+        sync_guid = row[9] or ""
+        is_default, sync_guid = _detect_default(
+            sync_guid, row[2], default_guid, default_engine_url
+        )
+        shortcuts.append(_row_to_shortcut(row, is_default, sync_guid))
+    return shortcuts
+
+
+def extract_search_shortcuts(
+    profile_path: Path,
+    sync_folder_root: Path,
+    report: Callable[[str], None] = _noop,
+) -> None:
+    shortcuts = snapshot_shortcuts(profile_path)
+    if shortcuts is None:
+        _LOG.debug("No Web Data database at %s — skipping extract", profile_path / "Web Data")
+        return
+
+    shortcuts_json = sync_folder_root / "search_shortcuts.json"
+    if not write_text_if_changed(shortcuts_json, json.dumps(shortcuts, indent=2)):
+        _LOG.debug("search_shortcuts.json unchanged — skipping write")
+        return
+    report("search_shortcuts.json")
+    _LOG.info("Extracted %d user search shortcuts to %s", len(shortcuts), shortcuts_json)
 
 
 def _build_mirror_dict(shortcut: dict, row_id: int, sync_guid: str) -> dict:

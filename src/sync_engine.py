@@ -100,23 +100,42 @@ class SyncEngine:
         self,
         direction: str,
         *,
-        local_src: Path,
         remote_json: Path,
+        snapshot: Callable[[], list[dict] | None],
         extract: Callable[[], None],
         restore: Callable[[], None],
+        ts_key: str,
     ) -> None:
-        do_push = direction == "push"
-        do_pull = direction == "pull"
-        if direction == "both":
-            local_mtime = local_src.stat().st_mtime if local_src.exists() else 0.0
-            remote_mtime = remote_json.stat().st_mtime if remote_json.exists() else 0.0
-            if local_mtime > remote_mtime:
-                do_push = True
-            elif remote_mtime > local_mtime:
-                do_pull = True
-        if do_push:
+        if direction == "push":
             extract()
-        elif do_pull:
+            return
+        if direction == "pull":
+            restore()
+            return
+
+        local = snapshot()
+        if local is None:
+            if remote_json.exists():
+                restore()
+            return
+        if not remote_json.exists():
+            extract()
+            return
+
+        try:
+            remote = json.loads(remote_json.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            extract()
+            return
+
+        if local == remote:
+            return
+
+        local_ts = max((e.get(ts_key, 0) or 0 for e in local), default=0)
+        remote_ts = max((e.get(ts_key, 0) or 0 for e in remote), default=0)
+        if local_ts > remote_ts:
+            extract()
+        else:
             restore()
 
     def sync_browser_profile(
@@ -189,27 +208,29 @@ class SyncEngine:
         if dt.get("search_shortcuts", True):
             self._sync_root_json(
                 direction,
-                local_src=profile_path / "Web Data",
                 remote_json=sync_root / "search_shortcuts.json",
+                snapshot=lambda: _shortcuts.snapshot_shortcuts(profile_path),
                 extract=lambda: _shortcuts.extract_search_shortcuts(
                     profile_path, sync_root, self._report
                 ),
                 restore=lambda: _shortcuts.restore_search_shortcuts(
                     profile_path, sync_root, self._report
                 ),
+                ts_key="last_modified",
             )
 
         if dt.get("typed_urls", True):
             self._sync_root_json(
                 direction,
-                local_src=profile_path / "History",
                 remote_json=sync_root / "typed_urls.json",
+                snapshot=lambda: _history.snapshot_typed_urls(profile_path),
                 extract=lambda: _history.extract_typed_urls(
                     profile_path, sync_root, self._report
                 ),
                 restore=lambda: _history.restore_typed_urls(
                     profile_path, sync_root, self._report
                 ),
+                ts_key="last_visit_time",
             )
 
         _LOG.info("Profile sync complete: %s", profile_path.name)

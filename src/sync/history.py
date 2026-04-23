@@ -11,31 +11,39 @@ from src.sync import _noop, write_text_if_changed
 _LOG = logging.getLogger(__name__)
 
 
-def extract_typed_urls(
-    profile_path: Path,
-    sync_dir: Path,
-    report: Callable[[str], None] = _noop,
-) -> None:
+def snapshot_typed_urls(profile_path: Path) -> list[dict] | None:
     history_db = profile_path / "History"
     if not history_db.exists():
-        return
+        return None
 
     try:
         conn = sqlite3.connect(f"file:{history_db}?mode=ro&immutable=1", uri=True)
         try:
             rows = conn.execute(
-                "SELECT url, title, typed_count, last_visit_time FROM urls WHERE typed_count > 0"
+                "SELECT url, title, typed_count, last_visit_time FROM urls "
+                "WHERE typed_count > 0 ORDER BY url"
             ).fetchall()
         finally:
             conn.close()
     except sqlite3.Error as exc:
-        _LOG.warning("Failed to extract typed URLs from %s: %s", history_db, exc)
-        return
+        _LOG.warning("Failed to snapshot typed URLs from %s: %s", history_db, exc)
+        return None
 
-    data = [
+    return [
         {"url": r[0], "title": r[1], "typed_count": r[2], "last_visit_time": r[3]}
         for r in rows
     ]
+
+
+def extract_typed_urls(
+    profile_path: Path,
+    sync_dir: Path,
+    report: Callable[[str], None] = _noop,
+) -> None:
+    data = snapshot_typed_urls(profile_path)
+    if data is None:
+        return
+
     out = sync_dir / "typed_urls.json"
     if not write_text_if_changed(out, json.dumps(data)):
         _LOG.debug("typed_urls.json unchanged — skipping write")

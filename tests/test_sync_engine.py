@@ -873,14 +873,16 @@ def _make_web_data(
             """
             INSERT INTO keywords
                 (short_name, keyword, url, prepopulate_id, is_active,
-                 sync_guid, safe_for_autoreplace, input_encodings, alternate_urls)
-            VALUES (?,?,?,?,?,?,?,?,?)
+                 sync_guid, safe_for_autoreplace, input_encodings, alternate_urls,
+                 date_created, last_modified)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 row["short_name"], row["keyword"], row["url"],
                 row.get("prepopulate_id", 0), row.get("is_active", 1),
                 row.get("sync_guid", ""), row.get("safe_for_autoreplace", 0),
                 row.get("input_encodings", "UTF-8"), row.get("alternate_urls", "[]"),
+                row.get("date_created", 0), row.get("last_modified", 0),
             ),
         )
     if metadata is not None:
@@ -1077,15 +1079,15 @@ def test_extract_search_shortcuts_no_webdata_preserves_existing_json(tmp_path: P
     assert data[0]["keyword"] == "gru", "existing JSON must be untouched when Web Data is missing"
 
 
-def test_sync_browser_profile_both_pulls_when_remote_newer(tmp_path: Path) -> None:
-    """In 'both' direction with remote JSON newer than Web Data, restore runs."""
+def test_sync_browser_profile_both_pulls_when_remote_ts_newer(tmp_path: Path) -> None:
+    """In 'both', remote JSON with higher last_modified wins over local DB."""
     sf = tmp_path / "sync"
     (sf / SYNC_DIR_NAME).mkdir(parents=True)
     sync_profile = tmp_path / "sync_profile"
     sync_profile.mkdir()
     existing = [{"keyword": "gru", "short_name": "GRU", "url": "https://gru.com",
                  "is_default": True, "sync_guid": "gru-guid", "prepopulate_id": 0,
-                 "is_active": 1, "date_created": 0, "last_modified": 0,
+                 "is_active": 1, "date_created": 0, "last_modified": 500,
                  "safe_for_autoreplace": 0, "input_encodings": "UTF-8",
                  "alternate_urls": "[]", "favicon_url": "", "suggest_url": ""}]
     shortcuts_json = sf / SYNC_DIR_NAME / "search_shortcuts.json"
@@ -1094,22 +1096,22 @@ def test_sync_browser_profile_both_pulls_when_remote_newer(tmp_path: Path) -> No
     profile = tmp_path / "profile"
     _make_web_data(
         profile / "Web Data",
-        [{"keyword": "bing", "short_name": "Bing", "url": "https://bing.com/?q={searchTerms}"}],
+        [{"keyword": "bing", "short_name": "Bing", "url": "https://bing.com/?q={searchTerms}",
+          "last_modified": 100}],
     )
     (profile / "Preferences").write_text("{}", encoding="utf-8")
-    os.utime(profile / "Web Data", (0, 0))
 
     engine = _make_engine(sf)
     engine.sync_browser_profile(profile, sync_profile, direction="both")
 
     data = json.loads(shortcuts_json.read_text())
     keywords = {s["keyword"] for s in data}
-    assert "gru" in keywords, "master JSON shortcut must survive when remote is newer"
-    assert "bing" not in keywords, "remote-wins must not push local when remote is newer"
+    assert "gru" in keywords, "remote shortcut must survive when its ts is newer"
+    assert "bing" not in keywords, "stale local DB must not overwrite newer remote JSON"
 
 
-def test_sync_browser_profile_both_pushes_when_local_newer(tmp_path: Path) -> None:
-    """In 'both' direction with Web Data newer than remote JSON, extract runs."""
+def test_sync_browser_profile_both_pushes_when_local_ts_newer(tmp_path: Path) -> None:
+    """In 'both', local DB with higher last_modified overwrites remote JSON."""
     sf = tmp_path / "sync"
     (sf / SYNC_DIR_NAME).mkdir(parents=True)
     sync_profile = tmp_path / "sync_profile"
@@ -1118,17 +1120,17 @@ def test_sync_browser_profile_both_pushes_when_local_newer(tmp_path: Path) -> No
     shortcuts_json.write_text(
         json.dumps([{"keyword": "old", "short_name": "Old", "url": "https://old.com",
                      "is_default": False, "sync_guid": "", "prepopulate_id": 0,
-                     "is_active": 1, "date_created": 0, "last_modified": 0,
+                     "is_active": 1, "date_created": 0, "last_modified": 100,
                      "safe_for_autoreplace": 0, "input_encodings": "UTF-8",
                      "alternate_urls": "[]", "favicon_url": "", "suggest_url": ""}]),
         encoding="utf-8",
     )
-    os.utime(shortcuts_json, (0, 0))
 
     profile = tmp_path / "profile"
     _make_web_data(
         profile / "Web Data",
-        [{"keyword": "new", "short_name": "New", "url": "https://new.com/?q={searchTerms}"}],
+        [{"keyword": "new", "short_name": "New", "url": "https://new.com/?q={searchTerms}",
+          "last_modified": 500}],
     )
     (profile / "Preferences").write_text("{}", encoding="utf-8")
 
@@ -1137,8 +1139,34 @@ def test_sync_browser_profile_both_pushes_when_local_newer(tmp_path: Path) -> No
 
     data = json.loads(shortcuts_json.read_text())
     keywords = {s["keyword"] for s in data}
-    assert "new" in keywords, "local-newer 'both' must push to JSON"
-    assert "old" not in keywords, "local-newer 'both' must replace stale JSON"
+    assert "new" in keywords, "local-ts-newer 'both' must push to JSON"
+    assert "old" not in keywords, "local-ts-newer 'both' must replace stale JSON"
+
+
+def test_sync_browser_profile_both_skips_when_content_equal(tmp_path: Path) -> None:
+    """Identical JSON and DB content → no write."""
+    sf = tmp_path / "sync"
+    (sf / SYNC_DIR_NAME).mkdir(parents=True)
+    sync_profile = tmp_path / "sync_profile"
+    sync_profile.mkdir()
+
+    profile = tmp_path / "profile"
+    _make_web_data(
+        profile / "Web Data",
+        [{"keyword": "a", "short_name": "A", "url": "https://a.com/?q={searchTerms}",
+          "last_modified": 100}],
+    )
+    (profile / "Preferences").write_text("{}", encoding="utf-8")
+
+    shortcuts_json = sf / SYNC_DIR_NAME / "search_shortcuts.json"
+    from src.sync.shortcuts import snapshot_shortcuts
+    shortcuts_json.write_text(json.dumps(snapshot_shortcuts(profile)), encoding="utf-8")
+    mtime_before = shortcuts_json.stat().st_mtime_ns
+
+    engine = _make_engine(sf)
+    engine.sync_browser_profile(profile, sync_profile, direction="both")
+
+    assert shortcuts_json.stat().st_mtime_ns == mtime_before, "equal content must not rewrite JSON"
 
 
 def test_sync_browser_profile_push_direction_does_extract_shortcuts(tmp_path: Path) -> None:
