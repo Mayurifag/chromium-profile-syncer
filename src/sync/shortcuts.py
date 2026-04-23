@@ -14,7 +14,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from src.sync import _noop
+from src.sync import _noop, write_text_if_changed
 
 _LOG = logging.getLogger(__name__)
 
@@ -147,7 +147,9 @@ def extract_search_shortcuts(
             )
             shortcuts.append(_row_to_shortcut(row, is_default, sync_guid))
 
-        shortcuts_json.write_text(json.dumps(shortcuts, indent=2), encoding="utf-8")
+        if not write_text_if_changed(shortcuts_json, json.dumps(shortcuts, indent=2)):
+            _LOG.debug("search_shortcuts.json unchanged — skipping write")
+            return
         report("search_shortcuts.json")
         _LOG.info("Extracted %d user search shortcuts to %s", len(shortcuts), shortcuts_json)
 

@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from src.sync import _noop
+from src.sync import _noop, write_text_if_changed
 from src.sync.leveldb import copy_atomic
 
 if TYPE_CHECKING:
@@ -224,9 +224,8 @@ def sync_extensions(
             total_skipped += sk
 
     if webstore_ids:
-        sync_dir.mkdir(parents=True, exist_ok=True)
-        manifest_path.write_text(json.dumps(sorted(webstore_ids)), encoding="utf-8")
-        _LOG.info("Detected %d Web Store extensions (tracking by ID)", len(webstore_ids))
+        if write_text_if_changed(manifest_path, json.dumps(sorted(webstore_ids))):
+            _LOG.info("Detected %d Web Store extensions (tracking by ID)", len(webstore_ids))
 
     return total_synced, total_skipped
 
@@ -264,9 +263,7 @@ def update_webstore_manifest(
     for alias_id, canonical_id in (aliases or {}).items():
         if canonical_id not in webstore_map:
             webstore_map[canonical_id] = existing.get(canonical_id, "")
-    if webstore_map != existing:
-        sync_dir.mkdir(parents=True, exist_ok=True)
-        manifest_path.write_text(json.dumps(webstore_map), encoding="utf-8")
+    if write_text_if_changed(manifest_path, json.dumps(webstore_map)):
         _LOG.info("Updated webstore manifest: %d extensions", len(webstore_map))
 
 

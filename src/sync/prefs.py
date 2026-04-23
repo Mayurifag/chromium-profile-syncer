@@ -5,7 +5,7 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from src.sync import _noop
+from src.sync import _noop, write_text_if_changed
 
 _LOG = logging.getLogger(__name__)
 
@@ -103,8 +103,8 @@ def sync_preferences_json(
             found, value = _get_nested(prefs, keys)
             if found:
                 _set_nested(extracted, keys, value)
-        json_path.parent.mkdir(parents=True, exist_ok=True)
-        json_path.write_text(json.dumps(extracted), encoding="utf-8")
+        if not write_text_if_changed(json_path, json.dumps(extracted)):
+            return 0, 1
         report("preferences.json")
         return 1, 0
 

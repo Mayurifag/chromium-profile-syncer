@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
-from src.sync import _noop
+from src.sync import _noop, write_text_if_changed
 
 _LOG = logging.getLogger(__name__)
 
@@ -37,7 +37,9 @@ def extract_typed_urls(
         for r in rows
     ]
     out = sync_dir / "typed_urls.json"
-    out.write_text(json.dumps(data), encoding="utf-8")
+    if not write_text_if_changed(out, json.dumps(data)):
+        _LOG.debug("typed_urls.json unchanged — skipping write")
+        return
     report("typed_urls.json")
     _LOG.info("Extracted %d typed URLs to %s", len(data), out)
 

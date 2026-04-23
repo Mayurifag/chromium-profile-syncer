@@ -16,6 +16,7 @@ from src.sync import leveldb as _leveldb
 from src.sync import prefs as _prefs
 from src.sync import shortcuts as _shortcuts
 from src.sync import sync_dir as _sync_dir
+from src.sync import write_text_if_changed
 
 if TYPE_CHECKING:
     from src.browsers.base import BrowserBase
@@ -95,6 +96,29 @@ class SyncEngine:
         else:
             self._copy(src, dst) if src_mtime > dst_mtime else self._copy(dst, src)
 
+    def _sync_root_json(
+        self,
+        direction: str,
+        *,
+        local_src: Path,
+        remote_json: Path,
+        extract: Callable[[], None],
+        restore: Callable[[], None],
+    ) -> None:
+        do_push = direction == "push"
+        do_pull = direction == "pull"
+        if direction == "both":
+            local_mtime = local_src.stat().st_mtime if local_src.exists() else 0.0
+            remote_mtime = remote_json.stat().st_mtime if remote_json.exists() else 0.0
+            if local_mtime > remote_mtime:
+                do_push = True
+            elif remote_mtime > local_mtime:
+                do_pull = True
+        if do_push:
+            extract()
+        elif do_pull:
+            restore()
+
     def sync_browser_profile(
         self,
         profile_path: Path,
@@ -158,17 +182,35 @@ class SyncEngine:
             if src.exists() or dst.exists():
                 self._sync_file(src, dst, direction)
 
+        # Root-level JSONs bypass work_dir so receivers can see prior pushes.
+        sync_root = self.sync_folder / _sync_dir.SYNC_DIR_NAME
+        sync_root.mkdir(parents=True, exist_ok=True)
+
         if dt.get("search_shortcuts", True):
-            if direction == "push":
-                _shortcuts.extract_search_shortcuts(profile_path, sync_profile_path, self._report)
-            if direction in ("pull", "both"):
-                _shortcuts.restore_search_shortcuts(profile_path, sync_profile_path, self._report)
+            self._sync_root_json(
+                direction,
+                local_src=profile_path / "Web Data",
+                remote_json=sync_root / "search_shortcuts.json",
+                extract=lambda: _shortcuts.extract_search_shortcuts(
+                    profile_path, sync_root, self._report
+                ),
+                restore=lambda: _shortcuts.restore_search_shortcuts(
+                    profile_path, sync_root, self._report
+                ),
+            )
 
         if dt.get("typed_urls", True):
-            if direction == "push":
-                _history.extract_typed_urls(profile_path, sync_profile_path, self._report)
-            if direction in ("pull", "both"):
-                _history.restore_typed_urls(profile_path, sync_profile_path, self._report)
+            self._sync_root_json(
+                direction,
+                local_src=profile_path / "History",
+                remote_json=sync_root / "typed_urls.json",
+                extract=lambda: _history.extract_typed_urls(
+                    profile_path, sync_root, self._report
+                ),
+                restore=lambda: _history.restore_typed_urls(
+                    profile_path, sync_root, self._report
+                ),
+            )
 
         _LOG.info("Profile sync complete: %s", profile_path.name)
 
@@ -500,7 +542,7 @@ class SyncEngine:
             if success and any(work_dir.iterdir()):
                 self._report("Syncing to folder...")
                 _sync_dir.merge_to_sync_dir(work_dir, current_dir)
-                (current_dir / "metadata.json").write_text("{}", encoding="utf-8")
+                write_text_if_changed(current_dir / "metadata.json", "{}")
             shutil.rmtree(work_dir)
 
         summary = (

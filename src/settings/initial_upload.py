@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import QDialog, QLabel, QProgressBar, QVBoxLayout
 
+from src.sync import write_text_if_changed
 from src.sync.sync_dir import SYNC_DIR_NAME, merge_to_sync_dir
 from src.sync_engine import SyncEngine
 
@@ -36,7 +37,7 @@ class _InitialUploadWorker(QThread):
             self.step.emit("Syncing to folder...")
             current_dir = self._folder / SYNC_DIR_NAME
             merge_to_sync_dir(work_dir, current_dir)
-            (current_dir / "metadata.json").write_text("{}", encoding="utf-8")
+            write_text_if_changed(current_dir / "metadata.json", "{}")
         finally:
             shutil.rmtree(work_dir)
         self.done.emit()
