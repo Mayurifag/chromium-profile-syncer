@@ -39,7 +39,8 @@ the browser's `Web Data` SQLite database and stored as `search_shortcuts.json`
 in the sync folder root. This file is shared across all browsers syncing to the
 same folder.
 
-Built-in engines (Google, Bing, etc.) are never backed up.
+Built-in engines (Google, Bing, etc.) are INTENTIONALLY always deleted. User
+has to replace the default one with its own one.
 
 ### What Does NOT Sync
 
@@ -127,5 +128,6 @@ is preserved — it just is not applied to browsers that don't need it.
 
 # TODO
 
+- Releases and automatical updates check
 - search shortcut gru by default - is that possible to do automatically?
 - helium - extensions dont auto install - is that possible to make this work?
