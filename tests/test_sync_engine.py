@@ -758,6 +758,30 @@ def test_full_round_trip(tmp_path: Path) -> None:
     assert bk_profile.read_text() == "v2"
 
 
+def test_sync_all_pulls_remote_newer_into_profile(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    _write_file(profile / "Bookmarks", "old-local", mtime=1000.0)
+    _write_file(profile / "Preferences", "{}", mtime=1000.0)
+
+    sync_folder = tmp_path / "sync"
+    current_dir = sync_folder / SYNC_DIR_NAME
+    current_dir.mkdir(parents=True)
+    _write_file(current_dir / "Bookmarks", "remote-new", mtime=5000.0)
+    _write_file(current_dir / "metadata.json", "{}", mtime=5000.0)
+
+    browser = _make_browser(name="TB", installed=True, running=False, profiles=[profile])
+    engine = _make_engine(sync_folder, browsers=[browser])
+
+    with patch("src.config.get_enabled_browsers", return_value={"TB": True}), \
+         patch("src.config.get_enabled_profiles", return_value={"TB": [profile.name]}), \
+         patch("src.config.get_profile_directions", return_value={}):
+        engine.sync_all()
+
+    assert (profile / "Bookmarks").read_text() == "remote-new"
+    assert (current_dir / "Bookmarks").read_text() == "remote-new"
+
+
 def test_sync_all_with_empty_config_skips_browser(tmp_path: Path) -> None:
     """When config has no entry for a browser, sync_all skips it entirely."""
     default = tmp_path / "profiles" / "Default"

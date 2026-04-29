@@ -22,6 +22,20 @@ def write_if_changed(src: Path, dst: Path) -> bool:
     return True
 
 
+def seed_work_dir(current: Path, work: Path) -> None:
+    if not current.exists():
+        return
+    for src_path in current.rglob("*"):
+        if not src_path.is_file():
+            continue
+        if src_path.name.startswith("._") or src_path.name in _SKIP_NAMES:
+            continue
+        rel = src_path.relative_to(current)
+        dst = work / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_path, dst)
+
+
 def merge_to_sync_dir(src: Path, dst: Path) -> None:
     dst.mkdir(parents=True, exist_ok=True)
 

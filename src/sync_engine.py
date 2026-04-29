@@ -498,6 +498,9 @@ class SyncEngine:
 
         success = False
         try:
+            if current_dir.exists():
+                self._report("Loading sync state...")
+                _sync_dir.seed_work_dir(current_dir, work_dir)
             self._prune_excluded_from_work(work_dir, excluded_ext_ids)
 
             for browser in browsers_to_sync:
