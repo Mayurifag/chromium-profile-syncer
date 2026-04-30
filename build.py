@@ -147,6 +147,8 @@ def build() -> Path:
         "PySide6.QtSvg",
         "src/main.py",
     ]
+    if sys.platform.startswith("linux"):
+        cmd.insert(4, "--onefile")
 
     print(f"Running: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)

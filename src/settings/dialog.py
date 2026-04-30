@@ -670,14 +670,28 @@ class SettingsDialog(QDialog):
                 return
 
         target = folder / SYNC_DIR_NAME
-        try:
-            if target.is_dir():
-                import shutil
+        errors: list[tuple[str, BaseException]] = []
 
-                shutil.rmtree(target)
-                _LOG.info("Deleted folder: %s", target)
-        except OSError:
-            _LOG.exception("Failed to delete: %s", target)
+        def _onexc(_func, path, exc):
+            errors.append((str(path), exc))
+
+        if target.is_dir():
+            import shutil
+
+            shutil.rmtree(target, onexc=_onexc)
+
+        if target.exists() or errors:
+            details = "\n".join(f"{p}: {e}" for p, e in errors[:5]) or str(target)
+            extra = f"\n(+{len(errors) - 5} more)" if len(errors) > 5 else ""
+            QMessageBox.warning(
+                self,
+                "Clean Sync Folder",
+                "Could not fully delete sync folder. "
+                "Files may be locked by a mount (OpenCloud/FUSE) or another process. "
+                f"Close it and retry.\n\n{details}{extra}",
+            )
+            _LOG.warning("Clean sync folder incomplete: %s (errors=%d)", target, len(errors))
+            return
 
         config_module.set_enabled_profiles({})
         config_module.set_enabled_browsers({})
