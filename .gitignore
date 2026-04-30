@@ -31,3 +31,4 @@ tmp/
 
 .mcp.json
 *.spec
+src/_build_info.py

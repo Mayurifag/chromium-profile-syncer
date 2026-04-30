@@ -115,7 +115,21 @@ def _generate_icon() -> Path:
     return _generate_ico(renderer)
 
 
+def _write_build_info() -> None:
+    sha = os.environ.get("GITHUB_SHA")
+    if not sha:
+        try:
+            sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], text=True
+            ).strip()
+        except Exception:
+            sha = "unknown"
+    Path("src/_build_info.py").write_text(f'BUILD_SHA = "{sha}"\n', encoding="utf-8")
+    print(f"BUILD_SHA={sha}")
+
+
 def build() -> Path:
+    _write_build_info()
     icon_path = _generate_icon()
     cmd = [
         "uv",
@@ -145,7 +159,7 @@ def build() -> Path:
         print(f"\nBuild successful: {app_path.resolve()}")
         return app_path
 
-    # Non-macOS: check for onedir bundle first (Windows default), then single binary
+    # Windows/Linux: onedir bundle first, then single binary fallback
     dist_dir = Path("dist") / APP_NAME
     if dist_dir.is_dir():
         print(f"\nBuild successful: {dist_dir.resolve()}")

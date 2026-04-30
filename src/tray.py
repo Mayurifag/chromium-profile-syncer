@@ -11,7 +11,7 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 import src.config as _config
-from src import autostart
+from src import autostart, updater
 from src.browser_monitor import BrowserMonitor
 from src.browsers import ALL_BROWSERS
 from src.dracula import APP_ICON_SVG, ICON_COLORS
@@ -20,6 +20,9 @@ from src.settings import SettingsDialog
 from src.sync.sync_dir import SYNC_DIR_NAME as _SYNC_DIR_NAME
 from src.sync_engine import SyncEngine
 from src.sync_worker import SyncWorker
+
+UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000
+UPDATE_CHECK_INITIAL_DELAY_MS = 30 * 1000
 
 logger = logging.getLogger(__name__)
 
@@ -69,10 +72,19 @@ class TrayApp(QSystemTrayIcon):
         self._menu = QMenu()
         self._action_settings = self._menu.addAction("Settings")
         self._action_settings.triggered.connect(self.open_settings)
+        self._action_check_updates = self._menu.addAction("Check for updates")
+        self._action_check_updates.triggered.connect(self._manual_update_check)
         self._menu.addSeparator()
         self._action_quit = self._menu.addAction("Quit")
         self._action_quit.triggered.connect(QApplication.quit)
         self.setContextMenu(self._menu)
+
+        updater.cleanup_staging()
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(UPDATE_CHECK_INTERVAL_MS)
+        self._update_timer.timeout.connect(self._auto_update_check)
+        self._update_timer.start()
+        QTimer.singleShot(UPDATE_CHECK_INITIAL_DELAY_MS, self._auto_update_check)
 
         sync_folder = self._config.get_sync_folder()
         if sync_folder is not None:
@@ -396,6 +408,54 @@ class TrayApp(QSystemTrayIcon):
                 QSystemTrayIcon.MessageIcon.NoIcon,
                 2000,
             )
+
+    def _auto_update_check(self) -> None:
+        if self._settings_dialog is not None:
+            logger.debug("update: skip auto check — settings dialog open")
+            return
+        self._do_update_check(silent=True)
+
+    def _manual_update_check(self) -> None:
+        self._do_update_check(silent=False)
+
+    def _do_update_check(self, silent: bool) -> None:
+        try:
+            result = updater.check_for_update()
+        except updater.UpdateCheckError as exc:
+            logger.warning("update: %s", exc)
+            if not silent:
+                self.showMessage(
+                    "Chromium Profile Syncer",
+                    f"Update check failed: {exc}",
+                    QSystemTrayIcon.MessageIcon.Warning,
+                )
+            return
+        if result is None:
+            if not silent:
+                self.showMessage(
+                    "Chromium Profile Syncer",
+                    "Already up to date.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    3000,
+                )
+            return
+        target_sha, asset_url, sha_url = result
+        if self._worker is not None and self._worker.isRunning():
+            logger.info("update: deferring (sync running) — target=%s", target_sha[:8])
+            return
+        logger.info("update: installing %s", target_sha[:8])
+        try:
+            updater.install_update(asset_url, sha_url)
+        except Exception as exc:
+            logger.error("update: install failed: %s", exc)
+            if not silent:
+                self.showMessage(
+                    "Chromium Profile Syncer",
+                    f"Update failed: {exc}",
+                    QSystemTrayIcon.MessageIcon.Warning,
+                )
+            return
+        QApplication.quit()
 
     def _on_sync_error(self, msg: str) -> None:
         self._worker = None
