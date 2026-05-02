@@ -178,6 +178,8 @@ def test_on_settings_saved_rebuilds_engine_and_watcher(qapp, tmp_path):
 
     mock_config = MagicMock()
     mock_config.get_sync_folder.return_value = tmp_path
+    mock_config.get_sync_interval.return_value = 15
+    mock_config.get_enabled_profiles.return_value = {}
     tray._config = mock_config
 
     with patch("src.tray.SyncEngine") as mock_engine_cls:

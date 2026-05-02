@@ -86,6 +86,10 @@ class TrayApp(QSystemTrayIcon):
         self._update_timer.timeout.connect(self._auto_update_check)
         self._update_timer.start()
 
+        self._periodic_sync_timer = QTimer(self)
+        self._periodic_sync_timer.timeout.connect(self._on_periodic_sync_tick)
+        self._restart_periodic_sync_timer()
+
         sync_folder = self._config.get_sync_folder()
         if sync_folder is not None:
             self._setup_watcher(sync_folder)
@@ -165,13 +169,29 @@ class TrayApp(QSystemTrayIcon):
 
     def _setup_watcher(self, sync_folder: Path) -> None:
         self._watcher = QFileSystemWatcher(self)
-        if sync_folder.exists():
-            self._watcher.addPaths([str(sync_folder)])
-            logger.debug("Watching: %s", sync_folder)
-        else:
-            logger.debug("Sync folder %s does not exist yet — watcher idle", sync_folder)
         self._watcher.fileChanged.connect(self._on_file_changed)
         self._watcher.directoryChanged.connect(self._on_dir_changed)
+        self._refresh_watcher_paths()
+
+    def _refresh_watcher_paths(self) -> None:
+        if self._watcher is None:
+            return
+        watched = self._watcher.files() + self._watcher.directories()
+        if watched:
+            self._watcher.removePaths(watched)
+        sync_folder = self._config.get_sync_folder()
+        if sync_folder is None or not sync_folder.exists():
+            logger.debug("Watcher idle — sync folder missing")
+            return
+        paths = [str(sync_folder)]
+        current = sync_folder / _SYNC_DIR_NAME
+        if current.is_dir():
+            paths.append(str(current))
+            for sub in current.rglob("*"):
+                if sub.is_dir():
+                    paths.append(str(sub))
+        self._watcher.addPaths(paths)
+        logger.debug("Watching %d paths under %s", len(paths), sync_folder)
 
     def _on_file_changed(self, path: str) -> None:
         if self._watcher_paused:
@@ -230,8 +250,34 @@ class TrayApp(QSystemTrayIcon):
                     self._last_metadata_mtime = None
             except OSError:
                 pass
+        self._refresh_watcher_paths()
         self._watcher_paused = False
         logger.debug("File watcher resumed")
+
+    def _restart_periodic_sync_timer(self) -> None:
+        minutes = max(1, self._config.get_sync_interval())
+        self._periodic_sync_timer.stop()
+        self._periodic_sync_timer.setInterval(minutes * 60 * 1000)
+        self._periodic_sync_timer.start()
+        logger.debug("Periodic sync timer set to %d min", minutes)
+
+    def _on_periodic_sync_tick(self) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            return
+        if self._browser_monitor.any_running():
+            logger.debug("Periodic tick — browser running, deferring")
+            return
+        if self._config.get_sync_folder() is None:
+            return
+        enabled_profiles = _config.get_enabled_profiles()
+        if not any(
+            _config.is_profile_sync_enabled(browser, profile)
+            for browser, profiles in enabled_profiles.items()
+            for profile in profiles
+        ):
+            return
+        logger.info("Periodic sync tick — triggering sync")
+        self._trigger_sync()
 
     def open_settings(self) -> None:
         if self._settings_dialog is not None:
@@ -283,6 +329,7 @@ class TrayApp(QSystemTrayIcon):
 
         self._teardown_watcher()
         self._setup_watcher(sync_folder)
+        self._restart_periodic_sync_timer()
 
         has_profiles = any(profiles for profiles in self._config.get_enabled_profiles().values())
         autostart.apply(has_profiles)
