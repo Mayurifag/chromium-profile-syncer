@@ -15,14 +15,15 @@ from src import autostart, updater
 from src.browser_monitor import BrowserMonitor
 from src.browsers import ALL_BROWSERS
 from src.dracula import APP_ICON_SVG, ICON_COLORS
+from src.notify import notify
 from src.rclone import find_rclone
 from src.settings import SettingsDialog
 from src.sync.sync_dir import SYNC_DIR_NAME as _SYNC_DIR_NAME
 from src.sync_engine import SyncEngine
 from src.sync_worker import SyncWorker
+from src.winget import WingetManager
 
 UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000
-UPDATE_CHECK_INITIAL_DELAY_MS = 30 * 1000
 
 logger = logging.getLogger(__name__)
 
@@ -84,11 +85,16 @@ class TrayApp(QSystemTrayIcon):
         self._update_timer.setInterval(UPDATE_CHECK_INTERVAL_MS)
         self._update_timer.timeout.connect(self._auto_update_check)
         self._update_timer.start()
-        QTimer.singleShot(UPDATE_CHECK_INITIAL_DELAY_MS, self._auto_update_check)
 
         sync_folder = self._config.get_sync_folder()
         if sync_folder is not None:
             self._setup_watcher(sync_folder)
+
+        self._winget = WingetManager(self)
+        self._winget.detected.connect(self._on_winget_detected)
+        self._winget.upgrade_finished.connect(self._on_helium_upgrade_finished)
+
+        QTimer.singleShot(0, self._auto_update_check)
 
         logger.debug("TrayApp initialized")
 
@@ -110,13 +116,14 @@ class TrayApp(QSystemTrayIcon):
 
     def _warn_rclone_missing(self) -> None:
         import sys
+
         if sys.platform == "darwin":
             msg = "rclone is required for sync. Install via Homebrew: brew install rclone"
         elif sys.platform == "win32":
             msg = "rclone is required for sync. Download from https://rclone.org/downloads/"
         else:
             msg = "rclone is required for sync. Install: sudo apt install rclone"
-        self.showMessage("rclone not found", msg, QSystemTrayIcon.MessageIcon.Warning)
+        notify("rclone not found", msg)
 
     def _update_tooltip(self) -> None:
         if self._worker is not None and self._worker.isRunning():
@@ -148,8 +155,10 @@ class TrayApp(QSystemTrayIcon):
     def _on_browser_state_changed(self, browser_name: str, is_running: bool) -> None:
         logger.debug("Browser state: %s running=%s", browser_name, is_running)
         if self._worker is None or not self._worker.isRunning():
-            state = "waiting" if self._browser_monitor.any_running() else (
-                "error" if self._last_error else "idle"
+            state = (
+                "waiting"
+                if self._browser_monitor.any_running()
+                else ("error" if self._last_error else "idle")
             )
             self.setIcon(self._make_icon(state))
         self._update_tooltip()
@@ -231,7 +240,11 @@ class TrayApp(QSystemTrayIcon):
             self._settings_dialog.activateWindow()
             return
 
-        dialog = SettingsDialog(browser_monitor=self._browser_monitor, parent=None)
+        dialog = SettingsDialog(
+            browser_monitor=self._browser_monitor,
+            winget_manager=self._winget,
+            parent=None,
+        )
         dialog.settings_saved.connect(self._on_settings_saved)
         dialog.sync_requested.connect(self._trigger_sync)
         dialog.apply_backup_requested.connect(self._trigger_apply_backup)
@@ -271,10 +284,7 @@ class TrayApp(QSystemTrayIcon):
         self._teardown_watcher()
         self._setup_watcher(sync_folder)
 
-        has_profiles = any(
-            profiles
-            for profiles in self._config.get_enabled_profiles().values()
-        )
+        has_profiles = any(profiles for profiles in self._config.get_enabled_profiles().values())
         autostart.apply(has_profiles)
         logger.info("Autostart %s", "enabled" if has_profiles else "disabled")
 
@@ -305,25 +315,25 @@ class TrayApp(QSystemTrayIcon):
         sync_folder = self._config.get_sync_folder()
         if sync_folder is None:
             logger.warning("No sync folder configured — cannot sync")
-            self.showMessage(
+            notify(
                 "Chromium Profile Syncer",
                 "No sync folder configured. Open Settings to choose one.",
-                QSystemTrayIcon.MessageIcon.Warning,
             )
             return
 
         if not self._check_sync_folder_permissions(sync_folder):
             logger.warning("Sync folder not readable/writable: %s", sync_folder)
-            self.showMessage(
+            notify(
                 "Chromium Profile Syncer",
                 f"Cannot access sync folder: {sync_folder}\nCheck folder permissions.",
-                QSystemTrayIcon.MessageIcon.Warning,
             )
             return
 
         logger.info(
             "Starting sync worker (only_browser=%s, only_profile=%s, force_direction=%s)",
-            only_browser, only_profile, force_direction,
+            only_browser,
+            only_profile,
+            force_direction,
         )
         self._worker = SyncWorker(self._engine, only_browser, only_profile, force_direction)
         self._worker.started.connect(self._on_sync_started)
@@ -396,24 +406,19 @@ class TrayApp(QSystemTrayIcon):
 
         if skipped_running:
             names = ", ".join(skipped_running)
-            self.showMessage(
+            notify(
                 "Chromium Profile Syncer",
                 f"{names} is running — close it completely to allow sync.",
-                QSystemTrayIcon.MessageIcon.Warning,
             )
         elif triggered_browser and not is_first_sync:
-            self.showMessage(
-                "Chromium Profile Syncer",
-                f"{triggered_browser} synced",
-                QSystemTrayIcon.MessageIcon.NoIcon,
-                2000,
-            )
+            notify("Chromium Profile Syncer", f"{triggered_browser} synced", duration_ms=2000)
 
     def _auto_update_check(self) -> None:
-        if self._settings_dialog is not None:
-            logger.debug("update: skip auto check — settings dialog open")
-            return
-        self._do_update_check(silent=True)
+        if self._settings_dialog is None:
+            self._do_update_check(silent=True)
+        else:
+            logger.debug("update: skip app update check — settings dialog open")
+        self._winget.detect()
 
     def _manual_update_check(self) -> None:
         self._do_update_check(silent=False)
@@ -424,20 +429,11 @@ class TrayApp(QSystemTrayIcon):
         except updater.UpdateCheckError as exc:
             logger.warning("update: %s", exc)
             if not silent:
-                self.showMessage(
-                    "Chromium Profile Syncer",
-                    f"Update check failed: {exc}",
-                    QSystemTrayIcon.MessageIcon.Warning,
-                )
+                notify("Chromium Profile Syncer", f"Update check failed: {exc}")
             return
         if result is None:
             if not silent:
-                self.showMessage(
-                    "Chromium Profile Syncer",
-                    "Already up to date.",
-                    QSystemTrayIcon.MessageIcon.Information,
-                    3000,
-                )
+                notify("Chromium Profile Syncer", "Already up to date.")
             return
         target_sha, asset_url, sha_url = result
         if self._worker is not None and self._worker.isRunning():
@@ -449,13 +445,24 @@ class TrayApp(QSystemTrayIcon):
         except Exception as exc:
             logger.error("update: install failed: %s", exc)
             if not silent:
-                self.showMessage(
-                    "Chromium Profile Syncer",
-                    f"Update failed: {exc}",
-                    QSystemTrayIcon.MessageIcon.Warning,
-                )
+                notify("Chromium Profile Syncer", f"Update failed: {exc}")
             return
         QApplication.quit()
+
+    def _on_winget_detected(self, managed: bool, _installed: str, available: str) -> None:
+        if not managed:
+            return
+        if not self._config.get_helium_auto_update():
+            return
+        if not available:
+            return
+        if self._browser_monitor.is_running("Helium"):
+            logger.debug("winget upgrade Helium: skipped — browser running")
+            return
+        self._winget.upgrade()
+
+    def _on_helium_upgrade_finished(self, success: bool, message: str) -> None:
+        notify("Chromium Profile Syncer", message, duration_ms=3000)
 
     def _on_sync_error(self, msg: str) -> None:
         self._worker = None

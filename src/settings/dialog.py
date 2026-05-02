@@ -35,6 +35,7 @@ from src.settings._helpers import (
 from src.settings.initial_upload import InitialUploadDialog
 from src.shortcuts_editor import ShortcutsEditorDialog
 from src.sync.sync_dir import SYNC_DIR_NAME
+from src.winget import WingetManager
 
 _LOG = logging.getLogger(__name__)
 
@@ -69,10 +70,11 @@ class SettingsDialog(QDialog):
         *,
         browsers_list: list | None = None,
         browser_monitor: BrowserMonitor | None = None,
+        winget_manager: WingetManager | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Chromium Profile Syncer — Settings")
-        self.setMinimumWidth(700)
+        self.setMinimumWidth(900)
         self.setSizeGripEnabled(False)
 
         self._browsers = (
@@ -81,10 +83,13 @@ class SettingsDialog(QDialog):
             else [b for b in ALL_BROWSERS if b.is_installed()]
         )
         self._browser_monitor = browser_monitor
+        self._winget_manager = winget_manager
 
         self._profile_states: dict[str, dict[str, bool]] = {}
         self._profile_progress: dict[tuple[str, str], tuple[QProgressBar, QLabel]] = {}
         self._autostart_check: QCheckBox | None = None
+        self._helium_update_check: QCheckBox | None = None
+        self._helium_version_label: QLabel | None = None
         self._folder_edit: QLineEdit | None = None
         self._clean_btn: QPushButton | None = None
         self._profiles_group: QGroupBox | None = None
@@ -169,6 +174,18 @@ class SettingsDialog(QDialog):
 
         selects_layout.addSpacing(8)
 
+        self._helium_update_check = QCheckBox("Auto-update Helium (winget)")
+        self._helium_update_check.setVisible(False)
+        self._helium_update_check.toggled.connect(self._on_helium_auto_update_changed)
+        selects_layout.addWidget(self._helium_update_check)
+
+        self._helium_version_label = QLabel()
+        self._helium_version_label.setStyleSheet(SMALL_MUTED)
+        self._helium_version_label.setVisible(False)
+        selects_layout.addWidget(self._helium_version_label)
+
+        selects_layout.addSpacing(8)
+
         edit_shortcuts_btn = QPushButton("Edit Search Shortcuts")
         edit_shortcuts_btn.clicked.connect(self._open_shortcuts_editor)
         selects_layout.addWidget(edit_shortcuts_btn)
@@ -191,6 +208,13 @@ class SettingsDialog(QDialog):
     def _connect_browser_monitor(self) -> None:
         if self._browser_monitor is not None:
             self._browser_monitor.state_changed.connect(self._on_browser_state_changed)
+        if self._winget_manager is not None:
+            self._winget_manager.detected.connect(self._on_winget_detected)
+            self._on_winget_detected(
+                self._winget_manager.is_managed,
+                self._winget_manager.installed_version,
+                self._winget_manager.available_version,
+            )
 
     def _on_browser_state_changed(self, browser_name: str, is_running: bool) -> None:
         indicator = self._browser_status_indicators.get(browser_name)
@@ -257,6 +281,26 @@ class SettingsDialog(QDialog):
     def _on_autostart_changed(self, checked: bool) -> None:
         config_module.set_autostart(checked)
         _LOG.info("Autostart %s", "enabled" if checked else "disabled")
+
+    def _on_helium_auto_update_changed(self, checked: bool) -> None:
+        config_module.set_helium_auto_update(checked)
+
+    def _on_winget_detected(self, managed: bool, installed: str, available: str) -> None:
+        if self._helium_update_check is None:
+            return
+        self._helium_update_check.blockSignals(True)
+        self._helium_update_check.setChecked(config_module.get_helium_auto_update())
+        self._helium_update_check.setVisible(managed)
+        self._helium_update_check.blockSignals(False)
+        if self._helium_version_label is not None:
+            if managed and installed:
+                if available:
+                    self._helium_version_label.setText(f"{installed} → {available}")
+                else:
+                    self._helium_version_label.setText(f"{installed} (latest)")
+                self._helium_version_label.setVisible(True)
+            else:
+                self._helium_version_label.setVisible(False)
 
     def _pick_initial_upload_profile(self) -> tuple[str, str] | None:
         options: list[tuple[str, str, str]] = []
@@ -757,6 +801,11 @@ class SettingsDialog(QDialog):
         if self._browser_monitor is not None:
             try:
                 self._browser_monitor.state_changed.disconnect(self._on_browser_state_changed)
+            except RuntimeError:
+                pass
+        if self._winget_manager is not None:
+            try:
+                self._winget_manager.detected.disconnect(self._on_winget_detected)
             except RuntimeError:
                 pass
         super().closeEvent(event)

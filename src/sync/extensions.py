@@ -244,7 +244,7 @@ def update_webstore_manifest(
             existing = data if isinstance(data, dict) else {e: "" for e in data}
         except (json.JSONDecodeError, OSError):
             pass
-    webstore_map: dict[str, str] = dict(existing)
+    webstore_map: dict[str, str] = {}
     for id_dir in profile_ext_dir.iterdir():
         if not id_dir.is_dir():
             continue
@@ -256,13 +256,9 @@ def update_webstore_manifest(
             webstore_map[canonical] = name if name != ext_id else existing.get(canonical, ext_id)
         elif canonical != ext_id:
             name = _extension_name(best) if best else ""
-            # Don't store internal alias ID as the display name
             if not name or name == ext_id:
                 name = existing.get(canonical, "")
             webstore_map[canonical] = name
-    for alias_id, canonical_id in (aliases or {}).items():
-        if canonical_id not in webstore_map:
-            webstore_map[canonical_id] = existing.get(canonical_id, "")
     if write_text_if_changed(manifest_path, json.dumps(webstore_map)):
         _LOG.info("Updated webstore manifest: %d extensions", len(webstore_map))
 

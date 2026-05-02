@@ -238,3 +238,13 @@ def set_excluded_ext_settings_ids(ext_ids: list[str]) -> None:
     _LOG.info("excluded_ext_settings_ids updated: %s", ext_ids)
 
 
+def get_helium_auto_update() -> bool:
+    return _get().get("helium_auto_update", True)
+
+
+def set_helium_auto_update(enabled: bool) -> None:
+    _get()["helium_auto_update"] = enabled
+    _flush()
+    _LOG.info("helium_auto_update set to %s", enabled)
+
+
