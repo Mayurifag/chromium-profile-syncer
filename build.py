@@ -149,7 +149,7 @@ def build() -> Path:
         "src/main.py",
     ]
     if icon_path is not None:
-        cmd[8:8] = ["--icon", str(icon_path)]
+        cmd[7:7] = ["--icon", str(icon_path)]
     if sys.platform.startswith("linux"):
         cmd.insert(4, "--onefile")
 
