@@ -31,6 +31,14 @@ class Chrome(BrowserBase):
     def windows_executable_name(self) -> str | None:
         return "chrome.exe"
 
+    @property
+    def linux_binary_names(self) -> list[str]:
+        return ["google-chrome-stable", "google-chrome", "chromium"]
+
+    @property
+    def macos_app_bundle(self) -> str | None:
+        return "Google Chrome"
+
     def windows_extensions_registry_key(self) -> str | None:
         return r"SOFTWARE\Google\Chrome\Extensions"
 

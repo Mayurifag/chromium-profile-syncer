@@ -259,6 +259,12 @@ def update_webstore_manifest(
             if not name or name == ext_id:
                 name = existing.get(canonical, "")
             webstore_map[canonical] = name
+    if not webstore_map and existing:
+        _LOG.info(
+            "Profile has 0 web-store extensions; preserving %d existing manifest entries",
+            len(existing),
+        )
+        return
     if write_text_if_changed(manifest_path, json.dumps(webstore_map)):
         _LOG.info("Updated webstore manifest: %d extensions", len(webstore_map))
 
@@ -326,8 +332,11 @@ def install_external_extensions(
             _LOG.info("Skipping %d windows-only extension(s) on non-Windows platform", skipped)
 
     update_url = browser.web_store_update_url
-    on_windows = platform.system() == "Windows"
+    system = platform.system()
+    on_windows = system == "Windows"
+    on_linux = system == "Linux"
     reg_key = browser.windows_extensions_registry_key() if on_windows else None
+    linux_policy_dir = browser.linux_managed_policy_dir() if on_linux else None
 
     if reg_key:
         _install_via_registry(ext_ids, reg_key, update_url)
@@ -339,6 +348,13 @@ def install_external_extensions(
             for stub in ext_dir.glob("*.json"):
                 stub.unlink(missing_ok=True)
                 _LOG.info("Removed orphaned extension stub (now using registry): %s", stub.stem)
+    elif linux_policy_dir:
+        _install_via_linux_policy(ext_ids, linux_policy_dir, browser.name, update_url)
+        ext_dir = browser.external_extensions_dir()
+        if ext_dir is not None and ext_dir.exists():
+            for stub in ext_dir.glob("*.json"):
+                stub.unlink(missing_ok=True)
+                _LOG.info("Removed orphaned extension stub (now using policy): %s", stub.stem)
     else:
         ext_dir = browser.external_extensions_dir()
         if ext_dir is not None:
@@ -423,6 +439,86 @@ def _install_via_force_list(ext_ids: list[str], force_key: str, update_url: str)
         _LOG.warning("Failed to update ExtensionInstallForcelist")
 
 
+def _linux_policy_filename(browser_name: str) -> str:
+    return f"{browser_name.lower().replace(' ', '-')}-syncer.json"
+
+
+def _install_via_linux_policy(
+    ext_ids: list[str], policy_dir: Path, browser_name: str, update_url: str
+) -> None:
+    import shlex
+    import shutil
+    import subprocess
+    import tempfile
+
+    if shutil.which("pkexec") is None:
+        _LOG.warning("pkexec not found — cannot install force-list policy on Linux")
+        return
+
+    target = policy_dir / _linux_policy_filename(browser_name)
+    payload = json.dumps(
+        {"ExtensionInstallForcelist": [f"{e};{update_url}" for e in ext_ids]},
+        indent=2,
+    )
+
+    try:
+        if target.read_text(encoding="utf-8") == payload:
+            return
+    except (OSError, ValueError):
+        pass
+
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".json", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(payload)
+        tmp_path = f.name
+
+    try:
+        cmd = [
+            "pkexec",
+            "sh",
+            "-c",
+            f"mkdir -p {shlex.quote(str(policy_dir))} && "
+            f"install -m 0644 {shlex.quote(tmp_path)} {shlex.quote(str(target))}",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            _LOG.info(
+                "Installed %s force-list policy at %s: %d extensions",
+                browser_name, target, len(ext_ids),
+            )
+        else:
+            _LOG.warning(
+                "Failed to install %s policy via pkexec (rc=%d): %s",
+                browser_name, result.returncode, result.stderr.strip(),
+            )
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+def _clean_linux_policy(policy_dir: Path, browser_name: str) -> None:
+    import shutil
+    import subprocess
+
+    target = policy_dir / _linux_policy_filename(browser_name)
+    if not target.exists():
+        return
+    if shutil.which("pkexec") is None:
+        _LOG.warning("pkexec not found — cannot remove policy file %s", target)
+        return
+
+    result = subprocess.run(
+        ["pkexec", "rm", "-f", str(target)], capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        _LOG.info("Removed %s force-list policy: %s", browser_name, target)
+    else:
+        _LOG.warning(
+            "Failed to remove policy file %s (rc=%d): %s",
+            target, result.returncode, result.stderr.strip(),
+        )
+
+
 def _install_via_stubs(ext_ids: list[str], ext_dir: Path, update_url: str) -> None:
     ext_dir.mkdir(parents=True, exist_ok=True)
     payload = json.dumps({"external_update_url": update_url})
@@ -441,14 +537,19 @@ def _install_via_stubs(ext_ids: list[str], ext_dir: Path, update_url: str) -> No
 
 
 def clean_external_extensions(browsers: list[BrowserBase]) -> None:
-    on_windows = platform.system() == "Windows"
+    system = platform.system()
+    on_windows = system == "Windows"
+    on_linux = system == "Linux"
     for browser in browsers:
         reg_key = browser.windows_extensions_registry_key() if on_windows else None
+        linux_policy_dir = browser.linux_managed_policy_dir() if on_linux else None
         if reg_key:
             _wipe_registry_extensions(reg_key)
             force_key = browser.windows_force_list_registry_key() if on_windows else None
             if force_key:
                 _wipe_registry_key(force_key)
+        elif linux_policy_dir:
+            _clean_linux_policy(linux_policy_dir, browser.name)
         else:
             ext_dir = browser.external_extensions_dir()
             if ext_dir and ext_dir.exists():

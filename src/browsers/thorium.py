@@ -31,6 +31,14 @@ class Thorium(BrowserBase):
     def windows_executable_name(self) -> str | None:
         return "thorium.exe"
 
+    @property
+    def linux_binary_names(self) -> list[str]:
+        return ["thorium-browser", "thorium"]
+
+    @property
+    def macos_app_bundle(self) -> str | None:
+        return "Thorium"
+
     def windows_extensions_registry_key(self) -> str | None:
         # Thorium reads from Chrome's registry path, not its own
         return r"SOFTWARE\Google\Chrome\Extensions"

@@ -247,7 +247,13 @@ def install(artifact: Path) -> None:
     elif sys.platform == "win32":
         subprocess.Popen([str(INSTALL_PATH)], creationflags=subprocess.DETACHED_PROCESS)
     else:
-        subprocess.Popen([str(INSTALL_PATH)])
+        subprocess.Popen(
+            [str(INSTALL_PATH)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
 
 
 def _add_to_path_if_needed(bin_dir: Path) -> None:

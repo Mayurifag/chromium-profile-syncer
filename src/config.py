@@ -196,6 +196,16 @@ def set_last_sync(ts: str) -> None:
     _flush()
 
 
+def get_last_restored_browser() -> str:
+    return _get().get("last_restored_browser", "")
+
+
+def set_last_restored_browser(name: str) -> None:
+    _get()["last_restored_browser"] = name
+    _flush()
+    _LOG.info("last_restored_browser set to %s", name)
+
+
 def get_ungoogled_only_extensions() -> list[str]:
     return _get().get("ungoogled_only_extensions", [])
 
@@ -246,5 +256,15 @@ def set_helium_auto_update(enabled: bool) -> None:
     _get()["helium_auto_update"] = enabled
     _flush()
     _LOG.info("helium_auto_update set to %s", enabled)
+
+
+def get_flags_ignore() -> list[str]:
+    return _get().get("flags_ignore", [])
+
+
+def set_flags_ignore(flags: list[str]) -> None:
+    _get()["flags_ignore"] = sorted(set(flags))
+    _flush()
+    _LOG.info("flags_ignore updated: %d entries", len(flags))
 
 

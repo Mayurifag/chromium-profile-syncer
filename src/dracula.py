@@ -186,4 +186,57 @@ QMenu::separator {{
     height: 1px;
     background-color: {CURRENT_LINE};
 }}
+
+QScrollBar:vertical {{
+    background: {BACKGROUND};
+    width: 10px;
+    margin: 0;
+    border: none;
+}}
+
+QScrollBar::handle:vertical {{
+    background: {CURRENT_LINE};
+    border-radius: 5px;
+    min-height: 24px;
+}}
+
+QScrollBar::handle:vertical:hover {{
+    background: {COMMENT};
+}}
+
+QScrollBar::handle:vertical:pressed {{
+    background: {PURPLE};
+}}
+
+QScrollBar:horizontal {{
+    background: {BACKGROUND};
+    height: 10px;
+    margin: 0;
+    border: none;
+}}
+
+QScrollBar::handle:horizontal {{
+    background: {CURRENT_LINE};
+    border-radius: 5px;
+    min-width: 24px;
+}}
+
+QScrollBar::handle:horizontal:hover {{
+    background: {COMMENT};
+}}
+
+QScrollBar::handle:horizontal:pressed {{
+    background: {PURPLE};
+}}
+
+QScrollBar::add-line, QScrollBar::sub-line {{
+    background: none;
+    border: none;
+    width: 0;
+    height: 0;
+}}
+
+QScrollBar::add-page, QScrollBar::sub-page {{
+    background: none;
+}}
 """

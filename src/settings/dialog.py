@@ -194,6 +194,10 @@ class SettingsDialog(QDialog):
         view_ext_btn.clicked.connect(self._open_extension_links)
         selects_layout.addWidget(view_ext_btn)
 
+        flags_btn = QPushButton("Flags")
+        flags_btn.clicked.connect(self._open_flags_manager)
+        selects_layout.addWidget(flags_btn)
+
         selects_layout.addStretch()
         selects_row.setVisible(False)
         right.addWidget(selects_row)
@@ -793,6 +797,22 @@ class SettingsDialog(QDialog):
             dlg = ExtensionsManagerDialog(self, sync_folder=current_dir.parent)
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to open extensions manager:\n{exc}")
+            return
+        dlg.exec()
+
+    def _open_flags_manager(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        from src.settings.flags_manager import FlagsManagerDialog
+
+        current_dir = self._get_sync_dir_or_warn()
+        if current_dir is None:
+            return
+
+        try:
+            dlg = FlagsManagerDialog(self, sync_folder=current_dir.parent)
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"Failed to open flags manager:\n{exc}")
             return
         dlg.exec()
 

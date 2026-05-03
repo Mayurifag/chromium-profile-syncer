@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
@@ -17,6 +20,46 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
 )
+
+from src import config as _config
+from src.browsers import ALL_BROWSERS, BrowserBase, get_browser
+
+_LOG = logging.getLogger(__name__)
+
+
+def _webstore_url(ext_id: str) -> str:
+    return f"https://chromewebstore.google.com/detail/{ext_id}"
+
+
+def _resolve_target_browser() -> BrowserBase | None:
+    name = _config.get_last_restored_browser()
+    if name:
+        b = get_browser(name)
+        if b and b.launch_command():
+            return b
+    for b in ALL_BROWSERS:
+        if b.is_installed() and b.launch_command():
+            return b
+    return None
+
+
+def _open_urls(urls: list[str]) -> None:
+    if not urls:
+        return
+    browser = _resolve_target_browser()
+    if browser is None:
+        for u in urls:
+            QDesktopServices.openUrl(QUrl(u))
+        return
+    cmd = browser.launch_command()
+    assert cmd
+    try:
+        subprocess.Popen([*cmd, *urls], close_fds=True)
+    except OSError as exc:
+        _LOG.warning("Failed to launch %s (%s) — falling back to default browser",
+                     browser.name, exc)
+        for u in urls:
+            QDesktopServices.openUrl(QUrl(u))
 
 
 def _dir_size(d: Path) -> int:
@@ -55,10 +98,10 @@ def _generate_html(ext_map: dict[str, str]) -> str:
     rows = ""
     for ext_id, name in sorted(ext_map.items(), key=lambda x: (x[1] or x[0]).lower()):
         display = name or ext_id
-        url = f"https://chromewebstore.google.com/detail/{ext_id}"
+        url = _webstore_url(ext_id)
         rows += (
-            f'<tr><td><a href="{url}" target="_blank">{display}</a></td>'
-            f'<td style="color:#888;font-size:0.85em">{ext_id}</td></tr>\n'
+            f'<tr><td><a href="{url}" target="_blank" rel="noopener">{display}</a></td>'
+            f'<td class="id">{ext_id}</td></tr>\n'
         )
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -66,12 +109,18 @@ def _generate_html(ext_map: dict[str, str]) -> str:
 <meta charset="utf-8">
 <title>Extensions</title>
 <style>
-  body {{ font-family: sans-serif; padding: 24px; }}
+  body {{ font-family: ui-sans-serif, system-ui, sans-serif; padding: 24px;
+          background: #282a36; color: #f8f8f2; }}
+  h2 {{ color: #bd93f9; margin-top: 0; }}
   table {{ border-collapse: collapse; width: 100%; }}
-  th {{ text-align: left; border-bottom: 2px solid #ccc; padding: 6px 8px; }}
-  td {{ padding: 6px 8px; border-bottom: 1px solid #eee; }}
-  a {{ color: #1a73e8; text-decoration: none; }}
-  a:hover {{ text-decoration: underline; }}
+  th {{ text-align: left; padding: 8px; color: #ff79c6;
+        border-bottom: 2px solid #44475a; }}
+  td {{ padding: 8px; border-bottom: 1px solid #44475a; }}
+  td.id {{ color: #6272a4; font-size: 0.85em;
+           font-family: ui-monospace, "JetBrains Mono", monospace; }}
+  a {{ color: #8be9fd; text-decoration: none; }}
+  a:hover {{ color: #50fa7b; text-decoration: underline; }}
+  tr:hover td {{ background: #313340; }}
 </style>
 </head>
 <body>
@@ -99,6 +148,12 @@ class ExtensionsManagerDialog(QDialog):
         from src.sync.sync_dir import SYNC_DIR_NAME
 
         self._work_dir = self._sync_folder / SYNC_DIR_NAME
+        stale = self._work_dir / "extensions.html"
+        if stale.exists():
+            try:
+                stale.unlink()
+            except OSError:
+                pass
 
     def _read_extensions(self) -> dict[str, str]:
         assert self._work_dir
@@ -127,15 +182,19 @@ class ExtensionsManagerDialog(QDialog):
         html_btn = QPushButton("Open in Browser")
         html_btn.clicked.connect(lambda: self._open_html(ext_map))
         toolbar.addWidget(html_btn)
+        install_all_btn = QPushButton(f"Install All ({len(ext_map)})")
+        install_all_btn.clicked.connect(lambda: self._install_all(ext_map))
+        toolbar.addWidget(install_all_btn)
         toolbar.addStretch()
         root.addLayout(toolbar)
 
-        table = QTableWidget(len(ext_map), 3)
-        table.setHorizontalHeaderLabels(["Name", "Settings", ""])
+        table = QTableWidget(len(ext_map), 4)
+        table.setHorizontalHeaderLabels(["Name", "Settings", "", ""])
         hdr = table.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         table.verticalHeader().setVisible(False)
@@ -156,11 +215,18 @@ class ExtensionsManagerDialog(QDialog):
             )
             table.setItem(row, 1, size_item)
 
+            install_btn = QPushButton("Install")
+            install_btn.setToolTip(f"Open Web Store page for {ext_id}")
+            install_btn.clicked.connect(
+                lambda _checked, eid=ext_id: self._install_extension(eid)
+            )
+            table.setCellWidget(row, 2, install_btn)
+
             del_btn = QPushButton("Delete")
             del_btn.clicked.connect(
                 lambda _checked, eid=ext_id, r=row: self._delete_extension(eid, r)
             )
-            table.setCellWidget(row, 2, del_btn)
+            table.setCellWidget(row, 3, del_btn)
 
         root.addWidget(table)
 
@@ -172,10 +238,28 @@ class ExtensionsManagerDialog(QDialog):
         root.addWidget(buttons)
 
     def _open_html(self, ext_map: dict[str, str]) -> None:
-        assert self._work_dir
-        html_path = self._work_dir / "extensions.html"
+        html_path = Path(tempfile.gettempdir()) / "chromium_profile_syncer_extensions.html"
         html_path.write_text(_generate_html(ext_map), encoding="utf-8")
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(html_path)))
+        _open_urls([QUrl.fromLocalFile(str(html_path)).toString()])
+
+    def _install_extension(self, ext_id: str) -> None:
+        _open_urls([_webstore_url(ext_id)])
+
+    def _install_all(self, ext_map: dict[str, str]) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        browser = _resolve_target_browser()
+        target_label = browser.name if browser else "default browser"
+        if len(ext_map) > 5:
+            reply = QMessageBox.question(
+                self,
+                "Install All",
+                f"Open {len(ext_map)} Web Store tabs in {target_label}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        _open_urls([_webstore_url(ext_id) for ext_id in sorted(ext_map)])
 
     def _delete_extension(self, ext_id: str, row: int) -> None:
         from PySide6.QtWidgets import QMessageBox

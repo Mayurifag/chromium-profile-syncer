@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import src.config as _config
 from src import rclone as _rclone
 from src.sync import extensions as _extensions
+from src.sync import flags as _flags
 from src.sync import history as _history
 from src.sync import leveldb as _leveldb
 from src.sync import prefs as _prefs
@@ -399,6 +400,18 @@ class SyncEngine:
                     shutil.rmtree(entry)
                     _LOG.info("Pruned excluded ext IndexedDB: %s", entry.name)
 
+    def _sync_browser_flags(self, browser: BrowserBase, sync_root: Path) -> None:
+        local_state = browser.local_state_path()
+        if local_state is None:
+            return
+        ignore = _config.get_flags_ignore()
+        try:
+            s, sk = _flags.sync_flags(browser.name, local_state, sync_root, ignore)
+            self._synced_count += s
+            self._skipped_count += sk
+        except OSError:
+            _LOG.exception("Flags sync failed for %s", browser.name)
+
     def _sync_single_profile(
         self,
         browser: BrowserBase,
@@ -427,6 +440,7 @@ class SyncEngine:
                     ungoogled_only_ext_ids=ungoogled_only_ext_ids,
                     windows_only_ext_ids=windows_only_ext_ids,
                 )
+                _config.set_last_restored_browser(browser.name)
                 if force_direction != "pull":
                     _config.clear_restore_flag(browser.name, profile_path.name)
             else:
@@ -523,13 +537,15 @@ class SyncEngine:
                     continue
 
                 allowed = enabled_profiles.get(browser.name)
-                if not allowed:
+                manual_pull = force_direction == "pull" and only_profile is not None
+                if not allowed and not manual_pull:
                     _LOG.info(
                         "Browser %s: no enabled profiles in config — skipping", browser.name
                     )
                     continue
 
-                profiles = [p for p in profiles if p.name in allowed]
+                if not manual_pull:
+                    profiles = [p for p in profiles if p.name in allowed]
                 if only_profile:
                     profiles = [p for p in profiles if p.name == only_profile]
                 if not profiles:
@@ -561,6 +577,7 @@ class SyncEngine:
                         )
                         if needs_restore and force_direction != "pull":
                             raise
+                self._sync_browser_flags(browser, current_dir)
             success = True
         finally:
             if success and any(work_dir.iterdir()):

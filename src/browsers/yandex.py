@@ -30,3 +30,11 @@ class Yandex(BrowserBase):
     @property
     def windows_executable_name(self) -> str | None:
         return "browser.exe"
+
+    @property
+    def linux_binary_names(self) -> list[str]:
+        return ["yandex-browser", "yandex-browser-stable"]
+
+    @property
+    def macos_app_bundle(self) -> str | None:
+        return "Yandex"

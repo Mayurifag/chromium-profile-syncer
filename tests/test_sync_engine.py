@@ -45,6 +45,8 @@ def _make_browser(
     mock.external_extensions_dir.return_value = None
     mock.windows_extensions_registry_key.return_value = None
     mock.windows_force_list_registry_key.return_value = None
+    mock.linux_managed_policy_dir.return_value = None
+    mock.local_state_path.return_value = None
     mock.web_store_update_url = "https://clients2.google.com/service/update2/crx"
     mock.ext_id_aliases = {}
     return mock
@@ -615,6 +617,33 @@ def test_sync_all_filters_profiles(tmp_path: Path) -> None:
         engine.sync_all()
 
     assert (sync_folder / SYNC_DIR_NAME / "preferences.json").is_file()
+
+
+def test_sync_all_pull_only_profile_bypasses_stale_enabled_profiles(tmp_path: Path) -> None:
+    profile1 = tmp_path / "profiles" / "Profile 1"
+    profile1.mkdir(parents=True)
+    _write_file(profile1 / "Preferences", "{}", mtime=1000.0)
+
+    sync_folder = tmp_path / "sync"
+    current_dir = sync_folder / SYNC_DIR_NAME
+    current_dir.mkdir(parents=True)
+    _write_file(current_dir / "Bookmarks", "remote-content", mtime=5000.0)
+    _write_file(current_dir / "metadata.json", "{}", mtime=5000.0)
+
+    browser = _make_browser(name="TB", installed=True, running=False, profiles=[profile1])
+    engine = _make_engine(sync_folder, browsers=[browser])
+
+    with patch("src.config.get_enabled_browsers", return_value={"TB": True}), \
+         patch("src.config.get_enabled_profiles", return_value={"TB": ["Default"]}), \
+         patch("src.config.get_profile_directions", return_value={}), \
+         patch("src.config.get_profiles_needing_restore", return_value={}):
+        engine.sync_all(
+            only_browser="TB",
+            only_profile="Profile 1",
+            force_direction="pull",
+        )
+
+    assert (profile1 / "Bookmarks").read_text() == "remote-content"
 
 
 # ---------------------------------------------------------------------------

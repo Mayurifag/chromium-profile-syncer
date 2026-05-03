@@ -20,7 +20,7 @@ class Helium(BrowserBase):
 
     @property
     def web_store_update_url(self) -> str:
-        return "https://services.helium.imput.net/service/update2/crx"
+        return "https://clients2.google.com/service/update2/crx"
 
     @property
     def unix_process_names(self) -> list[str]:
@@ -43,9 +43,20 @@ class Helium(BrowserBase):
     def windows_executable_name(self) -> str | None:
         return "chrome.exe"
 
+    @property
+    def linux_binary_names(self) -> list[str]:
+        return ["helium"]
+
+    @property
+    def macos_app_bundle(self) -> str | None:
+        return "Helium"
+
     def windows_extensions_registry_key(self) -> str | None:
-        return r"SOFTWARE\Chromium\Extensions"
+        return r"SOFTWARE\imput\Helium\Extensions"
 
     def windows_force_list_registry_key(self) -> str | None:
-        return r"SOFTWARE\Policies\Chromium\ExtensionInstallForcelist"
+        return r"SOFTWARE\Policies\Helium\ExtensionInstallForcelist"
+
+    def linux_managed_policy_dir(self) -> Path | None:
+        return Path("/etc/chromium/policies/managed")
 

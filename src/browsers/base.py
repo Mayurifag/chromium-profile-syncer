@@ -4,6 +4,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -92,10 +93,17 @@ class BrowserBase(ABC):
         root = self.profile_root()
         return (root / "External Extensions") if root else None
 
+    def local_state_path(self) -> Path | None:
+        root = self.profile_root()
+        return (root / "Local State") if root else None
+
     def windows_extensions_registry_key(self) -> str | None:
         return None
 
     def windows_force_list_registry_key(self) -> str | None:
+        return None
+
+    def linux_managed_policy_dir(self) -> Path | None:
         return None
 
     @property
@@ -113,6 +121,27 @@ class BrowserBase(ABC):
             return None
         exe = root.parent / "Application" / exe_name
         return exe if exe.exists() else None
+
+    @property
+    def linux_binary_names(self) -> list[str]:
+        return []
+
+    @property
+    def macos_app_bundle(self) -> str | None:
+        return None
+
+    def launch_command(self) -> list[str] | None:
+        if sys.platform == "win32":
+            exe = self.executable()
+            return [str(exe)] if exe else None
+        if sys.platform == "darwin":
+            bundle = self.macos_app_bundle
+            return ["open", "-a", bundle, "--args"] if bundle else None
+        for cand in self.linux_binary_names:
+            path = shutil.which(cand)
+            if path:
+                return [path]
+        return None
 
     def _name_from_local_state(self, profile_dir_name: str) -> str | None:
         root = self.profile_root()

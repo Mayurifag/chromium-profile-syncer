@@ -11,7 +11,9 @@ SYNC_DIR_NAME = "current"
 _SKIP_NAMES = {"LOG", "LOG.old", "LOCK"}
 # Root-level files written directly to current_dir (not via work_dir). Never
 # delete them during merge_to_sync_dir — their absence from work_dir is by design.
-_PRESERVE_ROOT_FILES = {"metadata.json", "search_shortcuts.json", "typed_urls.json"}
+_PRESERVE_ROOT_FILES = {
+    "metadata.json", "search_shortcuts.json", "typed_urls.json", "browser_flags.json",
+}
 
 
 def write_if_changed(src: Path, dst: Path) -> bool:
