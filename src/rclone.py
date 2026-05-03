@@ -45,9 +45,11 @@ def run(cmd: list[str], description: str, report: Callable[[str], None]) -> None
     _LOG.debug("Executing: %s", " ".join(cmd))
     output_lines: list[str] = []
     try:
+        from src._winproc import hidden_popen_kwargs
         process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1,
+            **hidden_popen_kwargs(),
         )
         for line in iter(process.stdout.readline, ""):
             line = line.strip()

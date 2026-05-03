@@ -100,7 +100,10 @@ def _generate_ico(renderer) -> Path:
     return ico_path
 
 
-def _generate_icon() -> Path:
+def _generate_icon() -> Path | None:
+    if sys.platform.startswith("linux"):
+        return None
+
     from PySide6.QtCore import QByteArray
     from PySide6.QtSvg import QSvgRenderer
     from PySide6.QtWidgets import QApplication
@@ -139,14 +142,14 @@ def build() -> Path:
         "--windowed",
         "--name",
         APP_NAME,
-        "--icon",
-        str(icon_path),
         "--hidden-import",
         "psutil",
         "--hidden-import",
         "PySide6.QtSvg",
         "src/main.py",
     ]
+    if icon_path is not None:
+        cmd[8:8] = ["--icon", str(icon_path)]
     if sys.platform.startswith("linux"):
         cmd.insert(4, "--onefile")
 

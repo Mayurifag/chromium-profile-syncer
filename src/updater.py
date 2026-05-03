@@ -120,8 +120,17 @@ def _verify_sha256(path: Path, expected: str) -> None:
 
 def _spawn_detached(cmd: list[str]) -> None:
     if sys.platform == "win32":
-        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-        subprocess.Popen(cmd, creationflags=flags, close_fds=True)
+        from src._winproc import hidden_popen_kwargs
+        kwargs = hidden_popen_kwargs()
+        kwargs["creationflags"] |= subprocess.CREATE_NEW_PROCESS_GROUP
+        subprocess.Popen(
+            cmd,
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **kwargs,
+        )
     else:
         subprocess.Popen(cmd, start_new_session=True, close_fds=True)
 
