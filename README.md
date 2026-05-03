@@ -92,9 +92,18 @@ all browsers and it also may conflict. For example, Thorium and Chrome use the
 same registry paths to look for extensions, so if you start managing Thorium,
 extensions will also install to all used profiles of Chrome.
 
-For Windows extensions installed via registry keys, Linux/MacOS via external
-extensions `.json` files (no other ways to manage those, also not working
-on browsers based on some iridium patchsets).
+For Windows extensions installed via registry keys (per-extension prefs key
+plus `ExtensionInstallForcelist` policy key, both under `HKCU`).
+
+For Linux: force-list policy files written to
+`/etc/chromium/policies/managed/<browser>-syncer.json` via `pkexec` for
+browsers that support it (e.g. Helium); falls back to per-user
+`External Extensions/<id>.json` stubs otherwise. **Force-list entries are
+bare IDs (no `;<url>` suffix)** — this is the only reliable path on
+ungoogled-chromium / Helium, where the bundled `extstore-fixups` extension
+proxies Web Store fetches when no explicit update URL is given.
+
+For macOS: per-user `External Extensions/<id>.json` stubs only.
 
 Some files are intentionally excluded being useless and taking a lot of space.
 For example, uBlock Origin rules compilated file has no need to be synced, it 
@@ -130,4 +139,3 @@ is preserved — it just is not applied to browsers that don't need it.
 
 - Releases and automatical updates check
 - search shortcut gru by default - is that possible to do automatically?
-- helium - extensions dont auto install - is that possible to make this work?

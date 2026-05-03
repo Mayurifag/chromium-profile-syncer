@@ -19,10 +19,6 @@ class Helium(BrowserBase):
         return {"blockjmkbacgjkknlgpkjjiijinjdanf": "cjpalhdlnbpafiamejdnhcphjbkeiagm"}
 
     @property
-    def web_store_update_url(self) -> str:
-        return "https://clients2.google.com/service/update2/crx"
-
-    @property
     def unix_process_names(self) -> list[str]:
         return ["helium"]
 

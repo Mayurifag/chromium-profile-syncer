@@ -49,6 +49,29 @@ and `_install_extensions_via_force_list` already manage.**
 
 Keys shared across all Chromium-based browsers. Bulk-deleting (e.g. browser cleanup) silently breaks extension install for unrelated browsers reading same paths.
 
+### Linux Extension Auto-Install — Force-List Policy + Bare IDs
+
+**Force-list (`ExtensionInstallForcelist`) entries on Linux MUST be bare IDs, not `id;url` pairs.**
+
+Path: `/etc/chromium/policies/managed/<browser>-syncer.json` (system-wide, requires `pkexec` to write — file 0644 root-owned but world-readable; dir 0755 root-owned). Helium reads `/etc/chromium/policies` (confirmed via `strings /opt/helium-browser-bin/helium`); other Chromium forks may read their own subtree (e.g. `/etc/thorium/policies`) — extend `linux_managed_policy_dir()` per-browser.
+
+Schema:
+~~~json
+{ "ExtensionInstallForcelist": ["dpacanjfikmhoddligfbehkpomnbgblf", ...] }
+~~~
+
+**Why bare ID, not `id;url`:**
+- Helium's own update server (`https://services.helium.imput.net/service/update2/crx`) returns **404** for arbitrary Web Store extensions — only serves Helium-bundled ones (uBlock under internal id `blockjmkbacgjkknlgpkjjiijinjdanf`, KeePassXC patches, etc).
+- Hard-coding `clients2.google.com` in the URL also doesn't auto-install on Helium.
+- Omitting the URL makes Chromium use its built-in default — intercepted by Helium's bundled extension `extstore-fixups` (id `jfnekidfgkhnfagaabpddmioknbjglgp`), which proxies Web Store fetches. This is the only reliable path.
+- Per Chromium policy schema, `<id>` (bare) is valid alongside `<id>;<update_url>`. Use bare everywhere force-list is supported (Linux policy file + Windows `ExtensionInstallForcelist` registry).
+
+**Per-extension stubs (`External Extensions/<id>.json` with `external_update_url`) are different:** they REQUIRE a URL. Default URL stays `clients2.google.com/service/update2/crx` (`BrowserBase.web_store_update_url`). Don't override per-browser unless the browser actually has a working alternate proxy that serves arbitrary Web Store IDs.
+
+**Browser must be fully restarted** for new policy file to be picked up — Chromium reads policies at startup only, no live reload.
+
+**Manifest preservation:** `update_webstore_manifest` must skip writing when profile has 0 web-store extensions in `Extensions/` AND existing manifest has entries — fresh ungoogled browsers (Helium) create empty `Extensions/` on first launch and would otherwise wipe the prior cross-browser sync state. See guard in `src/sync/extensions.py:update_webstore_manifest`.
+
 ### Search Shortcuts Sync
 
 Extracts user-created search engines (`prepopulate_id = 0`) from `Web Data` SQLite, stores as `search_shortcuts.json` inside tar (at `work_dir` root).

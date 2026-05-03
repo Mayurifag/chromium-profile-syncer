@@ -342,14 +342,14 @@ def install_external_extensions(
         _install_via_registry(ext_ids, reg_key, update_url)
         force_key = browser.windows_force_list_registry_key() if on_windows else None
         if force_key:
-            _install_via_force_list(ext_ids, force_key, update_url)
+            _install_via_force_list(ext_ids, force_key)
         ext_dir = browser.external_extensions_dir()
         if ext_dir is not None and ext_dir.exists():
             for stub in ext_dir.glob("*.json"):
                 stub.unlink(missing_ok=True)
                 _LOG.info("Removed orphaned extension stub (now using registry): %s", stub.stem)
     elif linux_policy_dir:
-        _install_via_linux_policy(ext_ids, linux_policy_dir, browser.name, update_url)
+        _install_via_linux_policy(ext_ids, linux_policy_dir, browser.name)
         ext_dir = browser.external_extensions_dir()
         if ext_dir is not None and ext_dir.exists():
             for stub in ext_dir.glob("*.json"):
@@ -400,7 +400,7 @@ def _install_via_registry(ext_ids: list[str], reg_subkey: str, update_url: str) 
             _LOG.warning("Failed to register extension in registry: %s", ext_id)
 
 
-def _install_via_force_list(ext_ids: list[str], force_key: str, update_url: str) -> None:
+def _install_via_force_list(ext_ids: list[str], force_key: str) -> None:
     import winreg
 
     target_set = set(ext_ids)
@@ -431,7 +431,7 @@ def _install_via_force_list(ext_ids: list[str], force_key: str, update_url: str)
                     continue
                 while str(next_i) in used_names:
                     next_i += 1
-                winreg.SetValueEx(key, str(next_i), 0, winreg.REG_SZ, f"{ext_id};{update_url}")
+                winreg.SetValueEx(key, str(next_i), 0, winreg.REG_SZ, ext_id)
                 used_names.add(str(next_i))
                 _LOG.info("Added force-list entry: %s", ext_id)
                 next_i += 1
@@ -444,7 +444,7 @@ def _linux_policy_filename(browser_name: str) -> str:
 
 
 def _install_via_linux_policy(
-    ext_ids: list[str], policy_dir: Path, browser_name: str, update_url: str
+    ext_ids: list[str], policy_dir: Path, browser_name: str
 ) -> None:
     import shlex
     import shutil
@@ -457,7 +457,7 @@ def _install_via_linux_policy(
 
     target = policy_dir / _linux_policy_filename(browser_name)
     payload = json.dumps(
-        {"ExtensionInstallForcelist": [f"{e};{update_url}" for e in ext_ids]},
+        {"ExtensionInstallForcelist": list(ext_ids)},
         indent=2,
     )
 
