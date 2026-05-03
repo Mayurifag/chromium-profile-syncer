@@ -578,6 +578,10 @@ class SyncEngine:
                         if needs_restore and force_direction != "pull":
                             raise
                 self._sync_browser_flags(browser, current_dir)
+            keep_browsers = {bn for bn, profs in enabled_profiles.items() if profs}
+            pruned = _flags.prune_sync_flags(current_dir, keep_browsers)
+            if pruned:
+                _LOG.info("Pruned flags for unused browser(s): %s", ", ".join(pruned))
             success = True
         finally:
             if success and any(work_dir.iterdir()):

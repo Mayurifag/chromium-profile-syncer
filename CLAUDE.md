@@ -98,4 +98,3 @@ Extracts user-created search engines (`prepopulate_id = 0`) from `Web Data` SQLi
 Only write these when `choice_screen_random_shuffle_seed` is already present (signals choice screen is active). Read version from `User Data/Last Version`. None of these keys are MAC-protected.
 
 **`default_search_provider_data.mirrored_template_url_data`:** `DefaultSearchManager` uses this as the authoritative DSE cache. Must be written on restore with Helium's full schema — key differences from minimal builds: `input_encodings` is an array (not string), `id`/`date_created`/`last_modified`/`last_visited` are strings, `synced_guid` (not `sync_guid`), `suggestions_url` (not `suggest_url`), plus extra fields: `doodle_url`, `preconnect_to_search_url`, `prefetch_likely_navigations`, `image_translate_url`, `policy_origin`, `originating_url`, `usage_count`, `search_intent_params`, `contextual_search_url`, `logo_url`. See `_build_mirror_dict` in `src/sync/shortcuts.py`.
-

@@ -24,6 +24,7 @@ import src.config as config_module
 from src.browser_monitor import BrowserMonitor
 from src.browsers import ALL_BROWSERS
 from src.dracula import PROFILE_ROW_STYLE, SMALL_MUTED
+from src.settings import _desktop_backup
 from src.settings._activity_log import ActivityLogWidget
 from src.settings._helpers import (
     _CLOSE_BROWSER_HINT,
@@ -101,6 +102,9 @@ class SettingsDialog(QDialog):
         self._sync_toggle_buttons: dict[tuple[str, str], QPushButton] = {}
         self._remove_profile_buttons: dict[tuple[str, str], QPushButton] = {}
         self._selects_row: QWidget | None = None
+        self._desktop_backup_btn: QPushButton | None = None
+        self._desktop_restore_btn: QPushButton | None = None
+        self._desktop_delete_btn: QPushButton | None = None
         self._syncing: bool = False
 
         self._build_ui()
@@ -197,6 +201,22 @@ class SettingsDialog(QDialog):
         flags_btn = QPushButton("Flags")
         flags_btn.clicked.connect(self._open_flags_manager)
         selects_layout.addWidget(flags_btn)
+
+        selects_layout.addSpacing(8)
+
+        self._desktop_backup_btn = QPushButton("Backup to Desktop")
+        self._desktop_backup_btn.clicked.connect(self._on_backup_to_desktop)
+        selects_layout.addWidget(self._desktop_backup_btn)
+
+        self._desktop_restore_btn = QPushButton("Restore Desktop Backup")
+        self._desktop_restore_btn.clicked.connect(self._on_restore_desktop_backup)
+        self._desktop_restore_btn.setVisible(False)
+        selects_layout.addWidget(self._desktop_restore_btn)
+
+        self._desktop_delete_btn = QPushButton("Delete Desktop Backup")
+        self._desktop_delete_btn.clicked.connect(self._on_delete_desktop_backup)
+        self._desktop_delete_btn.setVisible(False)
+        selects_layout.addWidget(self._desktop_delete_btn)
 
         selects_layout.addStretch()
         selects_row.setVisible(False)
@@ -612,6 +632,7 @@ class SettingsDialog(QDialog):
         if self._activity_log_check and self._activity_log_check.isChecked():
             self._activity_log.enable()
 
+        self._refresh_desktop_backup_buttons()
         self.adjustSize()
 
     def _save_profiles_config(self) -> None:
@@ -815,6 +836,114 @@ class SettingsDialog(QDialog):
             QMessageBox.critical(self, "Error", f"Failed to open flags manager:\n{exc}")
             return
         dlg.exec()
+
+    def _refresh_desktop_backup_buttons(self) -> None:
+        if self._desktop_backup_btn is None:
+            return
+        sync_folder = config_module.get_sync_folder()
+        has_current = sync_folder is not None and (sync_folder / SYNC_DIR_NAME).is_dir()
+        self._desktop_backup_btn.setEnabled(has_current)
+        exists = _desktop_backup.desktop_backup_path().is_file()
+        self._desktop_restore_btn.setVisible(exists)
+        self._desktop_delete_btn.setVisible(exists)
+
+    def _on_backup_to_desktop(self) -> None:
+        from PySide6.QtCore import QCoreApplication
+        from PySide6.QtGui import QCursor
+        from PySide6.QtWidgets import QApplication, QMessageBox
+
+        sync_folder = config_module.get_sync_folder()
+        if sync_folder is None:
+            QMessageBox.warning(self, "No Sync Folder", "Configure a sync folder first.")
+            return
+        current_dir = sync_folder / SYNC_DIR_NAME
+        if not current_dir.is_dir():
+            QMessageBox.information(self, "No Backup", "Run a sync first to create the backup.")
+            return
+
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
+        self._desktop_backup_btn.setEnabled(False)
+        QCoreApplication.processEvents()
+        try:
+            target = _desktop_backup.create(current_dir)
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            self._desktop_backup_btn.setEnabled(True)
+            _LOG.exception("Desktop backup failed")
+            QMessageBox.critical(self, "Backup Failed", f"Could not create backup:\n{exc}")
+            return
+        QApplication.restoreOverrideCursor()
+        _LOG.info("Desktop backup written: %s", target)
+        self._refresh_desktop_backup_buttons()
+        QMessageBox.information(self, "Backup Created", f"Saved to:\n{target}")
+
+    def _on_restore_desktop_backup(self) -> None:
+        from PySide6.QtCore import QCoreApplication
+        from PySide6.QtGui import QCursor
+        from PySide6.QtWidgets import QApplication, QMessageBox
+
+        sync_folder = config_module.get_sync_folder()
+        if sync_folder is None:
+            QMessageBox.warning(self, "No Sync Folder", "Configure a sync folder first.")
+            return
+
+        backup_path = _desktop_backup.desktop_backup_path()
+        if not backup_path.is_file():
+            self._refresh_desktop_backup_buttons()
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Restore Desktop Backup",
+            f"Overwrite sync folder contents with desktop backup?\n\n"
+            f"From: {backup_path}\nTo:   {sync_folder / SYNC_DIR_NAME}\n\n"
+            "Existing synced data will be replaced.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
+        QCoreApplication.processEvents()
+        try:
+            _desktop_backup.restore(sync_folder / SYNC_DIR_NAME)
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            _LOG.exception("Desktop backup restore failed")
+            QMessageBox.critical(self, "Restore Failed", f"Could not restore backup:\n{exc}")
+            return
+        QApplication.restoreOverrideCursor()
+        _LOG.info("Desktop backup restored to %s", sync_folder / SYNC_DIR_NAME)
+        self._refresh_for_folder(sync_folder)
+        QMessageBox.information(self, "Restore Complete", "Desktop backup restored.")
+
+    def _on_delete_desktop_backup(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        backup_path = _desktop_backup.desktop_backup_path()
+        if not backup_path.is_file():
+            self._refresh_desktop_backup_buttons()
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Delete Desktop Backup",
+            f"Delete {backup_path}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            _desktop_backup.delete()
+        except Exception as exc:
+            _LOG.exception("Desktop backup delete failed")
+            QMessageBox.critical(self, "Delete Failed", f"Could not delete backup:\n{exc}")
+            return
+        _LOG.info("Desktop backup deleted")
+        self._refresh_desktop_backup_buttons()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._activity_log.cleanup()

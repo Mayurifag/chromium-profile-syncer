@@ -31,6 +31,7 @@ changes (one file per browser) onto `src\browsers`.
 | Custom Dictionary                | Yes                                      |
 | Search Shortcuts                 | Yes — user-created engines only          |
 | Themes                           | Yes — only active one                    |
+| Flags                            | Yes — changed ones                       |
 
 ### Search Shortcuts
 

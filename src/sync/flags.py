@@ -49,6 +49,17 @@ def save_sync_flags(sync_root: Path, data: dict[str, dict]) -> None:
     )
 
 
+def prune_sync_flags(sync_root: Path, keep_browsers: set[str]) -> list[str]:
+    data = load_sync_flags(sync_root)
+    removed = [name for name in data if name not in keep_browsers]
+    if not removed:
+        return []
+    for name in removed:
+        del data[name]
+    save_sync_flags(sync_root, data)
+    return removed
+
+
 def sync_flags(
     browser_name: str,
     local_state_path: Path,
