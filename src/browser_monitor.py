@@ -21,12 +21,12 @@ class BrowserMonitor(QObject):
     def __init__(self, browsers: list[BrowserBase], parent=None) -> None:
         super().__init__(parent)
         self._browsers = browsers
-        running = scan_running_procs()
-        self._state: dict[str, bool] = {b.name: b.is_running(running) for b in browsers}
+        self._state: dict[str, bool] = {b.name: False for b in browsers}
         self._timer = QTimer(self)
         self._timer.setInterval(5000)
         self._timer.timeout.connect(self._poll)
         self._timer.start()
+        QTimer.singleShot(0, self._poll)
         logger.debug("BrowserMonitor started for: %s", [b.name for b in browsers])
 
     def is_running(self, browser_name: str) -> bool:

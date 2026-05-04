@@ -317,6 +317,8 @@ class SyncEngine:
 
         _rclone.run(cmd, "Restoring from backup", self._report)
 
+        self._invalidate_ublock_selfie(profile_path)
+
         json_path = sync_profile_path / "preferences.json"
         prefs_path = profile_path / "Preferences"
         if json_path.exists() and prefs_path.exists():
@@ -402,6 +404,30 @@ class SyncEngine:
                         prefs_json.write_text(json.dumps(prefs), encoding="utf-8")
             except (OSError, json.JSONDecodeError):
                 pass
+
+    def _invalidate_ublock_selfie(self, profile_path: Path) -> None:
+        # uBlock writes a compiled "selfie" snapshot to IDB and stamps its
+        # version in LES key `selfieMagic`. On startup, matching magic causes
+        # uBlock to load the selfie and ignore any LES changes made after.
+        # Drop `selfieMagic` post-restore so uBlock invalidates the selfie and
+        # rebuilds it from restored LES rules + still-valid compiled list cache
+        # (no network refetch needed).
+        from src.sync.ldb_filter import read_all_kv, write_minimal_db
+
+        les = profile_path / "Local Extension Settings"
+        if not les.exists():
+            return
+        for ext_id in _IDB_FILTER_CACHE_ONLY_EXT_IDS:
+            ext_les = les / ext_id
+            if not ext_les.exists() or _is_empty(ext_les):
+                continue
+            kv = read_all_kv(ext_les)
+            if b"selfieMagic" not in kv:
+                continue
+            kv.pop(b"selfieMagic", None)
+            shutil.rmtree(ext_les)
+            write_minimal_db(ext_les, kv)
+            _LOG.info("Stripped selfieMagic from %s LES to invalidate stale selfie", ext_id)
 
     def _prune_excluded_from_work(self, work_dir: Path, excluded_ext_ids: list[str]) -> None:
         if not excluded_ext_ids:

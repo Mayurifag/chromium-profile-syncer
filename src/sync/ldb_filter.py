@@ -119,7 +119,8 @@ def _read_log(path: Path) -> list[tuple[bytes, bytes | None]]:
         rtype = data[pos + 6]
         pos += 7
         if rtype == 0:
-            break
+            pos = blk_start + BLOCK
+            continue
         record = data[pos : pos + length]
         pos += length
         if len(record) < 12:
@@ -167,29 +168,18 @@ _LOG_HEADER = 7
 
 
 def _write_log_batches(batches: list[bytes]) -> bytes:
+    # _read_log doesn't reassemble FIRST/MIDDLE/LAST fragments, so each batch
+    # must fit in a single block as a FULL record. Pad to next block boundary
+    # when the current block can't hold it. Caller must ensure batch payload
+    # ≤ _LOG_BLOCK - _LOG_HEADER (~32 KiB).
     out = bytearray()
     for batch in batches:
-        remaining = batch
-        first = True
-        while remaining:
-            used = len(out) % _LOG_BLOCK
-            space = _LOG_BLOCK - used - _LOG_HEADER
-            if space <= 0:
-                out += bytes(_LOG_BLOCK - used)
-                continue
-            fragment = remaining[:space]
-            remaining = remaining[space:]
-            if first and not remaining:
-                rtype = 1  # FULL
-            elif first:
-                rtype = 2  # FIRST
-            elif not remaining:
-                rtype = 4  # LAST
-            else:
-                rtype = 3  # MIDDLE
-            first = False
-            crc = _mask_crc(_crc32c(bytes([rtype]) + fragment))
-            out += struct.pack("<IHB", crc, len(fragment), rtype) + fragment
+        used = len(out) % _LOG_BLOCK
+        space = _LOG_BLOCK - used - _LOG_HEADER
+        if space < len(batch):
+            out += bytes(_LOG_BLOCK - used)
+        crc = _mask_crc(_crc32c(bytes([1]) + batch))
+        out += struct.pack("<IHB", crc, len(batch), 1) + batch
     return bytes(out)
 
 
