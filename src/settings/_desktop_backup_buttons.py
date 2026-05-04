@@ -22,14 +22,14 @@ class DesktopBackupButtons:
         self._parent = parent
         self._on_restored = on_restored
 
-        self.backup_btn = QPushButton("Backup to Desktop")
+        self.backup_btn = QPushButton("Backup → Desktop")
         self.backup_btn.clicked.connect(self._do_backup)
 
-        self.restore_btn = QPushButton("Restore Desktop Backup")
+        self.restore_btn = QPushButton("Restore from Desktop")
         self.restore_btn.setVisible(False)
         self.restore_btn.clicked.connect(self._do_restore)
 
-        self.delete_btn = QPushButton("Delete Desktop Backup")
+        self.delete_btn = QPushButton("Delete Desktop Copy")
         self.delete_btn.setVisible(False)
         self.delete_btn.clicked.connect(self._do_delete)
 
