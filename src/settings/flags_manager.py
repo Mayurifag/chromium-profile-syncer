@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -73,6 +74,8 @@ class FlagsManagerDialog(QDialog):
             ))
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
             buttons.rejected.connect(self.reject)
+            for btn in buttons.buttons():
+                btn.setIcon(QIcon())
             root.addWidget(buttons)
             return
 
@@ -135,6 +138,8 @@ class FlagsManagerDialog(QDialog):
         )
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
+        for btn in buttons.buttons():
+            btn.setIcon(QIcon())
         root.addWidget(buttons)
 
     def _save(self) -> None:

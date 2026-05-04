@@ -182,19 +182,15 @@ class ExtensionsManagerDialog(QDialog):
         html_btn = QPushButton("Open in Browser")
         html_btn.clicked.connect(lambda: self._open_html(ext_map))
         toolbar.addWidget(html_btn)
-        install_all_btn = QPushButton(f"Install All ({len(ext_map)})")
-        install_all_btn.clicked.connect(lambda: self._install_all(ext_map))
-        toolbar.addWidget(install_all_btn)
         toolbar.addStretch()
         root.addLayout(toolbar)
 
-        table = QTableWidget(len(ext_map), 4)
-        table.setHorizontalHeaderLabels(["Name", "Settings", "", ""])
+        table = QTableWidget(len(ext_map), 3)
+        table.setHorizontalHeaderLabels(["Name", "Settings", ""])
         hdr = table.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         table.verticalHeader().setVisible(False)
@@ -215,18 +211,11 @@ class ExtensionsManagerDialog(QDialog):
             )
             table.setItem(row, 1, size_item)
 
-            install_btn = QPushButton("Install")
-            install_btn.setToolTip(f"Open Web Store page for {ext_id}")
-            install_btn.clicked.connect(
-                lambda _checked, eid=ext_id: self._install_extension(eid)
-            )
-            table.setCellWidget(row, 2, install_btn)
-
             del_btn = QPushButton("Delete")
             del_btn.clicked.connect(
                 lambda _checked, eid=ext_id, r=row: self._delete_extension(eid, r)
             )
-            table.setCellWidget(row, 3, del_btn)
+            table.setCellWidget(row, 2, del_btn)
 
         root.addWidget(table)
 
@@ -237,29 +226,14 @@ class ExtensionsManagerDialog(QDialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
+        if len(ext_map) >= 6:
+            self.adjustSize()
+            self.resize(self.width(), self.height() * 2)
+
     def _open_html(self, ext_map: dict[str, str]) -> None:
         html_path = Path(tempfile.gettempdir()) / "chromium_profile_syncer_extensions.html"
         html_path.write_text(_generate_html(ext_map), encoding="utf-8")
         _open_urls([QUrl.fromLocalFile(str(html_path)).toString()])
-
-    def _install_extension(self, ext_id: str) -> None:
-        _open_urls([_webstore_url(ext_id)])
-
-    def _install_all(self, ext_map: dict[str, str]) -> None:
-        from PySide6.QtWidgets import QMessageBox
-
-        browser = _resolve_target_browser()
-        target_label = browser.name if browser else "default browser"
-        if len(ext_map) > 5:
-            reply = QMessageBox.question(
-                self,
-                "Install All",
-                f"Open {len(ext_map)} Web Store tabs in {target_label}?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
-        _open_urls([_webstore_url(ext_id) for ext_id in sorted(ext_map)])
 
     def _delete_extension(self, ext_id: str, row: int) -> None:
         from PySide6.QtWidgets import QMessageBox

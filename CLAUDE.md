@@ -18,13 +18,13 @@ uv run python build.py
 
 ## After Fixes
 
-Reinstall and relaunch after code changes:
+After any code change that touches runtime behavior or UI, proactively run `make install` so the user can verify the change live — don't wait for them to ask:
 
 ~~~sh
 make install
 ~~~
 
-Builds app, kills running instance, installs, launches.
+Builds app, kills running instance, installs, launches. Skip only for doc-only or test-only changes.
 
 ## Technology Constraints
 
