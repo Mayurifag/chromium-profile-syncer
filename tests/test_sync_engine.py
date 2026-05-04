@@ -898,6 +898,41 @@ def test_restore_only_deletes_items_present_in_backup(tmp_path: Path) -> None:
     assert (profile / "Other File.txt").read_text() == "keep-me"
 
 
+def test_restore_preserves_local_extension_settings_in_preferences(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    sync_profile = tmp_path / "sync_profile"
+    profile.mkdir()
+    sync_profile.mkdir()
+
+    ext_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    extension_settings = {
+        ext_id: {
+            "active_permissions": {"api": ["storage"]},
+            "manifest": {"name": "Fake Extension", "version": "1.0.0"},
+            "path": f"Extensions/{ext_id}/1.0.0",
+            "state": 1,
+        }
+    }
+    _write_file(
+        profile / "Preferences",
+        json.dumps({"extensions": {"settings": extension_settings}}),
+        mtime=1000.0,
+    )
+    _write_file(
+        sync_profile / "preferences.json",
+        json.dumps({"extensions": {"pinned_extensions": [ext_id]}}),
+        mtime=2000.0,
+    )
+
+    engine = _make_engine(tmp_path)
+    with patch("src.sync_engine._rclone.run"):
+        engine.restore_profile_from_backup(profile, sync_profile, {"extensions": True})
+
+    restored = json.loads((profile / "Preferences").read_bytes())
+    assert restored["extensions"]["settings"] == extension_settings
+    assert restored["extensions"]["pinned_extensions"] == [ext_id]
+
+
 # ---------------------------------------------------------------------------
 # _extract_search_shortcuts / _restore_search_shortcuts
 # ---------------------------------------------------------------------------
