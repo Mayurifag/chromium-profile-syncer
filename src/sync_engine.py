@@ -689,6 +689,16 @@ class SyncEngine:
             pruned = _flags.prune_sync_flags(current_dir, keep_browsers)
             if pruned:
                 _LOG.info("Pruned flags for unused browser(s): %s", ", ".join(pruned))
+            local_browser_states = [
+                (b.name, ls) for b in self.browsers
+                if (ls := b.local_state_path()) is not None
+            ]
+            local_pruned = _flags.prune_local_flags(local_browser_states, keep_browsers)
+            if local_pruned:
+                _LOG.info(
+                    "Cleared local flags for unused browser(s): %s",
+                    ", ".join(local_pruned),
+                )
             success = True
         finally:
             if success and any(work_dir.iterdir()):

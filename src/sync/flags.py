@@ -60,6 +60,63 @@ def prune_sync_flags(sync_root: Path, keep_browsers: set[str]) -> list[str]:
     return removed
 
 
+def clear_local_flags(local_state_path: Path) -> bool:
+    state = _load_local_state(local_state_path)
+    if state is None:
+        return False
+    existing = state.get("browser", {}).get(FLAGS_KEY, [])
+    if not existing:
+        return False
+    state.setdefault("browser", {})[FLAGS_KEY] = []
+    _save_local_state(local_state_path, state)
+    return True
+
+
+def prune_local_flags(
+    browser_states: list[tuple[str, Path]], keep_browsers: set[str]
+) -> list[str]:
+    pruned: list[str] = []
+    for name, local_state in browser_states:
+        if name in keep_browsers:
+            continue
+        if not local_state.exists():
+            continue
+        if clear_local_flags(local_state):
+            pruned.append(name)
+    return pruned
+
+
+def remove_flags(
+    sync_root: Path,
+    flags_to_remove: set[str],
+    browser_states: list[tuple[str, Path]],
+) -> None:
+    if not flags_to_remove:
+        return
+    data = load_sync_flags(sync_root)
+    changed = False
+    for entry in data.values():
+        existing = entry.get(FLAGS_KEY, [])
+        filtered = [f for f in existing if f not in flags_to_remove]
+        if filtered != existing:
+            entry[FLAGS_KEY] = filtered
+            changed = True
+    if changed:
+        save_sync_flags(sync_root, data)
+
+    for _name, local_state in browser_states:
+        if not local_state.exists():
+            continue
+        state = _load_local_state(local_state)
+        if state is None:
+            continue
+        existing = state.get("browser", {}).get(FLAGS_KEY, [])
+        filtered = [f for f in existing if f not in flags_to_remove]
+        if filtered != existing:
+            state.setdefault("browser", {})[FLAGS_KEY] = filtered
+            _save_local_state(local_state, state)
+
+
 def sync_flags(
     browser_name: str,
     local_state_path: Path,

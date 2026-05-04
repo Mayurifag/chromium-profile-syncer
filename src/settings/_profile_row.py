@@ -119,7 +119,7 @@ def _add_sync_toggle_button(
     is_enabled: bool,
 ) -> QPushButton:
     btn = QPushButton()
-    btn.setFixedWidth(110)
+    btn.setMinimumWidth(130)
     sync_enabled = config_module.is_profile_sync_enabled(browser_name, profile_name)
     btn.setText("Auto-sync: ON" if sync_enabled else "Auto-sync: OFF")
     btn.setVisible(is_enabled)
@@ -145,7 +145,7 @@ def _add_apply_backup_button(
     folder: Path | None,
 ) -> None:
     btn = QPushButton("Apply Backup")
-    btn.setFixedWidth(100)
+    btn.setMinimumWidth(120)
     btn.setEnabled(not is_running and not ctx.is_syncing())
     if is_running:
         btn.setToolTip(_CLOSE_BROWSER_HINT)

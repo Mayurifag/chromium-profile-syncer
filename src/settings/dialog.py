@@ -52,9 +52,10 @@ _USAGE_NOTES_HTML = (
     "2. Select profile → click <i>Apply Backup</i>.<br>"
     "3. Follow steps below, relaunch browser.<br><br>"
     "<b>Extensions</b><br>"
-    "Go to Extensions page, enable each manually.<br><br>"
-    "If none, install each from Web Store manually (app generates stubs, "
-    "but ungoogled patches require user-initiated install per extension).<br><br>"
+    "If none of extensions installed automatically, install each from Web Store manually.<br><br>"
+    "After first apply, close browser — second sync runs because some "
+    "extensions (e.g. Better History) wipe their data on first install. "
+    "Reapply restores their state.<br><br>"
     "<b>Search shortcuts</b><br>"
     "After restoration, browsers tend to override your search default entry with theirs. "
     "Set yours as default, remove bundled shortcut."
@@ -76,7 +77,7 @@ class SettingsDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("Chromium Profile Syncer — Settings")
-        self.setMinimumWidth(900)
+        self.setMinimumWidth(1100)
         self.setSizeGripEnabled(False)
 
         self._browsers = (
@@ -131,7 +132,7 @@ class SettingsDialog(QDialog):
         root.setContentsMargins(8, 8, 8, 8)
 
         notes_box = QGroupBox()
-        notes_box.setFixedWidth(260)
+        notes_box.setFixedWidth(360)
         notes_vbox = QVBoxLayout(notes_box)
         notes_vbox.setContentsMargins(4, 6, 4, 6)
         notes_label = QLabel(_USAGE_NOTES_HTML)
@@ -229,7 +230,8 @@ class SettingsDialog(QDialog):
         actions_row.addSpacing(8)
 
         self._desktop_buttons = DesktopBackupButtons(
-            parent=self, on_restored=self._refresh_for_folder,
+            parent=self,
+            on_restored=self._refresh_for_folder,
         )
         for btn in self._desktop_buttons.widgets():
             actions_row.addWidget(btn)
