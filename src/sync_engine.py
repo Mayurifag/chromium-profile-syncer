@@ -439,8 +439,6 @@ class SyncEngine:
                 )
                 if prefixes:
                     from src.sync.ldb_filter import copy_filtered
-                    if dst.exists():
-                        shutil.rmtree(dst)
                     copy_filtered(ext_dir, dst, prefixes)
                 else:
                     _leveldb.copy_atomic(ext_dir, dst, self._report)
