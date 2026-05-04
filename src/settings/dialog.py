@@ -24,15 +24,15 @@ import src.config as config_module
 from src.browser_monitor import BrowserMonitor
 from src.browsers import ALL_BROWSERS
 from src.dracula import PROFILE_ROW_STYLE, SMALL_MUTED
-from src.settings import _desktop_backup
 from src.settings._activity_log import ActivityLogWidget
+from src.settings._desktop_backup_buttons import DesktopBackupButtons
 from src.settings._helpers import (
     _CLOSE_BROWSER_HINT,
     _make_indicator_pixmap,
     _make_status_indicator,
     _sync_folder_has_data,
-    _sync_folder_has_profile,
 )
+from src.settings._profile_row import RowContext, add_profile_row
 from src.settings.initial_upload import InitialUploadDialog
 from src.shortcuts_editor import ShortcutsEditorDialog
 from src.sync.sync_dir import SYNC_DIR_NAME
@@ -102,10 +102,23 @@ class SettingsDialog(QDialog):
         self._sync_toggle_buttons: dict[tuple[str, str], QPushButton] = {}
         self._remove_profile_buttons: dict[tuple[str, str], QPushButton] = {}
         self._selects_row: QWidget | None = None
-        self._desktop_backup_btn: QPushButton | None = None
-        self._desktop_restore_btn: QPushButton | None = None
-        self._desktop_delete_btn: QPushButton | None = None
+        self._desktop_buttons: DesktopBackupButtons | None = None
         self._syncing: bool = False
+
+        self._row_ctx = RowContext(
+            parent=self,
+            profile_states=self._profile_states,
+            profile_progress=self._profile_progress,
+            apply_backup_buttons=self._apply_backup_buttons,
+            sync_toggle_buttons=self._sync_toggle_buttons,
+            remove_profile_buttons=self._remove_profile_buttons,
+            is_syncing=lambda: self._syncing,
+            set_syncing=self._set_syncing,
+            save_profiles_config=self._save_profiles_config,
+            refresh_apply_backup_enabled=self._refresh_apply_backup_enabled,
+            emit_apply_backup=lambda b, p: self.apply_backup_requested.emit(b, p),
+            remove_profile=self._do_remove_profile,
+        )
 
         self._build_ui()
         self._load_current_settings()
@@ -204,19 +217,11 @@ class SettingsDialog(QDialog):
 
         selects_layout.addSpacing(8)
 
-        self._desktop_backup_btn = QPushButton("Backup to Desktop")
-        self._desktop_backup_btn.clicked.connect(self._on_backup_to_desktop)
-        selects_layout.addWidget(self._desktop_backup_btn)
-
-        self._desktop_restore_btn = QPushButton("Restore Desktop Backup")
-        self._desktop_restore_btn.clicked.connect(self._on_restore_desktop_backup)
-        self._desktop_restore_btn.setVisible(False)
-        selects_layout.addWidget(self._desktop_restore_btn)
-
-        self._desktop_delete_btn = QPushButton("Delete Desktop Backup")
-        self._desktop_delete_btn.clicked.connect(self._on_delete_desktop_backup)
-        self._desktop_delete_btn.setVisible(False)
-        selects_layout.addWidget(self._desktop_delete_btn)
+        self._desktop_buttons = DesktopBackupButtons(
+            parent=self, on_restored=self._refresh_for_folder,
+        )
+        for btn in self._desktop_buttons.widgets():
+            selects_layout.addWidget(btn)
 
         selects_layout.addStretch()
         selects_row.setVisible(False)
@@ -263,6 +268,9 @@ class SettingsDialog(QDialog):
     def on_sync_completed(self, success: bool) -> None:
         self._syncing = False
         self._refresh_apply_backup_enabled()
+
+    def _set_syncing(self, value: bool) -> None:
+        self._syncing = value
 
     def _on_folder_changed(self, text: str) -> None:
         folder_text = text.strip()
@@ -413,126 +421,17 @@ class SettingsDialog(QDialog):
         prefix_widgets: list,
         profile_path: Path | None = None,
     ) -> None:
-        row = QWidget()
-        row.setObjectName("profile_row")
-        row.setStyleSheet(PROFILE_ROW_STYLE)
-        row_layout = QVBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(0)
-
-        top_row = QWidget()
-        top_layout = QHBoxLayout(top_row)
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.setSpacing(4)
-
-        for w in prefix_widgets:
-            top_layout.addWidget(w)
-
-        if browser_name == "Thorium" and profile_path is not None:
-            remove_btn = QPushButton("Remove Profile")
-            remove_btn.setFixedWidth(110)
-            remove_btn.setEnabled(not is_running)
-            if is_running:
-                remove_btn.setToolTip(_CLOSE_BROWSER_HINT)
-            self._remove_profile_buttons[(browser_name, profile_name)] = remove_btn
-            top_layout.addWidget(remove_btn)
-
-            def _on_remove_clicked(
-                checked: bool = False,
-                bn: str = browser_name,
-                pn: str = profile_name,
-                pp: Path = profile_path,
-            ) -> None:
-                self._do_remove_profile(bn, pn, pp)
-
-            remove_btn.clicked.connect(_on_remove_clicked)
-
-        top_layout.addStretch()
-
-        sync_toggle_btn = QPushButton()
-        sync_toggle_btn.setFixedWidth(110)
-        sync_enabled = config_module.is_profile_sync_enabled(browser_name, profile_name)
-        sync_toggle_btn.setText("Auto-sync: ON" if sync_enabled else "Auto-sync: OFF")
-        sync_toggle_btn.setVisible(is_enabled)
-        self._sync_toggle_buttons[(browser_name, profile_name)] = sync_toggle_btn
-        top_layout.addWidget(sync_toggle_btn)
-
-        apply_btn = QPushButton("Apply Backup")
-        apply_btn.setFixedWidth(100)
-        apply_btn.setEnabled(not is_running and not self._syncing)
-        if is_running:
-            apply_btn.setToolTip(_CLOSE_BROWSER_HINT)
-        self._apply_backup_buttons[(browser_name, profile_name)] = apply_btn
-        top_layout.addWidget(apply_btn)
-
-        progress_bar = QProgressBar()
-        progress_bar.setMaximumHeight(8)
-        progress_bar.setTextVisible(False)
-        progress_bar.setVisible(False)
-
-        info_label = QLabel()
-        info_label.setStyleSheet(SMALL_MUTED)
-        info_label.setVisible(False)
-
-        self._profile_progress[(browser_name, profile_name)] = (progress_bar, info_label)
-
-        row_layout.addWidget(top_row)
-        row_layout.addWidget(progress_bar)
-        row_layout.addWidget(info_label)
-        layout.addWidget(row)
-
-        def _on_toggle_clicked(
-            checked: bool = False,
-            bn: str = browser_name,
-            pn: str = profile_name,
-            btn: QPushButton = sync_toggle_btn,
-        ) -> None:
-            enabled = config_module.is_profile_sync_enabled(bn, pn)
-            config_module.set_profile_sync_enabled(bn, pn, not enabled)
-            btn.setText("Auto-sync: ON" if not enabled else "Auto-sync: OFF")
-
-        sync_toggle_btn.clicked.connect(_on_toggle_clicked)
-
-        def _on_apply_clicked(
-            checked: bool = False,
-            bn: str = browser_name,
-            pn: str = profile_name,
-            s_btn: QPushButton = sync_toggle_btn,
-            f: Path | None = folder,
-        ) -> None:
-            _LOG.debug("Apply Backup clicked: %s/%s", bn, pn)
-            try:
-                currently = self._profile_states[bn][pn]
-            except KeyError:
-                _LOG.error("Apply Backup: profile state missing for %s/%s", bn, pn)
-                return
-            if not currently:
-                self._profile_states[bn][pn] = True
-                s_btn.setVisible(True)
-                if f is not None and _sync_folder_has_profile(f):
-                    config_module.mark_profile_for_restore(bn, pn)
-                    _LOG.info("Profile %s/%s marked for initial restore", bn, pn)
-                self._save_profiles_config()
-                self._syncing = True
-                self._refresh_apply_backup_enabled()
-                self.apply_backup_requested.emit(bn, pn)
-            else:
-                from PySide6.QtWidgets import QMessageBox
-
-                reply = QMessageBox.question(
-                    self,
-                    "Apply Backup",
-                    f"Overwrite local {bn} profile with backup?\n\n"
-                    "This will replace local data with the synced backup.",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
-                )
-                if reply == QMessageBox.StandardButton.Yes:
-                    self._syncing = True
-                    self._refresh_apply_backup_enabled()
-                    self.apply_backup_requested.emit(bn, pn)
-
-        apply_btn.clicked.connect(_on_apply_clicked)
+        add_profile_row(
+            self._row_ctx,
+            layout,
+            browser_name,
+            profile_name,
+            folder,
+            is_running,
+            is_enabled,
+            prefix_widgets,
+            profile_path,
+        )
 
     def _rebuild_profiles(self, folder: Path | None) -> None:
         layout = self._profiles_scroll_layout
@@ -632,7 +531,8 @@ class SettingsDialog(QDialog):
         if self._activity_log_check and self._activity_log_check.isChecked():
             self._activity_log.enable()
 
-        self._refresh_desktop_backup_buttons()
+        if self._desktop_buttons is not None:
+            self._desktop_buttons.refresh()
         self.adjustSize()
 
     def _save_profiles_config(self) -> None:
@@ -836,114 +736,6 @@ class SettingsDialog(QDialog):
             QMessageBox.critical(self, "Error", f"Failed to open flags manager:\n{exc}")
             return
         dlg.exec()
-
-    def _refresh_desktop_backup_buttons(self) -> None:
-        if self._desktop_backup_btn is None:
-            return
-        sync_folder = config_module.get_sync_folder()
-        has_current = sync_folder is not None and (sync_folder / SYNC_DIR_NAME).is_dir()
-        self._desktop_backup_btn.setEnabled(has_current)
-        exists = _desktop_backup.desktop_backup_path().is_file()
-        self._desktop_restore_btn.setVisible(exists)
-        self._desktop_delete_btn.setVisible(exists)
-
-    def _on_backup_to_desktop(self) -> None:
-        from PySide6.QtCore import QCoreApplication
-        from PySide6.QtGui import QCursor
-        from PySide6.QtWidgets import QApplication, QMessageBox
-
-        sync_folder = config_module.get_sync_folder()
-        if sync_folder is None:
-            QMessageBox.warning(self, "No Sync Folder", "Configure a sync folder first.")
-            return
-        current_dir = sync_folder / SYNC_DIR_NAME
-        if not current_dir.is_dir():
-            QMessageBox.information(self, "No Backup", "Run a sync first to create the backup.")
-            return
-
-        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
-        self._desktop_backup_btn.setEnabled(False)
-        QCoreApplication.processEvents()
-        try:
-            target = _desktop_backup.create(current_dir)
-        except Exception as exc:
-            QApplication.restoreOverrideCursor()
-            self._desktop_backup_btn.setEnabled(True)
-            _LOG.exception("Desktop backup failed")
-            QMessageBox.critical(self, "Backup Failed", f"Could not create backup:\n{exc}")
-            return
-        QApplication.restoreOverrideCursor()
-        _LOG.info("Desktop backup written: %s", target)
-        self._refresh_desktop_backup_buttons()
-        QMessageBox.information(self, "Backup Created", f"Saved to:\n{target}")
-
-    def _on_restore_desktop_backup(self) -> None:
-        from PySide6.QtCore import QCoreApplication
-        from PySide6.QtGui import QCursor
-        from PySide6.QtWidgets import QApplication, QMessageBox
-
-        sync_folder = config_module.get_sync_folder()
-        if sync_folder is None:
-            QMessageBox.warning(self, "No Sync Folder", "Configure a sync folder first.")
-            return
-
-        backup_path = _desktop_backup.desktop_backup_path()
-        if not backup_path.is_file():
-            self._refresh_desktop_backup_buttons()
-            return
-
-        reply = QMessageBox.question(
-            self,
-            "Restore Desktop Backup",
-            f"Overwrite sync folder contents with desktop backup?\n\n"
-            f"From: {backup_path}\nTo:   {sync_folder / SYNC_DIR_NAME}\n\n"
-            "Existing synced data will be replaced.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
-        QCoreApplication.processEvents()
-        try:
-            _desktop_backup.restore(sync_folder / SYNC_DIR_NAME)
-        except Exception as exc:
-            QApplication.restoreOverrideCursor()
-            _LOG.exception("Desktop backup restore failed")
-            QMessageBox.critical(self, "Restore Failed", f"Could not restore backup:\n{exc}")
-            return
-        QApplication.restoreOverrideCursor()
-        _LOG.info("Desktop backup restored to %s", sync_folder / SYNC_DIR_NAME)
-        self._refresh_for_folder(sync_folder)
-        QMessageBox.information(self, "Restore Complete", "Desktop backup restored.")
-
-    def _on_delete_desktop_backup(self) -> None:
-        from PySide6.QtWidgets import QMessageBox
-
-        backup_path = _desktop_backup.desktop_backup_path()
-        if not backup_path.is_file():
-            self._refresh_desktop_backup_buttons()
-            return
-
-        reply = QMessageBox.question(
-            self,
-            "Delete Desktop Backup",
-            f"Delete {backup_path}?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        try:
-            _desktop_backup.delete()
-        except Exception as exc:
-            _LOG.exception("Desktop backup delete failed")
-            QMessageBox.critical(self, "Delete Failed", f"Could not delete backup:\n{exc}")
-            return
-        _LOG.info("Desktop backup deleted")
-        self._refresh_desktop_backup_buttons()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._activity_log.cleanup()

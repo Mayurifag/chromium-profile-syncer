@@ -55,8 +55,8 @@ def _flush() -> None:
 
 
 def _mark_profile_state(key: str, browser: str, profile: str, log_msg: str) -> None:
-    data = _get()
     with _lock:
+        data = _get()
         bucket = data.setdefault(key, {})
         profiles: list[str] = bucket.setdefault(browser, [])
         if profile not in profiles:
@@ -66,8 +66,8 @@ def _mark_profile_state(key: str, browser: str, profile: str, log_msg: str) -> N
 
 
 def _clear_profile_state(key: str, browser: str, profile: str, log_msg: str) -> None:
-    data = _get()
     with _lock:
+        data = _get()
         bucket = data.get(key, {})
         profiles = bucket.get(browser, [])
         if profile in profiles:
@@ -198,8 +198,8 @@ def set_profile_sync_enabled(browser: str, profile: str, enabled: bool) -> None:
         raise TypeError(f"browser must be a non-empty str, got {browser!r}")
     if not isinstance(profile, str) or not profile:
         raise TypeError(f"profile must be a non-empty str, got {profile!r}")
-    data = _get()
     with _lock:
+        data = _get()
         disabled = data.setdefault("profile_sync_disabled", {})
         profiles: list = disabled.setdefault(browser, [])
         if not enabled and profile not in profiles:
@@ -215,8 +215,8 @@ def set_profile_sync_enabled(browser: str, profile: str, enabled: bool) -> None:
 
 
 def remove_browser_profile(browser: str) -> None:
-    data = _get()
     with _lock:
+        data = _get()
         for key in ("enabled_profiles", "enabled_browsers", "profile_sync_disabled",
                     "profiles_needing_restore", "profiles_needing_ext_repull",
                     "profile_directions"):
