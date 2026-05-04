@@ -36,9 +36,14 @@ DEFAULT_DATA_TYPES: dict[str, bool] = {
     "typed_urls": True,
 }
 
+_UBLOCK_CACHE_SKIP_PREFIXES: tuple[bytes, ...] = (b"cache/", b"compiled/", b"selfie/")
 _LDB_CACHE_SKIP_PREFIXES: dict[str, tuple[bytes, ...]] = {
-    "cjpalhdlnbpafiamejdnhcphjbkeiagm": (b"cache/", b"compiled/", b"selfie/"),
+    "cjpalhdlnbpafiamejdnhcphjbkeiagm": _UBLOCK_CACHE_SKIP_PREFIXES,
+    "blockjmkbacgjkknlgpkjjiijinjdanf": _UBLOCK_CACHE_SKIP_PREFIXES,
 }
+_IDB_FILTER_CACHE_ONLY_EXT_IDS: frozenset[str] = frozenset({
+    "blockjmkbacgjkknlgpkjjiijinjdanf",
+})
 
 _LOG = logging.getLogger(__name__)
 
@@ -172,9 +177,10 @@ class SyncEngine:
             self._sync_leveldb(
                 profile_path, sync_profile_path, "Sync Extension Settings", direction
             )
+            idb_skip = skip | _IDB_FILTER_CACHE_ONLY_EXT_IDS
             self._sync_leveldb(
                 profile_path, sync_profile_path, "IndexedDB", direction,
-                name_filter=lambda n, s=skip: (
+                name_filter=lambda n, s=idb_skip: (
                     n.startswith("chrome-extension_")
                     and not any(n.startswith(f"chrome-extension_{e}_") for e in s)
                 ),
@@ -412,6 +418,46 @@ class SyncEngine:
         except OSError:
             _LOG.exception("Flags sync failed for %s", browser.name)
 
+    def _repull_ext_data(self, profile_path: Path, source_dir: Path) -> None:
+        if not source_dir.exists():
+            return
+        skip = set(_config.get_excluded_ext_settings_ids())
+        for sub in ("Local Extension Settings", "Sync Extension Settings"):
+            src_base = source_dir / sub
+            if not src_base.exists():
+                continue
+            dst_base = profile_path / sub
+            dst_base.mkdir(parents=True, exist_ok=True)
+            for ext_dir in src_base.iterdir():
+                if not ext_dir.is_dir() or ext_dir.name in skip:
+                    continue
+                dst = dst_base / ext_dir.name
+                prefixes = (
+                    _LDB_CACHE_SKIP_PREFIXES.get(ext_dir.name)
+                    if sub == "Local Extension Settings"
+                    else None
+                )
+                if prefixes:
+                    from src.sync.ldb_filter import copy_filtered
+                    if dst.exists():
+                        shutil.rmtree(dst)
+                    copy_filtered(ext_dir, dst, prefixes)
+                else:
+                    _leveldb.copy_atomic(ext_dir, dst, self._report)
+                self._synced_count += 1
+        src_idb = source_dir / "IndexedDB"
+        if src_idb.exists():
+            dst_idb = profile_path / "IndexedDB"
+            dst_idb.mkdir(parents=True, exist_ok=True)
+            idb_skip = skip | _IDB_FILTER_CACHE_ONLY_EXT_IDS
+            for d in src_idb.iterdir():
+                if not d.is_dir() or not d.name.startswith("chrome-extension_"):
+                    continue
+                if any(d.name.startswith(f"chrome-extension_{e}_") for e in idb_skip):
+                    continue
+                _leveldb.copy_atomic(d, dst_idb / d.name, self._report)
+                self._synced_count += 1
+
     def _sync_single_profile(
         self,
         browser: BrowserBase,
@@ -419,6 +465,7 @@ class SyncEngine:
         work_dir: Path,
         direction: str,
         needs_restore: bool,
+        needs_ext_repull: bool,
         force_direction: str | None,
         data_types: dict[str, bool],
         ungoogled_only_ext_ids: list[str],
@@ -441,9 +488,12 @@ class SyncEngine:
                     windows_only_ext_ids=windows_only_ext_ids,
                 )
                 _config.set_last_restored_browser(browser.name)
-                if force_direction != "pull":
-                    _config.clear_restore_flag(browser.name, profile_path.name)
+                _config.mark_profile_for_ext_repull(browser.name, profile_path.name)
+                _config.clear_restore_flag(browser.name, profile_path.name)
             else:
+                if needs_ext_repull and direction in ("pull", "both"):
+                    self._repull_ext_data(profile_path, work_dir)
+                    _config.clear_ext_repull_flag(browser.name, profile_path.name)
                 self.sync_browser_profile(
                     profile_path, work_dir, data_types,
                     direction=direction, on_progress=self._progress_cb,
@@ -471,6 +521,7 @@ class SyncEngine:
         enabled_profiles = _config.get_enabled_profiles()
         directions = _config.get_profile_directions()
         profiles_needing_restore = _config.get_profiles_needing_restore()
+        profiles_needing_ext_repull = _config.get_profiles_needing_ext_repull()
         data_types = DEFAULT_DATA_TYPES
 
         is_first_sync = not (self.sync_folder / _sync_dir.SYNC_DIR_NAME / "metadata.json").exists()
@@ -564,11 +615,16 @@ class SyncEngine:
                         browser.name in profiles_needing_restore
                         and profile_path.name in profiles_needing_restore[browser.name]
                     )
+                    needs_ext_repull = (
+                        not needs_restore
+                        and profile_path.name
+                        in profiles_needing_ext_repull.get(browser.name, [])
+                    )
                     try:
                         self._sync_single_profile(
                             browser, profile_path, work_dir, direction, needs_restore,
-                            force_direction, data_types, ungoogled_only_ext_ids,
-                            windows_only_ext_ids,
+                            needs_ext_repull, force_direction, data_types,
+                            ungoogled_only_ext_ids, windows_only_ext_ids,
                         )
                     except OSError:
                         _LOG.exception(

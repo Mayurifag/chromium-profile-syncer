@@ -27,21 +27,22 @@ CONFIG_PATH: Path = CONFIG_DIR / "config.json"
 
 _data: dict | None = None
 _loaded_from: Path | None = None
-_lock = threading.Lock()
+_lock = threading.RLock()
 
 
 def _get() -> dict:
     global _data, _loaded_from
-    if _data is None or _loaded_from != CONFIG_PATH:
-        _loaded_from = CONFIG_PATH
-        try:
-            _data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            _data = {}
-        except (json.JSONDecodeError, OSError):
-            _LOG.warning("Could not read config at %s — returning empty config", CONFIG_PATH)
-            _data = {}
-    return _data
+    with _lock:
+        if _data is None or _loaded_from != CONFIG_PATH:
+            _loaded_from = CONFIG_PATH
+            try:
+                _data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                _data = {}
+            except (json.JSONDecodeError, OSError):
+                _LOG.warning("Could not read config at %s — returning empty config", CONFIG_PATH)
+                _data = {}
+        return _data
 
 
 def _flush() -> None:
@@ -51,6 +52,30 @@ def _flush() -> None:
         CONFIG_PATH.write_text(json.dumps(_data, indent=2), encoding="utf-8")
         _loaded_from = CONFIG_PATH
         _LOG.debug("Config saved to %s", CONFIG_PATH)
+
+
+def _mark_profile_state(key: str, browser: str, profile: str, log_msg: str) -> None:
+    data = _get()
+    with _lock:
+        bucket = data.setdefault(key, {})
+        profiles: list[str] = bucket.setdefault(browser, [])
+        if profile not in profiles:
+            profiles.append(profile)
+            _flush()
+            _LOG.info(log_msg, browser, profile)
+
+
+def _clear_profile_state(key: str, browser: str, profile: str, log_msg: str) -> None:
+    data = _get()
+    with _lock:
+        bucket = data.get(key, {})
+        profiles = bucket.get(browser, [])
+        if profile in profiles:
+            profiles.remove(profile)
+            if not profiles:
+                del bucket[browser]
+            _flush()
+            _LOG.info(log_msg, browser, profile)
 
 
 def load() -> dict:
@@ -132,25 +157,35 @@ def get_profiles_needing_restore() -> dict[str, list[str]]:
 
 
 def mark_profile_for_restore(browser: str, profile: str) -> None:
-    data = _get()
-    restore = data.setdefault("profiles_needing_restore", {})
-    profiles: list = restore.setdefault(browser, [])
-    if profile not in profiles:
-        profiles.append(profile)
-        _flush()
-        _LOG.info("Marked %s/%s for initial restore", browser, profile)
+    _mark_profile_state(
+        "profiles_needing_restore", browser, profile,
+        "Marked %s/%s for initial restore",
+    )
 
 
 def clear_restore_flag(browser: str, profile: str) -> None:
-    data = _get()
-    restore = data.get("profiles_needing_restore", {})
-    profiles = restore.get(browser, [])
-    if profile in profiles:
-        profiles.remove(profile)
-        if not profiles:
-            del restore[browser]
-        _flush()
-        _LOG.info("Cleared restore flag for %s/%s", browser, profile)
+    _clear_profile_state(
+        "profiles_needing_restore", browser, profile,
+        "Cleared restore flag for %s/%s",
+    )
+
+
+def get_profiles_needing_ext_repull() -> dict[str, list[str]]:
+    return _get().get("profiles_needing_ext_repull", {})
+
+
+def mark_profile_for_ext_repull(browser: str, profile: str) -> None:
+    _mark_profile_state(
+        "profiles_needing_ext_repull", browser, profile,
+        "Marked %s/%s for post-install ext repull",
+    )
+
+
+def clear_ext_repull_flag(browser: str, profile: str) -> None:
+    _clear_profile_state(
+        "profiles_needing_ext_repull", browser, profile,
+        "Cleared ext repull flag for %s/%s",
+    )
 
 
 def is_profile_sync_enabled(browser: str, profile: str) -> bool:
@@ -164,27 +199,30 @@ def set_profile_sync_enabled(browser: str, profile: str, enabled: bool) -> None:
     if not isinstance(profile, str) or not profile:
         raise TypeError(f"profile must be a non-empty str, got {profile!r}")
     data = _get()
-    disabled = data.setdefault("profile_sync_disabled", {})
-    profiles: list = disabled.setdefault(browser, [])
-    if not enabled and profile not in profiles:
-        profiles.append(profile)
-        _flush()
-        _LOG.info("Auto-sync disabled for %s/%s", browser, profile)
-    elif enabled and profile in profiles:
-        profiles.remove(profile)
-        if not profiles:
-            del disabled[browser]
-        _flush()
-        _LOG.info("Auto-sync enabled for %s/%s", browser, profile)
+    with _lock:
+        disabled = data.setdefault("profile_sync_disabled", {})
+        profiles: list = disabled.setdefault(browser, [])
+        if not enabled and profile not in profiles:
+            profiles.append(profile)
+            _flush()
+            _LOG.info("Auto-sync disabled for %s/%s", browser, profile)
+        elif enabled and profile in profiles:
+            profiles.remove(profile)
+            if not profiles:
+                del disabled[browser]
+            _flush()
+            _LOG.info("Auto-sync enabled for %s/%s", browser, profile)
 
 
 def remove_browser_profile(browser: str) -> None:
     data = _get()
-    for key in ("enabled_profiles", "enabled_browsers", "profile_sync_disabled",
-                "profiles_needing_restore", "profile_directions"):
-        data.get(key, {}).pop(browser, None)
-    _flush()
-    _LOG.info("Removed %s from config", browser)
+    with _lock:
+        for key in ("enabled_profiles", "enabled_browsers", "profile_sync_disabled",
+                    "profiles_needing_restore", "profiles_needing_ext_repull",
+                    "profile_directions"):
+            data.get(key, {}).pop(browser, None)
+        _flush()
+        _LOG.info("Removed %s from config", browser)
 
 
 def get_last_sync() -> str:
@@ -234,7 +272,6 @@ def set_windows_only_extensions(ext_ids: list[str]) -> None:
 _DEFAULT_EXCLUDED_EXT_SETTINGS: list[str] = [
     "eimadpbcbfnmbkopoojfekhnkhdbieeh",  # Dark Reader (Newsmaker cache; theme in Sync)
     "jnpglhiolmmfchhpoipnknmffmpmogmc",  # Twitter location cache helper
-    "blockjmkbacgjkknlgpkjjiijinjdanf",  # Helium built-in uBlock (IndexedDB filter cache only)
 ]
 
 
