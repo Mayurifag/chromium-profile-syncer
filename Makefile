@@ -1,7 +1,10 @@
-.PHONY: install ci e2e e2e2 e2e2-clean
+.PHONY: install install-release ci e2e e2e2 e2e2-clean
 
 install:
 	uv run python build.py --install
+
+install-release:
+	uv run python scripts/install_release.py
 
 ci:
 	uv run ruff check src tests --fix
