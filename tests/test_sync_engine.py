@@ -46,6 +46,7 @@ def _make_browser(
     mock.windows_extensions_registry_key.return_value = None
     mock.windows_force_list_registry_key.return_value = None
     mock.linux_managed_policy_dir.return_value = None
+    mock.macos_managed_pref_domain.return_value = None
     mock.local_state_path.return_value = None
     mock.web_store_update_url = "https://clients2.google.com/service/update2/crx"
     mock.ext_id_aliases = {}
@@ -662,7 +663,8 @@ def test_install_external_extensions_writes_stubs(tmp_path: Path) -> None:
 
     browser = _make_browser()
     browser.external_extensions_dir.return_value = ext_dir
-    install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
+    with patch("src.sync.extensions.platform.system", return_value="Linux"):
+        install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
 
     assert (ext_dir / "aaabbbccc.json").exists()
     assert (ext_dir / "dddeeefff.json").exists()
@@ -682,10 +684,11 @@ def test_install_external_extensions_idempotent(tmp_path: Path) -> None:
 
     browser = _make_browser()
     browser.external_extensions_dir.return_value = ext_dir
-    install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
-    # Write custom content to simulate an existing stub
-    (ext_dir / "aaabbbccc.json").write_text('{"custom": true}', encoding="utf-8")
-    install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
+    with patch("src.sync.extensions.platform.system", return_value="Linux"):
+        install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
+        # Write custom content to simulate an existing stub
+        (ext_dir / "aaabbbccc.json").write_text('{"custom": true}', encoding="utf-8")
+        install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
 
     # Must not overwrite existing stub
     assert json.loads((ext_dir / "aaabbbccc.json").read_text()) == {"custom": True}
@@ -699,8 +702,32 @@ def test_install_external_extensions_no_extensions_dir(tmp_path: Path) -> None:
     browser = _make_browser()
     browser.external_extensions_dir.return_value = ext_dir
     # Should not raise when no manifest exists; ext_dir must not be created
-    install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
+    with patch("src.sync.extensions.platform.system", return_value="Linux"):
+        install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
     assert not ext_dir.exists()
+
+
+def test_install_external_extensions_macos_invokes_managed_prefs(tmp_path: Path) -> None:
+    sync_profile = tmp_path / "sync_profile"
+    sync_profile.mkdir(parents=True)
+
+    (sync_profile / "webstore_extensions.json").write_text(
+        json.dumps(["aaabbbccc", "dddeeefff"]), encoding="utf-8"
+    )
+
+    browser = _make_browser()
+    browser.macos_managed_pref_domain.return_value = "net.example.browser"
+
+    with patch("src.sync.extensions.platform.system", return_value="Darwin"), \
+         patch(
+             "src.sync.extensions._install_via_macos_managed_prefs"
+         ) as mock_install:
+        install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
+
+    mock_install.assert_called_once()
+    args = mock_install.call_args.args
+    assert sorted(args[0]) == ["aaabbbccc", "dddeeefff"]
+    assert args[1] == "net.example.browser"
 
 
 def test_sync_all_registers_external_extensions(tmp_path: Path) -> None:
@@ -719,7 +746,8 @@ def test_sync_all_registers_external_extensions(tmp_path: Path) -> None:
 
     with patch("src.config.get_enabled_browsers", return_value={"TB": True}), \
          patch("src.config.get_enabled_profiles", return_value={"TB": ["Default"]}), \
-         patch("src.config.get_profile_directions", return_value={}):
+         patch("src.config.get_profile_directions", return_value={}), \
+         patch("src.sync.extensions.platform.system", return_value="Linux"):
         engine.sync_all()
 
     assert (ext_dir / "testext.json").exists()

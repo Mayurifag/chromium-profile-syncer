@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import platform
+import plistlib
+import shlex
+import shutil
+import subprocess
+import tempfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -356,6 +362,9 @@ def install_external_extensions(
     system = platform.system()
     reg_key = browser.windows_extensions_registry_key() if system == "Windows" else None
     linux_policy_dir = browser.linux_managed_policy_dir() if system == "Linux" else None
+    macos_domain = (
+        browser.macos_managed_pref_domain() if system == "Darwin" else None
+    )
     ext_dir = browser.external_extensions_dir()
 
     if reg_key:
@@ -367,6 +376,17 @@ def install_external_extensions(
     elif linux_policy_dir:
         _install_via_linux_policy(ext_ids, linux_policy_dir, browser.name)
         _wipe_stubs(ext_dir, "Removed orphaned extension stub (now using policy): %s")
+    elif macos_domain:
+        _install_via_macos_managed_prefs(ext_ids, macos_domain, browser.name)
+        _wipe_stubs(ext_dir, "Removed orphaned extension stub (now using policy): %s")
+    elif system == "Darwin":
+        _LOG.info(
+            "%s: macOS extension auto-install not configured (no managed-pref domain) "
+            "— %d extension(s) need manual install:",
+            browser.name, len(ext_ids),
+        )
+        for ext_id in ext_ids:
+            _LOG.info("  https://chromewebstore.google.com/detail/%s", ext_id)
     elif ext_dir is not None:
         _install_via_stubs(ext_ids, ext_dir, update_url)
     else:
@@ -456,11 +476,6 @@ def _linux_policy_filename(browser_name: str) -> str:
 def _install_via_linux_policy(
     ext_ids: list[str], policy_dir: Path, browser_name: str
 ) -> None:
-    import shlex
-    import shutil
-    import subprocess
-    import tempfile
-
     if shutil.which("pkexec") is None:
         _LOG.warning("pkexec not found — cannot install force-list policy on Linux")
         return
@@ -506,27 +521,79 @@ def _install_via_linux_policy(
         Path(tmp_path).unlink(missing_ok=True)
 
 
-def _clean_linux_policy(policy_dir: Path, browser_name: str) -> None:
-    import shutil
-    import subprocess
+def _macos_managed_pref_path(domain: str) -> Path:
+    user = os.environ.get("USER")
+    if not user:
+        import pwd
+        user = pwd.getpwuid(os.getuid()).pw_name
+    return Path(f"/Library/Managed Preferences/{user}/{domain}.plist")
 
-    target = policy_dir / _linux_policy_filename(browser_name)
-    if not target.exists():
-        return
-    if shutil.which("pkexec") is None:
-        _LOG.warning("pkexec not found — cannot remove policy file %s", target)
-        return
 
-    result = subprocess.run(
-        ["pkexec", "rm", "-f", str(target)], capture_output=True, text=True
+def _read_macos_plist(path: Path) -> dict:
+    try:
+        return plistlib.loads(path.read_bytes())
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return {}
+
+
+def _applescript_quote(s: str) -> str:
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _run_osascript_admin(shell_cmd: str, label: str) -> bool:
+    applescript = (
+        f"do shell script {_applescript_quote(shell_cmd)} "
+        f"with prompt {_applescript_quote(label)} "
+        "with administrator privileges"
     )
-    if result.returncode == 0:
-        _LOG.info("Removed %s force-list policy: %s", browser_name, target)
-    else:
-        _LOG.warning(
-            "Failed to remove policy file %s (rc=%d): %s",
-            target, result.returncode, result.stderr.strip(),
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", applescript], capture_output=True, text=True
         )
+    except OSError as e:
+        _LOG.warning("Failed to invoke osascript for %s: %s", label, e)
+        return False
+    if result.returncode == 0:
+        return True
+    err = result.stderr.strip()
+    if "User canceled" in err or "(-128)" in err:
+        _LOG.warning("Admin prompt cancelled by user — %s skipped", label)
+    else:
+        _LOG.warning("osascript failed (%s): %s", label, err)
+    return False
+
+
+def _install_via_macos_managed_prefs(
+    ext_ids: list[str], domain: str, browser_name: str
+) -> None:
+    target = _macos_managed_pref_path(domain)
+    existing = _read_macos_plist(target)
+    new_data = dict(existing)
+    new_data["ExtensionInstallForcelist"] = sorted(ext_ids)
+    if existing == new_data:
+        return
+
+    payload = plistlib.dumps(new_data, fmt=plistlib.FMT_XML)
+    with tempfile.NamedTemporaryFile(suffix=".plist", delete=False) as f:
+        f.write(payload)
+        tmp_path = f.name
+
+    try:
+        cmd = (
+            f"mkdir -p {shlex.quote(str(target.parent))} && "
+            f"install -m 0644 -o root -g wheel "
+            f"{shlex.quote(tmp_path)} {shlex.quote(str(target))}"
+        )
+        ok = _run_osascript_admin(
+            cmd, f"install {browser_name} extension policy"
+        )
+        if ok:
+            _LOG.info(
+                "Installed %s force-list policy at %s: %d extensions",
+                browser_name, target, len(ext_ids),
+            )
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
 
 
 def _install_via_stubs(ext_ids: list[str], ext_dir: Path, update_url: str) -> None:
@@ -546,52 +613,3 @@ def _install_via_stubs(ext_ids: list[str], ext_dir: Path, update_url: str) -> No
             _LOG.info("Registered Web Store extension via stub: %s", ext_id)
 
 
-def clean_external_extensions(browsers: list[BrowserBase]) -> None:
-    system = platform.system()
-    on_windows = system == "Windows"
-    on_linux = system == "Linux"
-    for browser in browsers:
-        reg_key = browser.windows_extensions_registry_key() if on_windows else None
-        linux_policy_dir = browser.linux_managed_policy_dir() if on_linux else None
-        if reg_key:
-            _wipe_registry_extensions(reg_key)
-            force_key = browser.windows_force_list_registry_key()
-            if force_key:
-                _wipe_registry_key(force_key)
-        elif linux_policy_dir:
-            _clean_linux_policy(linux_policy_dir, browser.name)
-        else:
-            _wipe_stubs(browser.external_extensions_dir(), "Removed extension stub: %s")
-
-
-def _wipe_registry_extensions(reg_subkey: str) -> None:
-    import winreg
-
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_subkey) as base:
-            ext_ids = _winreg_enum_subkeys(base)
-    except FileNotFoundError:
-        return
-
-    for ext_id in ext_ids:
-        try:
-            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, reg_subkey + "\\" + ext_id)
-            _LOG.info("Removed registry entry: %s", ext_id)
-        except OSError:
-            _LOG.warning("Failed to remove registry entry: %s", ext_id)
-
-
-def _wipe_registry_key(reg_subkey: str) -> None:
-    import winreg
-
-    try:
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER, reg_subkey, access=winreg.KEY_ALL_ACCESS
-        ) as key:
-            for name in _winreg_enum_values(key):
-                winreg.DeleteValue(key, name)
-        _LOG.info("Cleared registry key: %s", reg_subkey)
-    except FileNotFoundError:
-        pass
-    except OSError:
-        _LOG.warning("Failed to clear registry key: %s", reg_subkey)

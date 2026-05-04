@@ -47,6 +47,8 @@ _IDB_FILTER_CACHE_ONLY_EXT_IDS: frozenset[str] = frozenset({
 
 _LOG = logging.getLogger(__name__)
 
+_is_empty = _leveldb.is_empty_leveldb
+
 
 class SyncEngine:
     def __init__(
@@ -261,6 +263,7 @@ class SyncEngine:
         _LOG.info("Restoring profile from backup: %s → %s", sync_profile_path, profile_path)
 
         _ext_parents = {"Local Extension Settings", "Sync Extension Settings", "IndexedDB"}
+        skipped_empty: list[tuple[str, str]] = []
         for src in sync_profile_path.iterdir():
             dst = profile_path / src.name
             if not dst.exists():
@@ -268,9 +271,13 @@ class SyncEngine:
             if src.name in _ext_parents and src.is_dir() and dst.is_dir():
                 for ext_sub in src.iterdir():
                     ext_dst = dst / ext_sub.name
-                    if ext_dst.exists():
-                        shutil.rmtree(ext_dst)
-                        self._synced_count += 1
+                    if not ext_dst.exists():
+                        continue
+                    if _is_empty(ext_sub) and not _is_empty(ext_dst):
+                        skipped_empty.append((src.name, ext_sub.name))
+                        continue
+                    shutil.rmtree(ext_dst)
+                    self._synced_count += 1
             elif dst.is_dir():
                 _LOG.debug("Deleting directory: %s", dst)
                 shutil.rmtree(dst)
@@ -279,6 +286,11 @@ class SyncEngine:
                 _LOG.debug("Deleting file: %s", dst)
                 dst.unlink()
                 self._synced_count += 1
+
+        for parent, ext_id in skipped_empty:
+            _LOG.info(
+                "Restore: kept profile %s/%s — backup is an empty stub", parent, ext_id,
+            )
 
         is_ungoogled = browser.ungoogled if browser is not None else True
         excluded_ext_ids: list[str] = (
@@ -296,6 +308,8 @@ class SyncEngine:
             "--exclude", "preferences.json",
             "--exclude", "Extensions/**",
         ]
+        for parent, ext_id in skipped_empty:
+            cmd += ["--exclude", f"{parent}/{ext_id}/**"]
         for ext_id in excluded_ext_ids:
             cmd += ["--exclude", f"Extensions/{ext_id}/**"]
             cmd += ["--exclude", f"Local Extension Settings/{ext_id}/**"]
@@ -432,6 +446,12 @@ class SyncEngine:
                 if not ext_dir.is_dir() or ext_dir.name in skip:
                     continue
                 dst = dst_base / ext_dir.name
+                if _is_empty(ext_dir) and dst.exists() and not _is_empty(dst):
+                    _LOG.info(
+                        "Ext repull: kept profile %s/%s — source is empty stub",
+                        sub, ext_dir.name,
+                    )
+                    continue
                 prefixes = (
                     _LDB_CACHE_SKIP_PREFIXES.get(ext_dir.name)
                     if sub == "Local Extension Settings"
@@ -453,7 +473,14 @@ class SyncEngine:
                     continue
                 if any(d.name.startswith(f"chrome-extension_{e}_") for e in idb_skip):
                     continue
-                _leveldb.copy_atomic(d, dst_idb / d.name, self._report)
+                dst = dst_idb / d.name
+                if _is_empty(d) and dst.exists() and not _is_empty(dst):
+                    _LOG.info(
+                        "Ext repull: kept profile IndexedDB/%s — source is empty stub",
+                        d.name,
+                    )
+                    continue
+                _leveldb.copy_atomic(d, dst, self._report)
                 self._synced_count += 1
 
     def _sync_single_profile(

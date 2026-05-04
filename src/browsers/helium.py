@@ -56,3 +56,6 @@ class Helium(BrowserBase):
     def linux_managed_policy_dir(self) -> Path | None:
         return Path("/etc/chromium/policies/managed")
 
+    def macos_managed_pref_domain(self) -> str | None:
+        return "net.imput.helium"
+

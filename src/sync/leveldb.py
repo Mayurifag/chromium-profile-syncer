@@ -19,6 +19,21 @@ def dir_mtime(directory: Path) -> float:
     return max(mtimes) if mtimes else 0.0
 
 
+def is_empty_leveldb(d: Path) -> bool:
+    if not d.is_dir():
+        return False
+    try:
+        for ldb in d.glob("*.ldb"):
+            if ldb.stat().st_size > 0:
+                return False
+        for log in d.glob("*.log"):
+            if log.stat().st_size > 0:
+                return False
+    except OSError:
+        return False
+    return True
+
+
 def copy_atomic(
     src: Path,
     dst: Path,
@@ -73,7 +88,20 @@ def sync_dir(
             return
 
         profile_newer = profile_mtime > sync_mtime
+        # An empty leveldb stub (browser-init only) must never overwrite the
+        # other side's real data — mtime can favour the stub if it was touched
+        # more recently (e.g. a fresh browser launch).
+        profile_empty = is_empty_leveldb(profile_unit) if profile_unit.exists() else True
+        sync_empty = is_empty_leveldb(sync_unit) if sync_unit.exists() else True
+
         if profile_newer and direction in ("push", "both"):
+            if profile_empty and not sync_empty:
+                _LOG.info(
+                    "Skip push %s/%s: profile is empty stub, sync has data",
+                    subpath, name,
+                )
+                skipped_list.append(1)
+                return
             sync_base.mkdir(parents=True, exist_ok=True)
             prefixes = (key_skip_prefixes or {}).get(name)
             if prefixes and profile_unit.exists():
@@ -83,6 +111,13 @@ def sync_dir(
                 copy_atomic(profile_unit, sync_unit, report)
             synced_list.append(1)
         elif not profile_newer and direction in ("pull", "both"):
+            if sync_empty and not profile_empty:
+                _LOG.info(
+                    "Skip pull %s/%s: sync is empty stub, profile has data",
+                    subpath, name,
+                )
+                skipped_list.append(1)
+                return
             profile_base.mkdir(parents=True, exist_ok=True)
             copy_atomic(sync_unit, profile_unit, report)
             synced_list.append(1)
