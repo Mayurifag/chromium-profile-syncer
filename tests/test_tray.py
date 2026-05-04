@@ -5,8 +5,6 @@ from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
-from src.sync.sync_dir import SYNC_DIR_NAME
-
 PySide6 = pytest.importorskip("PySide6")
 
 
@@ -101,51 +99,6 @@ def _make_tray(qapp, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# _teardown_watcher tests
-# ---------------------------------------------------------------------------
-
-
-def test_teardown_watcher_removes_paths(qapp, tmp_path):
-    """_teardown_watcher calls removePaths and sets _watcher to None."""
-    tray = _make_tray(qapp, tmp_path)
-
-    mock_watcher = MagicMock()
-    mock_watcher.files.return_value = [str(tmp_path)]
-    mock_watcher.directories.return_value = []
-    tray._watcher = mock_watcher
-
-    tray._teardown_watcher()
-
-    mock_watcher.removePaths.assert_called_once_with([str(tmp_path)])
-    mock_watcher.deleteLater.assert_called_once()
-    assert tray._watcher is None
-
-
-def test_teardown_watcher_noop_when_none(qapp, tmp_path):
-    """_teardown_watcher is safe to call when watcher is already None."""
-    tray = _make_tray(qapp, tmp_path)
-    tray._watcher = None
-    tray._teardown_watcher()  # must not raise
-    assert tray._watcher is None
-
-
-def test_teardown_watcher_empty_paths(qapp, tmp_path):
-    """_teardown_watcher skips removePaths when no paths are watched."""
-    tray = _make_tray(qapp, tmp_path)
-
-    mock_watcher = MagicMock()
-    mock_watcher.files.return_value = []
-    mock_watcher.directories.return_value = []
-    tray._watcher = mock_watcher
-
-    tray._teardown_watcher()
-
-    mock_watcher.removePaths.assert_not_called()
-    mock_watcher.deleteLater.assert_called_once()
-    assert tray._watcher is None
-
-
-# ---------------------------------------------------------------------------
 # open_settings tests
 # ---------------------------------------------------------------------------
 
@@ -205,69 +158,6 @@ def test_on_settings_saved_no_folder_keeps_engine(qapp, tmp_path):
 
     mock_engine_cls.assert_not_called()
     assert tray._engine is old_engine
-
-
-def test_watcher_paused_during_sync(qapp, tmp_path):
-    """File watcher is paused during sync to prevent loops."""
-    tray = _make_tray(qapp, tmp_path)
-
-    # Initially not paused
-    assert not tray._watcher_paused
-
-    # Pause when sync starts
-    tray._on_sync_started()
-    assert tray._watcher_paused
-
-    # Resume after sync finishes
-    tray._resume_watcher()
-    assert not tray._watcher_paused
-
-
-def test_file_watcher_ignores_changes_when_paused(qapp, tmp_path):
-    """File watcher ignores changes when paused."""
-    tray = _make_tray(qapp, tmp_path)
-    tray._watcher_paused = True
-
-    # File changed event should be ignored (no debounce scheduled)
-    tray._on_file_changed(str(tmp_path / SYNC_DIR_NAME / "metadata.json"))
-    assert not tray._debounce_timer.isActive()
-
-    # Directory changed event should be ignored
-    tray._on_dir_changed(str(tmp_path))
-    assert not tray._debounce_timer.isActive()
-
-    # When not paused, events should trigger debounce
-    tray._watcher_paused = False
-    tray._on_file_changed(str(tmp_path / SYNC_DIR_NAME / "metadata.json"))
-    assert tray._debounce_timer.isActive()
-
-
-# ---------------------------------------------------------------------------
-# Debounce reset tests
-# ---------------------------------------------------------------------------
-
-
-def test_debounce_resets_on_repeated_events(qapp, tmp_path):
-    """Calling _schedule_debounced_sync twice leaves exactly one pending timer."""
-    from PySide6.QtCore import QCoreApplication
-
-    tray = _make_tray(qapp, tmp_path)
-    tray._debounce_timer.setInterval(0)
-
-    trigger_mock = MagicMock()
-    tray._trigger_sync = trigger_mock
-
-    tray._schedule_debounced_sync()
-    tray._schedule_debounced_sync()
-
-    assert tray._debounce_timer.isActive()
-
-    tray._browser_monitor.any_running = MagicMock(return_value=False)
-    with patch("src.config.get_enabled_profiles", return_value={"Browser": ["Profile"]}), \
-         patch("src.config.is_profile_sync_enabled", return_value=True):
-        QCoreApplication.processEvents()
-
-    trigger_mock.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

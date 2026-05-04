@@ -208,6 +208,136 @@ def _build_mirror_dict(shortcut: dict, row_id: int, sync_guid: str) -> dict:
     }
 
 
+_INSERT_KEYWORDS_SQL = """
+INSERT INTO keywords (
+    id, short_name, keyword, favicon_url, url, safe_for_autoreplace,
+    originating_url, date_created, usage_count, input_encodings,
+    suggest_url, prepopulate_id, created_by_policy, last_modified,
+    sync_guid, alternate_urls, image_url, search_url_post_params,
+    suggest_url_post_params, image_url_post_params, new_tab_url,
+    last_visited, created_from_play_api, is_active, starter_pack_id,
+    enforced_by_policy, featured_by_policy, url_hash
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+"""
+
+
+def _insert_shortcut_row(
+    cursor: sqlite3.Cursor,
+    shortcut: dict,
+    row_id: int,
+    sync_guid: str,
+    aesgcm: AESGCM | None,
+) -> None:
+    url_hash_blob = (
+        make_url_hash(row_id, shortcut["url"], aesgcm) if aesgcm is not None else None
+    )
+    last_mod = shortcut.get("last_modified", 0)
+    cursor.execute(
+        _INSERT_KEYWORDS_SQL,
+        (
+            row_id,
+            shortcut["short_name"],
+            shortcut["keyword"],
+            shortcut.get("favicon_url", ""),
+            shortcut["url"],
+            shortcut.get("safe_for_autoreplace", 0),
+            "",
+            shortcut.get("date_created", 0),
+            0,
+            shortcut.get("input_encodings", "UTF-8"),
+            shortcut.get("suggest_url", ""),
+            shortcut.get("prepopulate_id", 0),
+            0,
+            last_mod,
+            sync_guid,
+            shortcut.get("alternate_urls", "[]"),
+            "",
+            "",
+            "",
+            "",
+            "",
+            last_mod,
+            0,
+            shortcut.get("is_active", 1),
+            0,
+            0,
+            0,
+            url_hash_blob,
+        ),
+    )
+
+
+def _fix_default_metadata(cursor: sqlite3.Cursor, default_row_id: int) -> None:
+    # Sync default-engine pointer in keywords_metadata; Chromium uses this to
+    # validate the default on startup. Stale ID triggers repopulation path,
+    # resetting default to DuckDuckGo. Also drop the encrypted backup blob —
+    # it anchors the old default and overwrites Preferences guid on launch.
+    try:
+        updated = cursor.execute(
+            "UPDATE keywords_metadata SET value = ? "
+            "WHERE key = 'Default Search Provider ID'",
+            (str(default_row_id),),
+        ).rowcount
+        if updated == 0:
+            cursor.execute(
+                "INSERT OR IGNORE INTO keywords_metadata (key, value) VALUES (?, ?)",
+                ("Default Search Provider ID", str(default_row_id)),
+            )
+        cursor.execute(
+            "DELETE FROM keywords_metadata WHERE key = 'Default Search Provider Backup'",
+        )
+    except sqlite3.OperationalError:
+        _LOG.debug("keywords_metadata unavailable — skipping ID sync")
+
+
+def _bump_builtin_keyword_version(cursor: sqlite3.Cursor) -> None:
+    # Chromium re-adds missing built-ins on startup when meta.'Builtin Keyword Version'
+    # is below its internal version — bump it to skip the repopulation path.
+    try:
+        cursor.execute(
+            "UPDATE meta SET value = '99999' WHERE key = 'Builtin Keyword Version'",
+        )
+    except sqlite3.OperationalError:
+        _LOG.debug("meta table unavailable — skipping Builtin Keyword Version patch")
+
+
+def _apply_choice_screen_completion(dsp: dict, profile_path: Path) -> None:
+    if not dsp.get("choice_screen_random_shuffle_seed"):
+        return
+    _win_epoch = datetime.datetime(1601, 1, 1, tzinfo=datetime.UTC)
+    dsp["choice_screen_completion_timestamp"] = str(int(
+        (datetime.datetime.now(datetime.UTC) - _win_epoch).total_seconds()
+    ))
+    version_file = profile_path.parent / "Last Version"
+    if version_file.exists():
+        dsp["choice_screen_completion_version"] = (
+            version_file.read_text(encoding="utf-8").split()[0].strip()
+        )
+    dsp["choice_screen_completion_program"] = 3
+
+
+def _write_default_to_prefs(
+    prefs_path: Path,
+    prefs: dict,
+    default_guid: str,
+    default_shortcut: dict | None,
+    default_row_id: int | None,
+    profile_path: Path,
+) -> None:
+    dsp = prefs.setdefault("default_search_provider", {})
+    dsp["guid"] = default_guid
+    dsp["reset_occurred"] = False
+    dsp.pop("reset_time", None)
+    _apply_choice_screen_completion(dsp, profile_path)
+
+    if default_shortcut is not None and default_row_id is not None:
+        mirror = _build_mirror_dict(default_shortcut, default_row_id, default_guid)
+        dspd = prefs.setdefault("default_search_provider_data", {})
+        dspd["mirrored_template_url_data"] = mirror
+
+    prefs_path.write_text(json.dumps(prefs), encoding="utf-8")
+
+
 def restore_search_shortcuts(
     profile_path: Path,
     sync_folder_root: Path,
@@ -224,6 +354,18 @@ def restore_search_shortcuts(
         _LOG.warning("Web Data database not found at %s — cannot restore", web_data_dst)
         return
 
+    # On Windows, Chromium verifies url_hash on startup and drops rows whose
+    # hash doesn't match Pickle(id, url). Load the OSCrypt key once so we can
+    # compute a valid blob for every inserted row.
+    aesgcm = load_oscrypt_key(profile_path.parent)
+    if platform.system() == "Windows" and aesgcm is None:
+        _LOG.warning(
+            "Cannot restore search shortcuts to %s: OSCrypt key unavailable "
+            "(launch the browser once to initialize Local State, then apply backup again)",
+            profile_path.name,
+        )
+        return
+
     try:
         shortcuts = json.loads(shortcuts_json.read_text(encoding="utf-8"))
 
@@ -232,31 +374,17 @@ def restore_search_shortcuts(
         if prefs_path.exists():
             prefs = json.loads(prefs_path.read_text(encoding="utf-8"))
 
-        # On Windows, Chromium verifies url_hash on startup and drops rows
-        # whose hash doesn't match Pickle(id, url). Load the OSCrypt key
-        # once so we can compute a valid blob for every inserted row.
-        aesgcm = load_oscrypt_key(profile_path.parent)
-        if platform.system() == "Windows" and aesgcm is None:
-            _LOG.warning(
-                "Cannot restore search shortcuts to %s: OSCrypt key unavailable "
-                "(launch the browser once to initialize Local State, then apply backup again)",
-                profile_path.name,
-            )
-            return
+        restored_default_guid: str | None = None
+        default_row_id: int | None = None
+        default_shortcut: dict | None = None
 
         conn = sqlite3.connect(str(web_data_dst))
         try:
             cursor = conn.cursor()
-
             cursor.execute("DELETE FROM keywords")
 
-            next_id = 1
-            restored_default_guid: str | None = None
-            default_row_id: int | None = None
-            default_shortcut: dict | None = None
-
             for i, shortcut in enumerate(shortcuts):
-                row_id = next_id + i
+                row_id = i + 1
                 sync_guid = shortcut.get("sync_guid") or ""
                 if shortcut.get("is_default"):
                     if not sync_guid:
@@ -264,116 +392,21 @@ def restore_search_shortcuts(
                     restored_default_guid = sync_guid
                     default_row_id = row_id
                     default_shortcut = shortcut
+                _insert_shortcut_row(cursor, shortcut, row_id, sync_guid, aesgcm)
 
-                url_hash_blob: bytes | None = None
-                if aesgcm is not None:
-                    url_hash_blob = make_url_hash(row_id, shortcut["url"], aesgcm)
-
-                cursor.execute(
-                    """
-                    INSERT INTO keywords (
-                        id, short_name, keyword, favicon_url, url, safe_for_autoreplace,
-                        originating_url, date_created, usage_count, input_encodings,
-                        suggest_url, prepopulate_id, created_by_policy, last_modified,
-                        sync_guid, alternate_urls, image_url, search_url_post_params,
-                        suggest_url_post_params, image_url_post_params, new_tab_url,
-                        last_visited, created_from_play_api, is_active, starter_pack_id,
-                        enforced_by_policy, featured_by_policy, url_hash
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        row_id,
-                        shortcut["short_name"],
-                        shortcut["keyword"],
-                        shortcut.get("favicon_url", ""),
-                        shortcut["url"],
-                        shortcut.get("safe_for_autoreplace", 0),
-                        "",
-                        shortcut.get("date_created", 0),
-                        0,
-                        shortcut.get("input_encodings", "UTF-8"),
-                        shortcut.get("suggest_url", ""),
-                        shortcut.get("prepopulate_id", 0),
-                        0,
-                        shortcut.get("last_modified", 0),
-                        sync_guid,
-                        shortcut.get("alternate_urls", "[]"),
-                        "",
-                        "",
-                        "",
-                        "",
-                        "",
-                        shortcut.get("last_modified", 0),
-                        0,
-                        shortcut.get("is_active", 1),
-                        0,
-                        0,
-                        0,
-                        url_hash_blob,
-                    ),
-                )
-
-            # Sync the default-engine pointer in keywords_metadata so Chromium finds
-            # our inserted engine when it validates the default on startup — otherwise
-            # the stale ID causes Chromium to fall into its built-in repopulation path
-            # and reset the default to DuckDuckGo / its own choice.
-            # Also delete the encrypted backup blob: it anchors the old default and
-            # Chromium will use it to overwrite our Preferences guid if it exists.
             if default_row_id is not None:
-                try:
-                    updated = cursor.execute(
-                        "UPDATE keywords_metadata SET value = ? "
-                        "WHERE key = 'Default Search Provider ID'",
-                        (str(default_row_id),),
-                    ).rowcount
-                    if updated == 0:
-                        cursor.execute(
-                            "INSERT OR IGNORE INTO keywords_metadata (key, value) VALUES (?, ?)",
-                            ("Default Search Provider ID", str(default_row_id)),
-                        )
-                    cursor.execute(
-                        "DELETE FROM keywords_metadata "
-                        "WHERE key = 'Default Search Provider Backup'",
-                    )
-                except sqlite3.OperationalError:
-                    _LOG.debug("keywords_metadata unavailable — skipping ID sync")
-
-            # Chromium re-adds missing built-ins on startup when meta.'Builtin Keyword Version'
-            # is below its internal version — bump it so the repopulation path is skipped.
-            try:
-                cursor.execute(
-                    "UPDATE meta SET value = '99999' WHERE key = 'Builtin Keyword Version'",
-                )
-            except sqlite3.OperationalError:
-                _LOG.debug("meta table unavailable — skipping Builtin Keyword Version patch")
+                _fix_default_metadata(cursor, default_row_id)
+            _bump_builtin_keyword_version(cursor)
 
             conn.commit()
         finally:
             conn.close()
 
         if restored_default_guid and prefs is not None:
-            dsp = prefs.setdefault("default_search_provider", {})
-            dsp["guid"] = restored_default_guid
-            dsp["reset_occurred"] = False
-            dsp.pop("reset_time", None)
-            if dsp.get("choice_screen_random_shuffle_seed"):
-                _win_epoch = datetime.datetime(1601, 1, 1, tzinfo=datetime.UTC)
-                dsp["choice_screen_completion_timestamp"] = str(int(
-                    (datetime.datetime.now(datetime.UTC) - _win_epoch).total_seconds()
-                ))
-                version_file = profile_path.parent / "Last Version"
-                if version_file.exists():
-                    dsp["choice_screen_completion_version"] = (
-                        version_file.read_text(encoding="utf-8").split()[0].strip()
-                    )
-                dsp["choice_screen_completion_program"] = 3
-
-            if default_shortcut is not None and default_row_id is not None:
-                mirror = _build_mirror_dict(default_shortcut, default_row_id, restored_default_guid)
-                dspd = prefs.setdefault("default_search_provider_data", {})
-                dspd["mirrored_template_url_data"] = mirror
-
-            prefs_path.write_text(json.dumps(prefs), encoding="utf-8")
+            _write_default_to_prefs(
+                prefs_path, prefs, restored_default_guid,
+                default_shortcut, default_row_id, profile_path,
+            )
 
         report("search shortcuts restored")
         _LOG.info("Restored %d search shortcuts from %s", len(shortcuts), shortcuts_json)

@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QFileSystemWatcher, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
@@ -21,6 +21,8 @@ from src.settings import SettingsDialog
 from src.sync.sync_dir import SYNC_DIR_NAME as _SYNC_DIR_NAME
 from src.sync_engine import SyncEngine
 from src.sync_worker import SyncWorker
+from src.update_runner import run_update_check
+from src.watcher_controller import WatcherController
 from src.winget import WingetManager
 
 UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000
@@ -51,16 +53,11 @@ class TrayApp(QSystemTrayIcon):
         self._engine = engine
         self._config = config_module
         self._worker: SyncWorker | None = None
-        self._debounce_timer = QTimer(self)
-        self._debounce_timer.setSingleShot(True)
-        self._debounce_timer.setInterval(2000)
-        self._debounce_timer.timeout.connect(self._on_debounce_fired)
-        self._watcher: QFileSystemWatcher | None = None
-        self._watcher_paused: bool = False
+        self._watcher = WatcherController(_SYNC_DIR_NAME, parent=self)
+        self._watcher.change_detected.connect(self._on_watcher_change)
         self._settings_dialog: SettingsDialog | None = None
         self._last_sync: str = self._config.get_last_sync()
         self._last_error: str = ""
-        self._last_metadata_mtime: float | None = None
 
         installed_browsers = [b for b in ALL_BROWSERS if b.is_installed()]
         self._browser_monitor = BrowserMonitor(installed_browsers, parent=self)
@@ -90,9 +87,7 @@ class TrayApp(QSystemTrayIcon):
         self._periodic_sync_timer.timeout.connect(self._on_periodic_sync_tick)
         self._restart_periodic_sync_timer()
 
-        sync_folder = self._config.get_sync_folder()
-        if sync_folder is not None:
-            self._setup_watcher(sync_folder)
+        self._watcher.update_sync_folder(self._config.get_sync_folder())
 
         self._winget = WingetManager(self)
         self._winget.detected.connect(self._on_winget_detected)
@@ -167,62 +162,7 @@ class TrayApp(QSystemTrayIcon):
             self.setIcon(self._make_icon(state))
         self._update_tooltip()
 
-    def _setup_watcher(self, sync_folder: Path) -> None:
-        self._watcher = QFileSystemWatcher(self)
-        self._watcher.fileChanged.connect(self._on_file_changed)
-        self._watcher.directoryChanged.connect(self._on_dir_changed)
-        self._refresh_watcher_paths()
-
-    def _refresh_watcher_paths(self) -> None:
-        if self._watcher is None:
-            return
-        watched = self._watcher.files() + self._watcher.directories()
-        if watched:
-            self._watcher.removePaths(watched)
-        sync_folder = self._config.get_sync_folder()
-        if sync_folder is None or not sync_folder.exists():
-            logger.debug("Watcher idle — sync folder missing")
-            return
-        paths = [str(sync_folder)]
-        current = sync_folder / _SYNC_DIR_NAME
-        if current.is_dir():
-            paths.append(str(current))
-            for sub in current.rglob("*"):
-                if sub.is_dir():
-                    paths.append(str(sub))
-        self._watcher.addPaths(paths)
-        logger.debug("Watching %d paths under %s", len(paths), sync_folder)
-
-    def _on_file_changed(self, path: str) -> None:
-        if self._watcher_paused:
-            return
-        logger.debug("File changed: %s", path)
-        self._schedule_debounced_sync()
-
-    def _on_dir_changed(self, path: str) -> None:
-        if self._watcher_paused:
-            return
-        logger.debug("Directory changed: %s", path)
-        self._schedule_debounced_sync()
-
-    def _schedule_debounced_sync(self) -> None:
-        self._debounce_timer.start()
-        logger.debug("Debounce timer reset (2s)")
-
-    def _on_debounce_fired(self) -> None:
-        if self._last_metadata_mtime is not None:
-            sync_folder = self._config.get_sync_folder()
-            if sync_folder is not None:
-                metadata = sync_folder / _SYNC_DIR_NAME / "metadata.json"
-                if metadata.exists():
-                    try:
-                        st = metadata.stat()
-                        if st.st_mtime == self._last_metadata_mtime:
-                            logger.debug("Watcher fired but metadata.json unchanged — skipping")
-                            return
-                    except OSError:
-                        pass
-
+    def _on_watcher_change(self) -> None:
         if self._browser_monitor.any_running():
             logger.debug("Watcher fired but a browser is running — deferring to browser close")
             return
@@ -238,21 +178,6 @@ class TrayApp(QSystemTrayIcon):
 
         logger.info("Debounce fired — triggering sync (remote change detected)")
         self._trigger_sync()
-
-    def _resume_watcher(self) -> None:
-        sync_folder = self._config.get_sync_folder()
-        if sync_folder is not None:
-            metadata = sync_folder / _SYNC_DIR_NAME / "metadata.json"
-            try:
-                if metadata.exists():
-                    self._last_metadata_mtime = metadata.stat().st_mtime
-                else:
-                    self._last_metadata_mtime = None
-            except OSError:
-                pass
-        self._refresh_watcher_paths()
-        self._watcher_paused = False
-        logger.debug("File watcher resumed")
 
     def _restart_periodic_sync_timer(self) -> None:
         minutes = max(1, self._config.get_sync_interval())
@@ -308,7 +233,7 @@ class TrayApp(QSystemTrayIcon):
         self._settings_dialog = None
 
     def _on_settings_saved(self) -> None:
-        self._debounce_timer.stop()
+        self._watcher.stop_debounce()
 
         sync_folder = self._config.get_sync_folder()
         if sync_folder is None:
@@ -318,32 +243,13 @@ class TrayApp(QSystemTrayIcon):
         self._engine = SyncEngine(sync_folder)
         logger.info("Settings saved — engine rebuilt with folder %s", sync_folder)
 
-        metadata = sync_folder / _SYNC_DIR_NAME / "metadata.json"
-        try:
-            if metadata.exists():
-                self._last_metadata_mtime = metadata.stat().st_mtime
-            else:
-                self._last_metadata_mtime = None
-        except OSError:
-            self._last_metadata_mtime = None
-
-        self._teardown_watcher()
-        self._setup_watcher(sync_folder)
+        self._watcher.update_sync_folder(sync_folder)
+        self._watcher.record_mtime_baseline()
         self._restart_periodic_sync_timer()
 
         has_profiles = any(profiles for profiles in self._config.get_enabled_profiles().values())
         autostart.apply(has_profiles)
         logger.info("Autostart %s", "enabled" if has_profiles else "disabled")
-
-    def _teardown_watcher(self) -> None:
-        if self._watcher is None:
-            return
-        watched = self._watcher.files() + self._watcher.directories()
-        if watched:
-            self._watcher.removePaths(watched)
-            logger.debug("Removed watched paths: %s", watched)
-        self._watcher.deleteLater()
-        self._watcher = None
 
     @staticmethod
     def _check_sync_folder_permissions(path: Path) -> bool:
@@ -397,8 +303,7 @@ class TrayApp(QSystemTrayIcon):
     def _on_sync_started(self) -> None:
         self.setIcon(self._make_icon("syncing"))
         self._action_settings.setEnabled(False)
-        self._watcher_paused = True
-        logger.debug("File watcher paused during sync")
+        self._watcher.pause()
         self._update_tooltip()
 
     def _on_profile_progress(
@@ -420,16 +325,8 @@ class TrayApp(QSystemTrayIcon):
         self._last_error = ""
         self._last_sync = last_sync
 
-        sync_folder = self._config.get_sync_folder()
-        if sync_folder is not None:
-            metadata = sync_folder / _SYNC_DIR_NAME / "metadata.json"
-            try:
-                if metadata.exists():
-                    self._last_metadata_mtime = metadata.stat().st_mtime
-                else:
-                    self._last_metadata_mtime = None
-            except OSError:
-                self._last_metadata_mtime = None
+        if self._config.get_sync_folder() is not None:
+            self._watcher.record_mtime_baseline()
             self._config.set_last_sync(last_sync)
 
         if is_first_sync:
@@ -443,7 +340,7 @@ class TrayApp(QSystemTrayIcon):
                 for profile in profiles:
                     self._settings_dialog.hide_profile_progress(browser, profile)
 
-        QTimer.singleShot(5000, self._resume_watcher)
+        QTimer.singleShot(5000, self._watcher.resume)
 
         state = "waiting" if self._browser_monitor.any_running() else "idle"
         self.setIcon(self._make_icon(state))
@@ -471,30 +368,13 @@ class TrayApp(QSystemTrayIcon):
         self._do_update_check(silent=False)
 
     def _do_update_check(self, silent: bool) -> None:
-        try:
-            result = updater.check_for_update()
-        except updater.UpdateCheckError as exc:
-            logger.warning("update: %s", exc)
-            if not silent:
-                notify("Chromium Profile Syncer", f"Update check failed: {exc}")
-            return
-        if result is None:
-            if not silent:
-                notify("Chromium Profile Syncer", "Already up to date.")
-            return
-        target_sha, asset_url, sha_url = result
-        if self._worker is not None and self._worker.isRunning():
-            logger.info("update: deferring (sync running) — target=%s", target_sha[:8])
-            return
-        logger.info("update: installing %s", target_sha[:8])
-        try:
-            updater.install_update(asset_url, sha_url)
-        except Exception as exc:
-            logger.error("update: install failed: %s", exc)
-            if not silent:
-                notify("Chromium Profile Syncer", f"Update failed: {exc}")
-            return
-        QApplication.quit()
+        should_quit = run_update_check(
+            silent=silent,
+            is_sync_running=lambda: self._worker is not None and self._worker.isRunning(),
+            notify_user=lambda msg: notify("Chromium Profile Syncer", msg),
+        )
+        if should_quit:
+            QApplication.quit()
 
     def _on_winget_detected(self, managed: bool, _installed: str, available: str) -> None:
         if not managed:
@@ -519,4 +399,4 @@ class TrayApp(QSystemTrayIcon):
         self._action_settings.setEnabled(True)
         self._update_tooltip()
         self.sync_completed.emit(False)
-        QTimer.singleShot(5000, self._resume_watcher)
+        QTimer.singleShot(5000, self._watcher.resume)

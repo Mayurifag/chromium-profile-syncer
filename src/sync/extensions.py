@@ -265,7 +265,7 @@ def update_webstore_manifest(
             len(existing),
         )
         return
-    if write_text_if_changed(manifest_path, json.dumps(webstore_map)):
+    if write_text_if_changed(manifest_path, json.dumps(webstore_map, sort_keys=True)):
         _LOG.info("Updated webstore manifest: %d extensions", len(webstore_map))
 
 
@@ -282,6 +282,50 @@ def collect_webstore_extensions(profile_dir: Path) -> dict[str, str]:
             name = _extension_name(best)
             result[id_dir.name] = name if name != id_dir.name else ""
     return result
+
+
+def _drop_ids(
+    ext_ids: list[str], drop: set[str], log_msg: str, *log_args: object
+) -> list[str]:
+    if not drop:
+        return ext_ids
+    kept = [e for e in ext_ids if e not in drop]
+    skipped = len(ext_ids) - len(kept)
+    if skipped:
+        _LOG.info(log_msg, skipped, *log_args)
+    return kept
+
+
+def _filter_install_ids(
+    ext_ids: list[str],
+    browser: BrowserBase,
+    ungoogled_only_ext_ids: list[str],
+    windows_only_ext_ids: list[str] | None,
+) -> list[str]:
+    ext_ids = _drop_ids(
+        ext_ids, set(browser.ext_id_aliases.values()),
+        "Skipping %d internally-bundled extension(s) for %s", browser.name,
+    )
+    if not browser.ungoogled:
+        ext_ids = _drop_ids(
+            ext_ids, set(ungoogled_only_ext_ids),
+            "Skipping %d ungoogled-only extension(s) for non-ungoogled browser %s",
+            browser.name,
+        )
+    if platform.system() != "Windows" and windows_only_ext_ids:
+        ext_ids = _drop_ids(
+            ext_ids, set(windows_only_ext_ids),
+            "Skipping %d windows-only extension(s) on non-Windows platform",
+        )
+    return ext_ids
+
+
+def _wipe_stubs(ext_dir: Path | None, log_msg: str) -> None:
+    if ext_dir is None or not ext_dir.exists():
+        return
+    for stub in ext_dir.glob("*.json"):
+        stub.unlink(missing_ok=True)
+        _LOG.info(log_msg, stub.stem)
 
 
 def install_external_extensions(
@@ -304,69 +348,35 @@ def install_external_extensions(
     if not ext_ids:
         return
 
-    internal_ids = set(browser.ext_id_aliases.values())
-    if internal_ids:
-        before = len(ext_ids)
-        ext_ids = [e for e in ext_ids if e not in internal_ids]
-        skipped = before - len(ext_ids)
-        if skipped:
-            _LOG.info("Skipping %d internally-bundled extension(s) for %s", skipped, browser.name)
-
-    if not browser.ungoogled and ungoogled_only_ext_ids:
-        ungoogled_set = set(ungoogled_only_ext_ids)
-        before = len(ext_ids)
-        ext_ids = [e for e in ext_ids if e not in ungoogled_set]
-        skipped = before - len(ext_ids)
-        if skipped:
-            _LOG.info(
-                "Skipping %d ungoogled-only extension(s) for non-ungoogled browser %s",
-                skipped, browser.name,
-            )
-
-    if windows_only_ext_ids and platform.system() != "Windows":
-        windows_set = set(windows_only_ext_ids)
-        before = len(ext_ids)
-        ext_ids = [e for e in ext_ids if e not in windows_set]
-        skipped = before - len(ext_ids)
-        if skipped:
-            _LOG.info("Skipping %d windows-only extension(s) on non-Windows platform", skipped)
+    ext_ids = _filter_install_ids(
+        ext_ids, browser, ungoogled_only_ext_ids, windows_only_ext_ids,
+    )
 
     update_url = browser.web_store_update_url
     system = platform.system()
-    on_windows = system == "Windows"
-    on_linux = system == "Linux"
-    reg_key = browser.windows_extensions_registry_key() if on_windows else None
-    linux_policy_dir = browser.linux_managed_policy_dir() if on_linux else None
+    reg_key = browser.windows_extensions_registry_key() if system == "Windows" else None
+    linux_policy_dir = browser.linux_managed_policy_dir() if system == "Linux" else None
+    ext_dir = browser.external_extensions_dir()
 
     if reg_key:
         _install_via_registry(ext_ids, reg_key, update_url)
-        force_key = browser.windows_force_list_registry_key() if on_windows else None
+        force_key = browser.windows_force_list_registry_key()
         if force_key:
             _install_via_force_list(ext_ids, force_key)
-        ext_dir = browser.external_extensions_dir()
-        if ext_dir is not None and ext_dir.exists():
-            for stub in ext_dir.glob("*.json"):
-                stub.unlink(missing_ok=True)
-                _LOG.info("Removed orphaned extension stub (now using registry): %s", stub.stem)
+        _wipe_stubs(ext_dir, "Removed orphaned extension stub (now using registry): %s")
     elif linux_policy_dir:
         _install_via_linux_policy(ext_ids, linux_policy_dir, browser.name)
-        ext_dir = browser.external_extensions_dir()
-        if ext_dir is not None and ext_dir.exists():
-            for stub in ext_dir.glob("*.json"):
-                stub.unlink(missing_ok=True)
-                _LOG.info("Removed orphaned extension stub (now using policy): %s", stub.stem)
+        _wipe_stubs(ext_dir, "Removed orphaned extension stub (now using policy): %s")
+    elif ext_dir is not None:
+        _install_via_stubs(ext_ids, ext_dir, update_url)
     else:
-        ext_dir = browser.external_extensions_dir()
-        if ext_dir is not None:
-            _install_via_stubs(ext_ids, ext_dir, update_url)
-        else:
-            _LOG.info(
-                "%s: extension auto-install not supported — %d extension(s) need manual install:",
-                browser.name,
-                len(ext_ids),
-            )
-            for ext_id in ext_ids:
-                _LOG.info("  https://chromewebstore.google.com/detail/%s", ext_id)
+        _LOG.info(
+            "%s: extension auto-install not supported — %d extension(s) need manual install:",
+            browser.name,
+            len(ext_ids),
+        )
+        for ext_id in ext_ids:
+            _LOG.info("  https://chromewebstore.google.com/detail/%s", ext_id)
 
 
 def _install_via_registry(ext_ids: list[str], reg_subkey: str, update_url: str) -> None:
@@ -457,7 +467,7 @@ def _install_via_linux_policy(
 
     target = policy_dir / _linux_policy_filename(browser_name)
     payload = json.dumps(
-        {"ExtensionInstallForcelist": list(ext_ids)},
+        {"ExtensionInstallForcelist": sorted(ext_ids)},
         indent=2,
     )
 
@@ -545,17 +555,13 @@ def clean_external_extensions(browsers: list[BrowserBase]) -> None:
         linux_policy_dir = browser.linux_managed_policy_dir() if on_linux else None
         if reg_key:
             _wipe_registry_extensions(reg_key)
-            force_key = browser.windows_force_list_registry_key() if on_windows else None
+            force_key = browser.windows_force_list_registry_key()
             if force_key:
                 _wipe_registry_key(force_key)
         elif linux_policy_dir:
             _clean_linux_policy(linux_policy_dir, browser.name)
         else:
-            ext_dir = browser.external_extensions_dir()
-            if ext_dir and ext_dir.exists():
-                for stub in ext_dir.glob("*.json"):
-                    stub.unlink(missing_ok=True)
-                    _LOG.info("Removed extension stub: %s", stub.stem)
+            _wipe_stubs(browser.external_extensions_dir(), "Removed extension stub: %s")
 
 
 def _wipe_registry_extensions(reg_subkey: str) -> None:

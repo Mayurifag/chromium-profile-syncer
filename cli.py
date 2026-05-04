@@ -26,6 +26,11 @@ def _progress(msg: str) -> None:
     print(f"[progress] {msg}", file=sys.stderr, flush=True)
 
 
+def _err(msg: str, **extra: object) -> int:
+    print(json.dumps({"error": msg, **extra}))
+    return 1
+
+
 def cmd_browsers(_args: argparse.Namespace) -> int:
     from src.browsers import ALL_BROWSERS
 
@@ -53,8 +58,7 @@ def _require_sync_folder() -> Path:
 
     sf = config.get_sync_folder()
     if not sf:
-        print(json.dumps({"error": "sync_folder not configured",
-                          "hint": "run: cli.py config set-sync-folder PATH"}))
+        _err("sync_folder not configured", hint="run: cli.py config set-sync-folder PATH")
         sys.exit(1)
     return sf
 
@@ -85,27 +89,22 @@ def cmd_restore(args: argparse.Namespace) -> int:
 
     browser = next((b for b in ALL_BROWSERS if b.name == args.browser), None)
     if browser is None:
-        known = [b.name for b in ALL_BROWSERS]
-        print(json.dumps({"error": f"Unknown browser: {args.browser!r}", "known": known}))
-        return 1
+        return _err(f"Unknown browser: {args.browser!r}", known=[b.name for b in ALL_BROWSERS])
 
     sf = _require_sync_folder()
     archive_path = sf / _archive.ARCHIVE_NAME
     if not archive_path.exists():
-        print(json.dumps({"error": f"No {_archive.ARCHIVE_NAME} in sync folder"}))
-        return 1
+        return _err(f"No {_archive.ARCHIVE_NAME} in sync folder")
 
     profiles = browser.discover_profiles()
     if args.profile:
         profiles = [p for p in profiles if p.name == args.profile]
     if not profiles:
-        msg = (
+        return _err(
             f"Profile {args.profile!r} not found for {args.browser}"
             if args.profile
             else f"No profiles found for {args.browser}"
         )
-        print(json.dumps({"error": msg}))
-        return 1
 
     work_dir = Path(tempfile.mkdtemp(prefix="cps-restore-"))
     try:
@@ -114,7 +113,6 @@ def cmd_restore(args: argparse.Namespace) -> int:
         engine = SyncEngine(sf)
         ungoogled_only_ext_ids = config.get_ungoogled_only_extensions()
         windows_only_ext_ids = config.get_windows_only_extensions()
-        ext_restrictions = config.get_extension_browser_restrictions()
         aliases = browser.ext_id_aliases
         for profile_path in profiles:
             _progress(f"{browser.name}/{profile_path.name}")
@@ -131,7 +129,6 @@ def cmd_restore(args: argparse.Namespace) -> int:
                 work_dir, browser,
                 ungoogled_only_ext_ids=ungoogled_only_ext_ids,
                 windows_only_ext_ids=windows_only_ext_ids,
-                browser_restrictions=ext_restrictions,
             )
     finally:
         shutil.rmtree(work_dir)
@@ -162,8 +159,7 @@ def cmd_config_set_browser(args: argparse.Namespace) -> int:
 
     known = {b.name for b in ALL_BROWSERS}
     if args.name not in known:
-        print(json.dumps({"error": f"Unknown browser: {args.name!r}", "known": sorted(known)}))
-        return 1
+        return _err(f"Unknown browser: {args.name!r}", known=sorted(known))
 
     enabled = args.enabled.lower() not in ("false", "0", "no")
     browsers = config.get_enabled_browsers()
@@ -179,8 +175,7 @@ def cmd_config_set_profile(args: argparse.Namespace) -> int:
 
     known = {b.name for b in ALL_BROWSERS}
     if args.browser not in known:
-        print(json.dumps({"error": f"Unknown browser: {args.browser!r}", "known": sorted(known)}))
-        return 1
+        return _err(f"Unknown browser: {args.browser!r}", known=sorted(known))
 
     profiles = config.get_enabled_profiles()
     browser_profiles: list[str] = list(profiles.get(args.browser, []))
@@ -196,8 +191,7 @@ def cmd_config_set_profile(args: argparse.Namespace) -> int:
 
     if args.direction is not None:
         if args.direction not in ("push", "pull", "both"):
-            print(json.dumps({"error": "direction must be push, pull, or both"}))
-            return 1
+            return _err("direction must be push, pull, or both")
         directions = config.get_profile_directions()
         directions.setdefault(args.browser, {})[args.profile] = args.direction
         config.set_profile_directions(directions)
