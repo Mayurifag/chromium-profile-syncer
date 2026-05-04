@@ -21,7 +21,7 @@ from src.settings import SettingsDialog
 from src.sync.sync_dir import SYNC_DIR_NAME as _SYNC_DIR_NAME
 from src.sync_engine import SyncEngine
 from src.sync_worker import SyncWorker
-from src.update_runner import run_update_check
+from src.update_runner import UpdateCheckThread, is_update_supported
 from src.watcher_controller import WatcherController
 from src.winget import WingetManager
 
@@ -58,6 +58,7 @@ class TrayApp(QSystemTrayIcon):
         self._settings_dialog: SettingsDialog | None = None
         self._last_sync: str = self._config.get_last_sync()
         self._last_error: str = ""
+        self._update_thread: UpdateCheckThread | None = None
 
         installed_browsers = [b for b in ALL_BROWSERS if b.is_installed()]
         self._browser_monitor = BrowserMonitor(installed_browsers, parent=self)
@@ -70,18 +71,20 @@ class TrayApp(QSystemTrayIcon):
         self._menu = QMenu()
         self._action_settings = self._menu.addAction("Settings")
         self._action_settings.triggered.connect(self.open_settings)
-        self._action_check_updates = self._menu.addAction("Check for updates")
-        self._action_check_updates.triggered.connect(self._manual_update_check)
+        if is_update_supported():
+            self._action_check_updates = self._menu.addAction("Check for updates")
+            self._action_check_updates.triggered.connect(self._manual_update_check)
         self._menu.addSeparator()
         self._action_quit = self._menu.addAction("Quit")
         self._action_quit.triggered.connect(QApplication.quit)
         self.setContextMenu(self._menu)
 
-        updater.cleanup_staging()
-        self._update_timer = QTimer(self)
-        self._update_timer.setInterval(UPDATE_CHECK_INTERVAL_MS)
-        self._update_timer.timeout.connect(self._auto_update_check)
-        self._update_timer.start()
+        if is_update_supported():
+            updater.cleanup_staging()
+            self._update_timer = QTimer(self)
+            self._update_timer.setInterval(UPDATE_CHECK_INTERVAL_MS)
+            self._update_timer.timeout.connect(self._auto_update_check)
+            self._update_timer.start()
 
         self._periodic_sync_timer = QTimer(self)
         self._periodic_sync_timer.timeout.connect(self._on_periodic_sync_tick)
@@ -93,7 +96,7 @@ class TrayApp(QSystemTrayIcon):
         self._winget.detected.connect(self._on_winget_detected)
         self._winget.upgrade_finished.connect(self._on_helium_upgrade_finished)
 
-        QTimer.singleShot(0, self._auto_update_check)
+        QTimer.singleShot(2000, self._auto_update_check)
 
         logger.debug("TrayApp initialized")
 
@@ -144,7 +147,15 @@ class TrayApp(QSystemTrayIcon):
         profiles = enabled_profiles.get(browser_name, [])
         if not profiles:
             return
-        if not any(_config.is_profile_sync_enabled(browser_name, p) for p in profiles):
+        # ext_repull-pending profiles must sync on close even with auto-sync
+        # disabled — extensions installed by policy on first launch overwrite
+        # restored LES with defaults, and only this post-launch sync re-applies
+        # the synced data back over those defaults.
+        pending_repull = _config.get_profiles_needing_ext_repull().get(browser_name, [])
+        has_pending = any(p in pending_repull for p in profiles)
+        if not has_pending and not any(
+            _config.is_profile_sync_enabled(browser_name, p) for p in profiles
+        ):
             logger.debug("Browser %s closed but auto-sync disabled for all profiles", browser_name)
             return
 
@@ -358,21 +369,33 @@ class TrayApp(QSystemTrayIcon):
             notify("Chromium Profile Syncer", f"{triggered_browser} synced", duration_ms=2000)
 
     def _auto_update_check(self) -> None:
-        if self._settings_dialog is None:
-            self._do_update_check(silent=True)
-        else:
-            logger.debug("update: skip app update check — settings dialog open")
+        if is_update_supported():
+            if self._settings_dialog is None:
+                self._do_update_check(silent=True)
+            else:
+                logger.debug("update: skip app update check — settings dialog open")
         self._winget.detect()
 
     def _manual_update_check(self) -> None:
         self._do_update_check(silent=False)
 
     def _do_update_check(self, silent: bool) -> None:
-        should_quit = run_update_check(
+        if self._update_thread is not None and self._update_thread.isRunning():
+            logger.debug("update: check already running")
+            return
+        thread = UpdateCheckThread(
             silent=silent,
             is_sync_running=lambda: self._worker is not None and self._worker.isRunning(),
-            notify_user=lambda msg: notify("Chromium Profile Syncer", msg),
+            parent=self,
         )
+        thread.user_message.connect(lambda msg: notify("Chromium Profile Syncer", msg))
+        thread.completed.connect(self._on_update_completed)
+        thread.finished.connect(thread.deleteLater)
+        self._update_thread = thread
+        thread.start()
+
+    def _on_update_completed(self, should_quit: bool) -> None:
+        self._update_thread = None
         if should_quit:
             QApplication.quit()
 

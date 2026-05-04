@@ -136,7 +136,23 @@ non-ungoogled browsers. The backup archive always contains the extension setting
 (they are sourced from whichever ungoogled browser is being synced), so the data
 is preserved — it just is not applied to browsers that don't need it.
 
+# Nice flags to set enabled/always in my opinion
+
+```conf
+#middle-click-autoscroll
+#force-dark-mode
+#enable-force-dark
+#set-ipv6-probe-false
+#disable-search-engine-collection
+#force-punycode-hostnames
+#scroll-tabs
+#popups-to-tabs
+#disable-link-drag - well, check whats this owo
+#hide-fullscreen-exit-ui
+#disable-top-sites
+
+```
+
 # TODO
 
-- Releases and automatical updates check
 - search shortcut gru by default - is that possible to do automatically?

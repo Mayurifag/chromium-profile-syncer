@@ -11,7 +11,8 @@ from unittest.mock import MagicMock, patch
 def test_exe_args_frozen():
     """In a frozen bundle, returns [executable, --tray] for autostart."""
     import src.autostart as autostart
-    with patch.object(sys, "frozen", True, create=True):
+    with patch.object(sys, "frozen", True, create=True), \
+         patch.object(autostart, "_linux_installed_binary", return_value=None):
         result = autostart._exe_args()
     assert result == [sys.executable, "--tray"]
 
@@ -21,9 +22,21 @@ def test_exe_args_dev_mode(tmp_path):
     import src.autostart as autostart
     fake_script = str(tmp_path / "main.py")
     with patch.object(sys, "frozen", False, create=True), \
-         patch.object(sys, "argv", [fake_script]):
+         patch.object(sys, "argv", [fake_script]), \
+         patch.object(autostart, "_linux_installed_binary", return_value=None):
         result = autostart._exe_args()
     assert result == [sys.executable, str(Path(fake_script).resolve()), "--tray"]
+
+
+def test_exe_args_linux_prefers_installed_binary(tmp_path):
+    """On Linux, installed binary path overrides sys.executable."""
+    import src.autostart as autostart
+    installed = tmp_path / "chromium-profile-syncer"
+    installed.write_text("#!/bin/sh\n", encoding="utf-8")
+    with patch.object(sys, "platform", "linux"), \
+         patch.object(autostart, "_linux_installed_binary", return_value=installed):
+        result = autostart._exe_args()
+    assert result == [str(installed), "--tray"]
 
 
 # ---------------------------------------------------------------------------
@@ -70,13 +83,20 @@ def test_linux_enable(tmp_path):
     import src.autostart as autostart
 
     captured: dict[str, str] = {}
+    desktop_target = tmp_path / "autostart" / "chromium-profile-syncer.desktop"
+
+    real_write_text = Path.write_text
 
     def fake_write_text(self, text: str, encoding: str = "utf-8") -> None:
-        captured["content"] = text
+        if self == desktop_target:
+            captured["content"] = text
+            return
+        real_write_text(self, text, encoding=encoding)
 
     with patch.dict("os.environ", {"XDG_CONFIG_HOME": str(tmp_path)}), \
-         patch.object(Path, "mkdir"), \
          patch.object(Path, "write_text", fake_write_text), \
+         patch.object(Path, "chmod"), \
+         patch.object(autostart, "_linux_installed_binary", return_value=None), \
          patch.object(sys, "frozen", True, create=True):
         autostart._linux(True)
 
@@ -84,6 +104,11 @@ def test_linux_enable(tmp_path):
     assert "X-GNOME-Autostart-enabled=true" in content
     assert "chromium-profile-syncer" in content
     assert "Hidden=false" in content
+    assert "Terminal=false" in content
+    assert "Icon=" in content
+    assert "Categories=Utility;" in content
+    assert "StartupNotify=false" in content
+    assert "X-GNOME-Autostart-Delay=10" in content
 
 
 def test_linux_disable(tmp_path):
