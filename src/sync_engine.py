@@ -324,9 +324,6 @@ class SyncEngine:
         if json_path.exists() and prefs_path.exists():
             saved = json.loads(json_path.read_bytes())
             prefs = json.loads(prefs_path.read_bytes())
-            if dt.get("extensions", True):
-                prefs.get("extensions", {}).pop("settings", None)
-                saved.get("extensions", {}).pop("settings", None)
             _prefs.merge_prefs(prefs, saved)
             prefs_path.write_bytes(json.dumps(prefs, separators=(",", ":")).encode())
             _LOG.info("Merged preferences.json into %s", prefs_path)
