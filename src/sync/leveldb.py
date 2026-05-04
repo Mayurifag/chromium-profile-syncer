@@ -24,10 +24,10 @@ def is_empty_leveldb(d: Path) -> bool:
         return False
     try:
         for ldb in d.glob("*.ldb"):
-            if ldb.stat().st_size > 0:
+            if ldb.is_file() and ldb.stat().st_size > 0:
                 return False
         for log in d.glob("*.log"):
-            if log.stat().st_size > 0:
+            if log.is_file() and log.stat().st_size > 0:
                 return False
     except OSError:
         return False

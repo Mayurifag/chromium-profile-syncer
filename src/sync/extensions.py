@@ -529,10 +529,18 @@ def _macos_managed_pref_path(domain: str) -> Path:
     return Path(f"/Library/Managed Preferences/{user}/{domain}.plist")
 
 
-def _read_macos_plist(path: Path) -> dict:
+def _read_macos_plist(path: Path) -> dict | None:
+    if not path.exists():
+        return {}
     try:
         return plistlib.loads(path.read_bytes())
-    except (OSError, ValueError, plistlib.InvalidFileException):
+    except PermissionError as e:
+        _LOG.warning(
+            "Cannot read existing plist %s: %s — refusing to overwrite", path, e,
+        )
+        return None
+    except (OSError, ValueError, plistlib.InvalidFileException) as e:
+        _LOG.warning("Cannot parse plist %s: %s — treating as empty", path, e)
         return {}
 
 
@@ -568,6 +576,8 @@ def _install_via_macos_managed_prefs(
 ) -> None:
     target = _macos_managed_pref_path(domain)
     existing = _read_macos_plist(target)
+    if existing is None:
+        return
     new_data = dict(existing)
     new_data["ExtensionInstallForcelist"] = sorted(ext_ids)
     if existing == new_data:
