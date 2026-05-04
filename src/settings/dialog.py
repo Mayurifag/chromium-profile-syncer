@@ -36,6 +36,7 @@ from src.settings._profile_row import RowContext, add_profile_row
 from src.settings.initial_upload import InitialUploadDialog
 from src.shortcuts_editor import ShortcutsEditorDialog
 from src.sync.sync_dir import SYNC_DIR_NAME
+from src.version import version_display
 from src.winget import WingetManager
 
 _LOG = logging.getLogger(__name__)
@@ -173,57 +174,69 @@ class SettingsDialog(QDialog):
         right.addWidget(self._profiles_group)
 
         selects_row = QWidget()
-        selects_layout = QHBoxLayout(selects_row)
-        selects_layout.setContentsMargins(0, 0, 0, 0)
-        selects_layout.setSpacing(6)
+        selects_outer = QVBoxLayout(selects_row)
+        selects_outer.setContentsMargins(0, 0, 0, 0)
+        selects_outer.setSpacing(4)
 
-        self._activity_log_check = QCheckBox("Show activity log")
+        toggles_row = QHBoxLayout()
+        toggles_row.setContentsMargins(0, 0, 0, 0)
+        toggles_row.setSpacing(8)
+
+        self._activity_log_check = QCheckBox("Activity log")
         self._activity_log_check.setChecked(True)
         self._activity_log_check.toggled.connect(self._on_activity_log_changed)
-        selects_layout.addWidget(self._activity_log_check)
-
-        selects_layout.addSpacing(8)
+        toggles_row.addWidget(self._activity_log_check)
 
         self._autostart_check = QCheckBox("Launch on login")
         self._autostart_check.setChecked(True)
         self._autostart_check.toggled.connect(self._on_autostart_changed)
-        selects_layout.addWidget(self._autostart_check)
+        toggles_row.addWidget(self._autostart_check)
 
-        selects_layout.addSpacing(8)
-
-        self._helium_update_check = QCheckBox("Auto-update Helium (winget)")
+        self._helium_update_check = QCheckBox("Auto-update Helium")
         self._helium_update_check.setVisible(False)
         self._helium_update_check.toggled.connect(self._on_helium_auto_update_changed)
-        selects_layout.addWidget(self._helium_update_check)
+        toggles_row.addWidget(self._helium_update_check)
 
         self._helium_version_label = QLabel()
         self._helium_version_label.setStyleSheet(SMALL_MUTED)
         self._helium_version_label.setVisible(False)
-        selects_layout.addWidget(self._helium_version_label)
+        toggles_row.addWidget(self._helium_version_label)
 
-        selects_layout.addSpacing(8)
+        toggles_row.addStretch()
 
-        edit_shortcuts_btn = QPushButton("Edit Search Shortcuts")
+        version_label = QLabel(version_display())
+        version_label.setStyleSheet(SMALL_MUTED)
+        toggles_row.addWidget(version_label)
+
+        selects_outer.addLayout(toggles_row)
+
+        actions_row = QHBoxLayout()
+        actions_row.setContentsMargins(0, 0, 0, 0)
+        actions_row.setSpacing(6)
+
+        edit_shortcuts_btn = QPushButton("Shortcuts")
         edit_shortcuts_btn.clicked.connect(self._open_shortcuts_editor)
-        selects_layout.addWidget(edit_shortcuts_btn)
+        actions_row.addWidget(edit_shortcuts_btn)
 
         view_ext_btn = QPushButton("Extensions")
         view_ext_btn.clicked.connect(self._open_extension_links)
-        selects_layout.addWidget(view_ext_btn)
+        actions_row.addWidget(view_ext_btn)
 
         flags_btn = QPushButton("Flags")
         flags_btn.clicked.connect(self._open_flags_manager)
-        selects_layout.addWidget(flags_btn)
+        actions_row.addWidget(flags_btn)
 
-        selects_layout.addSpacing(8)
+        actions_row.addSpacing(8)
 
         self._desktop_buttons = DesktopBackupButtons(
             parent=self, on_restored=self._refresh_for_folder,
         )
         for btn in self._desktop_buttons.widgets():
-            selects_layout.addWidget(btn)
+            actions_row.addWidget(btn)
 
-        selects_layout.addStretch()
+        actions_row.addStretch()
+        selects_outer.addLayout(actions_row)
+
         selects_row.setVisible(False)
         right.addWidget(selects_row)
         self._selects_row = selects_row

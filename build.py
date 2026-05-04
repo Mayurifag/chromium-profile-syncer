@@ -12,6 +12,7 @@ Install locations:
 """
 
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -118,6 +119,26 @@ def _generate_icon() -> Path | None:
     return _generate_ico(renderer)
 
 
+def _compute_release_tag() -> str:
+    if not os.environ.get("GITHUB_SHA"):
+        return ""
+    try:
+        py = Path("pyproject.toml").read_text(encoding="utf-8")
+        m = re.search(r'^version\s*=\s*"([^"]+)"', py, re.M)
+        if not m:
+            return ""
+        major_minor = ".".join(m.group(1).split(".")[:2])
+        out = subprocess.check_output(
+            ["git", "tag", "-l", f"v{major_minor}.*"], text=True
+        ).strip().splitlines()
+        out = sorted(out, key=lambda t: [int(x) for x in t.lstrip("v").split(".")])
+        patch = int(out[-1].split(".")[-1]) + 1 if out else 0
+        return f"v{major_minor}.{patch}"
+    except Exception as exc:
+        print(f"tag compute failed: {exc}", file=sys.stderr)
+        return ""
+
+
 def _write_build_info() -> None:
     sha = os.environ.get("GITHUB_SHA")
     if not sha:
@@ -127,8 +148,11 @@ def _write_build_info() -> None:
             ).strip()
         except Exception:
             sha = "unknown"
-    Path("src/_build_info.py").write_text(f'BUILD_SHA = "{sha}"\n', encoding="utf-8")
-    print(f"BUILD_SHA={sha}")
+    tag = _compute_release_tag()
+    Path("src/_build_info.py").write_text(
+        f'BUILD_SHA = "{sha}"\nBUILD_TAG = "{tag}"\n', encoding="utf-8"
+    )
+    print(f"BUILD_SHA={sha} BUILD_TAG={tag}")
 
 
 def build() -> Path:
