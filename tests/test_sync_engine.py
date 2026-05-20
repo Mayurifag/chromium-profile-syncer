@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import plistlib
 import sqlite3
 import sys
 from pathlib import Path
@@ -46,7 +47,7 @@ def _make_browser(
     mock.windows_extensions_registry_key.return_value = None
     mock.windows_force_list_registry_key.return_value = None
     mock.linux_managed_policy_dir.return_value = None
-    mock.macos_managed_pref_domain.return_value = None
+    mock.macos_policy_domain.return_value = None
     mock.local_state_path.return_value = None
     mock.web_store_update_url = "https://clients2.google.com/service/update2/crx"
     mock.ext_id_aliases = {}
@@ -142,7 +143,6 @@ def test_copy_leveldb_atomic_tmp_cleaned_before_retry(tmp_path: Path) -> None:
     assert dst.exists()
     assert (dst / "a.txt").read_text() == "a"
     assert not tmp_dir.exists()
-
 
 
 # ---------------------------------------------------------------------------
@@ -255,15 +255,15 @@ def test_sync_all_uses_direction_from_config(tmp_path: Path) -> None:
     sync_folder = tmp_path / "sync"
     sync_folder.mkdir()
 
-    browser = _make_browser(
-        name="TestBrowser", installed=True, running=False, profiles=[profile]
-    )
+    browser = _make_browser(name="TestBrowser", installed=True, running=False, profiles=[profile])
     engine = _make_engine(sync_folder, browsers=[browser])
 
     directions = {"TestBrowser": {"Default": "push"}}
-    with patch("src.config.get_enabled_browsers", return_value={"TestBrowser": True}), \
-         patch("src.config.get_enabled_profiles", return_value={"TestBrowser": ["Default"]}), \
-         patch("src.config.get_profile_directions", return_value=directions):
+    with (
+        patch("src.config.get_enabled_browsers", return_value={"TestBrowser": True}),
+        patch("src.config.get_enabled_profiles", return_value={"TestBrowser": ["Default"]}),
+        patch("src.config.get_profile_directions", return_value=directions),
+    ):
         engine.sync_all()
 
     # Push: profile data → sync_dir
@@ -475,9 +475,111 @@ def test_sync_browser_profile_updates_webstore_manifest(tmp_path: Path) -> None:
 
     assert not (sync_profile / "Extensions").exists()
     import json
+
     manifest = json.loads((sync_profile / "webstore_extensions.json").read_text())
     assert "wsext1234567890123456789012345" in manifest
     assert "localext12345678901234567890123" not in manifest
+
+
+def test_sync_browser_profile_does_not_shrink_webstore_manifest(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    sync_profile = tmp_path / "sync_profile"
+    existing_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    detected_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    _write_file(
+        sync_profile / "webstore_extensions.json",
+        json.dumps({existing_id: "Existing Extension"}),
+        mtime=2000.0,
+    )
+    _make_ext_version_dir(profile, detected_id, "1.0.0", "1.0.0", webstore=True)
+
+    engine = _make_engine(tmp_path)
+    engine.sync_browser_profile(profile, sync_profile, direction="push")
+
+    manifest = json.loads((sync_profile / "webstore_extensions.json").read_text())
+    assert existing_id in manifest
+    assert detected_id in manifest
+
+
+def test_sync_browser_profile_tracks_alias_data_without_extension_dir(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    sync_profile = tmp_path / "sync_profile"
+    alias = "blockjmkbacgjkknlgpkjjiijinjdanf"
+    canonical = "cjpalhdlnbpafiamejdnhcphjbkeiagm"
+
+    _write_file(profile / "Preferences", "{}", mtime=2000.0)
+    _make_leveldb_unit(profile, "Sync Extension Settings", alias, "ublock-data", 2000.0)
+
+    engine = _make_engine(tmp_path)
+    engine.sync_browser_profile(
+        profile,
+        sync_profile,
+        direction="push",
+        ext_id_aliases={alias: canonical},
+    )
+
+    manifest = json.loads((sync_profile / "webstore_extensions.json").read_text())
+    assert canonical in manifest
+    assert (sync_profile / "Sync Extension Settings" / alias / "data.ldb").read_text() == (
+        "ublock-data"
+    )
+
+
+def test_sync_browser_profile_prunes_orphan_extension_data(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    sync_profile = tmp_path / "sync_profile"
+    valid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    orphan = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    _make_ext_version_dir(profile, valid, "1.0.0", "1.0.0", webstore=True)
+    _make_leveldb_unit(profile, "Local Extension Settings", valid, "valid-data", 2000.0)
+    _make_leveldb_unit(profile, "Local Extension Settings", orphan, "orphan-data", 2000.0)
+    _make_leveldb_unit(profile, "Sync Extension Settings", orphan, "orphan-sync", 2000.0)
+    _write_file(
+        profile / "IndexedDB" / f"chrome-extension_{orphan}_0.indexeddb.leveldb" / "data.ldb",
+        "orphan-idb",
+        mtime=2000.0,
+    )
+    _write_file(
+        profile / "Preferences",
+        json.dumps({"extensions": {"pinned_extensions": [valid, orphan]}}),
+        mtime=2000.0,
+    )
+
+    engine = _make_engine(tmp_path)
+    engine.sync_browser_profile(profile, sync_profile, direction="push")
+
+    assert (sync_profile / "Local Extension Settings" / valid / "data.ldb").read_text() == (
+        "valid-data"
+    )
+    assert not (sync_profile / "Local Extension Settings" / orphan).exists()
+    assert not (sync_profile / "Sync Extension Settings" / orphan).exists()
+    assert not (
+        sync_profile / "IndexedDB" / f"chrome-extension_{orphan}_0.indexeddb.leveldb"
+    ).exists()
+    saved = json.loads((sync_profile / "preferences.json").read_text())
+    assert saved["extensions"]["pinned_extensions"] == [valid]
+
+
+def test_sync_browser_profile_does_not_overwrite_pins_with_empty_list(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    sync_profile = tmp_path / "sync_profile"
+    existing = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    _write_file(profile / "Preferences", json.dumps({"extensions": {"pinned_extensions": []}}))
+    _write_file(
+        sync_profile / "preferences.json",
+        json.dumps({"extensions": {"pinned_extensions": [existing]}}),
+        mtime=1000.0,
+    )
+    _write_file(sync_profile / "webstore_extensions.json", json.dumps({existing: "Existing"}))
+
+    engine = _make_engine(tmp_path)
+    engine.sync_browser_profile(profile, sync_profile, direction="push")
+
+    saved = json.loads((sync_profile / "preferences.json").read_text())
+    assert saved["extensions"]["pinned_extensions"] == [existing]
 
 
 def test_sync_browser_profile_empty_profile_dir(tmp_path: Path) -> None:
@@ -523,9 +625,14 @@ def test_sync_browser_profile_preferences_always_synced(tmp_path: Path) -> None:
     # Even with everything disabled, preferences.json must be written
     engine = _make_engine(tmp_path)
     engine.sync_browser_profile(
-        profile, sync_profile,
-        {"extensions": False, "bookmarks": False, "custom_dictionary": False,
-         "local_storage": False},
+        profile,
+        sync_profile,
+        {
+            "extensions": False,
+            "bookmarks": False,
+            "custom_dictionary": False,
+            "local_storage": False,
+        },
     )
 
     assert (sync_profile / "preferences.json").exists()
@@ -561,17 +668,17 @@ def test_sync_all_processes_installed_idle_browser(tmp_path: Path) -> None:
     _write_file(profile / "Bookmarks", '{"roots":{}}', mtime=2000.0)
     _write_file(profile / "Preferences", "{}", mtime=2000.0)
 
-    browser = _make_browser(
-        name="TestBrowser", installed=True, running=False, profiles=[profile]
-    )
+    browser = _make_browser(name="TestBrowser", installed=True, running=False, profiles=[profile])
     sync_folder = tmp_path / "sync"
     sync_folder.mkdir()
 
     engine = _make_engine(sync_folder, browsers=[browser])
 
-    with patch("src.config.get_enabled_browsers", return_value={"TestBrowser": True}), \
-         patch("src.config.get_enabled_profiles", return_value={"TestBrowser": ["Default"]}), \
-         patch("src.config.get_profile_directions", return_value={}):
+    with (
+        patch("src.config.get_enabled_browsers", return_value={"TestBrowser": True}),
+        patch("src.config.get_enabled_profiles", return_value={"TestBrowser": ["Default"]}),
+        patch("src.config.get_profile_directions", return_value={}),
+    ):
         engine.sync_all()
 
     assert (sync_folder / SYNC_DIR_NAME).is_dir()
@@ -607,9 +714,7 @@ def test_sync_all_filters_profiles(tmp_path: Path) -> None:
     _write_file(default / "Preferences", "{}", mtime=1000.0)
     _write_file(profile1 / "Preferences", "{}", mtime=1000.0)
 
-    browser = _make_browser(
-        name="TB", installed=True, running=False, profiles=[default, profile1]
-    )
+    browser = _make_browser(name="TB", installed=True, running=False, profiles=[default, profile1])
     sync_folder = tmp_path / "sync"
     sync_folder.mkdir()
     engine = _make_engine(sync_folder, browsers=[browser])
@@ -634,10 +739,12 @@ def test_sync_all_pull_only_profile_bypasses_stale_enabled_profiles(tmp_path: Pa
     browser = _make_browser(name="TB", installed=True, running=False, profiles=[profile1])
     engine = _make_engine(sync_folder, browsers=[browser])
 
-    with patch("src.config.get_enabled_browsers", return_value={"TB": True}), \
-         patch("src.config.get_enabled_profiles", return_value={"TB": ["Default"]}), \
-         patch("src.config.get_profile_directions", return_value={}), \
-         patch("src.config.get_profiles_needing_restore", return_value={}):
+    with (
+        patch("src.config.get_enabled_browsers", return_value={"TB": True}),
+        patch("src.config.get_enabled_profiles", return_value={"TB": ["Default"]}),
+        patch("src.config.get_profile_directions", return_value={}),
+        patch("src.config.get_profiles_needing_restore", return_value={}),
+    ):
         engine.sync_all(
             only_browser="TB",
             only_profile="Profile 1",
@@ -707,7 +814,7 @@ def test_install_external_extensions_no_extensions_dir(tmp_path: Path) -> None:
     assert not ext_dir.exists()
 
 
-def test_install_external_extensions_macos_invokes_managed_prefs(tmp_path: Path) -> None:
+def test_install_external_extensions_macos_writes_stubs(tmp_path: Path) -> None:
     sync_profile = tmp_path / "sync_profile"
     sync_profile.mkdir(parents=True)
 
@@ -716,18 +823,63 @@ def test_install_external_extensions_macos_invokes_managed_prefs(tmp_path: Path)
     )
 
     browser = _make_browser()
-    browser.macos_managed_pref_domain.return_value = "net.example.browser"
+    ext_dir = tmp_path / "External Extensions"
+    browser.external_extensions_dir.return_value = ext_dir
 
-    with patch("src.sync.extensions.platform.system", return_value="Darwin"), \
-         patch(
-             "src.sync.extensions._install_via_macos_managed_prefs"
-         ) as mock_install:
+    with patch("src.sync.extensions.platform.system", return_value="Darwin"):
         install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
 
-    mock_install.assert_called_once()
-    args = mock_install.call_args.args
-    assert sorted(args[0]) == ["aaabbbccc", "dddeeefff"]
-    assert args[1] == "net.example.browser"
+    assert (ext_dir / "aaabbbccc.json").exists()
+    assert (ext_dir / "dddeeefff.json").exists()
+
+
+def test_install_external_extensions_macos_opens_policy_profile(tmp_path: Path) -> None:
+    sync_profile = tmp_path / "sync_profile"
+    sync_profile.mkdir(parents=True)
+    ext_dir = tmp_path / "External Extensions"
+    _write_file(ext_dir / "stale.json", "{}")
+
+    (sync_profile / "webstore_extensions.json").write_text(
+        json.dumps(["aaabbbccc", "dddeeefff"]), encoding="utf-8"
+    )
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return MagicMock(returncode=1, stdout=b"")
+
+    browser = _make_browser(name="Helium")
+    browser.external_extensions_dir.return_value = ext_dir
+    browser.macos_policy_domain.return_value = "net.imput.helium"
+
+    with (
+        patch("src.sync.extensions.platform.system", return_value="Darwin"),
+        patch("src.sync.extensions.subprocess.run", side_effect=fake_run),
+        patch("src.config.CONFIG_DIR", tmp_path / "config"),
+    ):
+        install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
+
+    profile_path = tmp_path / "config" / "profiles" / "helium-extensions.mobileconfig"
+    profile = plistlib.loads(profile_path.read_bytes())
+    settings = profile["PayloadContent"][0]["PayloadContent"]["net.imput.helium"]["Forced"][0][
+        "mcx_preference_settings"
+    ]
+    assert settings == {"ExtensionInstallForcelist": ["aaabbbccc", "dddeeefff"]}
+    assert [
+        "profiles",
+        "remove",
+        "-identifier",
+        "com.chromium-profile-syncer.helium.extensions",
+    ] in calls
+    assert [
+        "profiles",
+        "remove",
+        "-identifier",
+        "com.chromium-profile-syncer.helium.external-extensions",
+    ] in calls
+    assert ["open", str(profile_path)] in calls
+    assert not ext_dir.exists() or not list(ext_dir.iterdir())
 
 
 def test_sync_all_registers_external_extensions(tmp_path: Path) -> None:
@@ -744,10 +896,12 @@ def test_sync_all_registers_external_extensions(tmp_path: Path) -> None:
     sync_folder.mkdir()
     engine = _make_engine(sync_folder, browsers=[browser])
 
-    with patch("src.config.get_enabled_browsers", return_value={"TB": True}), \
-         patch("src.config.get_enabled_profiles", return_value={"TB": ["Default"]}), \
-         patch("src.config.get_profile_directions", return_value={}), \
-         patch("src.sync.extensions.platform.system", return_value="Linux"):
+    with (
+        patch("src.config.get_enabled_browsers", return_value={"TB": True}),
+        patch("src.config.get_enabled_profiles", return_value={"TB": ["Default"]}),
+        patch("src.config.get_profile_directions", return_value={}),
+        patch("src.sync.extensions.platform.system", return_value="Linux"),
+    ):
         engine.sync_all()
 
     assert (ext_dir / "testext.json").exists()
@@ -795,9 +949,11 @@ def test_full_round_trip(tmp_path: Path) -> None:
     browser = _make_browser(name="Chrome", installed=True, running=False, profiles=[profile])
     engine = _make_engine(sync_folder, browsers=[browser])
 
-    with patch("src.config.get_enabled_browsers", return_value={"Chrome": True}), \
-         patch("src.config.get_enabled_profiles", return_value={"Chrome": [profile.name]}), \
-         patch("src.config.get_profile_directions", return_value={}):
+    with (
+        patch("src.config.get_enabled_browsers", return_value={"Chrome": True}),
+        patch("src.config.get_enabled_profiles", return_value={"Chrome": [profile.name]}),
+        patch("src.config.get_profile_directions", return_value={}),
+    ):
         engine.sync_all()
 
     # Verify current/ contains Bookmarks v1
@@ -830,9 +986,11 @@ def test_sync_all_pulls_remote_newer_into_profile(tmp_path: Path) -> None:
     browser = _make_browser(name="TB", installed=True, running=False, profiles=[profile])
     engine = _make_engine(sync_folder, browsers=[browser])
 
-    with patch("src.config.get_enabled_browsers", return_value={"TB": True}), \
-         patch("src.config.get_enabled_profiles", return_value={"TB": [profile.name]}), \
-         patch("src.config.get_profile_directions", return_value={}):
+    with (
+        patch("src.config.get_enabled_browsers", return_value={"TB": True}),
+        patch("src.config.get_enabled_profiles", return_value={"TB": [profile.name]}),
+        patch("src.config.get_profile_directions", return_value={}),
+    ):
         engine.sync_all()
 
     assert (profile / "Bookmarks").read_text() == "remote-new"
@@ -857,9 +1015,11 @@ def test_sync_all_with_empty_config_skips_browser(tmp_path: Path) -> None:
     engine = _make_engine(sync_folder, browsers=[browser])
 
     # Config is empty (no enabled_profiles entry for Chrome)
-    with patch("src.config.get_enabled_browsers", return_value={}), \
-         patch("src.config.get_enabled_profiles", return_value={}), \
-         patch("src.config.get_profile_directions", return_value={}):
+    with (
+        patch("src.config.get_enabled_browsers", return_value={}),
+        patch("src.config.get_enabled_profiles", return_value={}),
+        patch("src.config.get_profile_directions", return_value={}),
+    ):
         engine.sync_all()
 
     # No profiles should be synced when browser has no config entry
@@ -872,11 +1032,13 @@ def test_restore_only_deletes_items_present_in_backup(tmp_path: Path) -> None:
     profile.mkdir()
     sync_profile.mkdir()
 
-    # Backup has: Bookmarks + Local Extension Settings
+    # Backup has: Bookmarks + extension metadata/settings
     _write_file(sync_profile / "Bookmarks", "from-backup", mtime=2000.0)
+    _write_file(sync_profile / "webstore_extensions.json", json.dumps({"abc": "ABC"}), mtime=2000.0)
     les = sync_profile / "Local Extension Settings" / "abc"
     les.mkdir(parents=True)
     (les / "data").write_text("ext-data")
+    (sync_profile / "Extensions" / "abc" / "1.0").mkdir(parents=True)
 
     # Profile has Bookmarks (old), LES (old), Extensions (keep!), Other (keep!)
     _write_file(profile / "Bookmarks", "old", mtime=1000.0)
@@ -905,6 +1067,7 @@ def test_restore_preserves_local_extension_settings_in_preferences(tmp_path: Pat
     sync_profile.mkdir()
 
     ext_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    _make_ext_version_dir(profile, ext_id, "1.0.0", "1.0.0", webstore=True)
     extension_settings = {
         ext_id: {
             "active_permissions": {"api": ["storage"]},
@@ -994,11 +1157,17 @@ def _make_web_data(
             VALUES (?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
-                row["short_name"], row["keyword"], row["url"],
-                row.get("prepopulate_id", 0), row.get("is_active", 1),
-                row.get("sync_guid", ""), row.get("safe_for_autoreplace", 0),
-                row.get("input_encodings", "UTF-8"), row.get("alternate_urls", "[]"),
-                row.get("date_created", 0), row.get("last_modified", 0),
+                row["short_name"],
+                row["keyword"],
+                row["url"],
+                row.get("prepopulate_id", 0),
+                row.get("is_active", 1),
+                row.get("sync_guid", ""),
+                row.get("safe_for_autoreplace", 0),
+                row.get("input_encodings", "UTF-8"),
+                row.get("alternate_urls", "[]"),
+                row.get("date_created", 0),
+                row.get("last_modified", 0),
             ),
         )
     if metadata is not None:
@@ -1006,9 +1175,7 @@ def _make_web_data(
             "CREATE TABLE keywords_metadata (key VARCHAR NOT NULL UNIQUE, value LONGVARCHAR)"
         )
         for k, v in metadata.items():
-            conn.execute(
-                "INSERT INTO keywords_metadata (key, value) VALUES (?, ?)", (k, v)
-            )
+            conn.execute("INSERT INTO keywords_metadata (key, value) VALUES (?, ?)", (k, v))
     conn.commit()
     conn.close()
 
@@ -1017,8 +1184,14 @@ def test_extract_search_shortcuts_stores_sync_guid(tmp_path: Path) -> None:
     profile = tmp_path / "profile"
     _make_web_data(
         profile / "Web Data",
-        [{"keyword": "yt", "short_name": "YouTube", "url": "https://yt.com/?q={searchTerms}",
-          "sync_guid": "stable-guid-yt"}],
+        [
+            {
+                "keyword": "yt",
+                "short_name": "YouTube",
+                "url": "https://yt.com/?q={searchTerms}",
+                "sync_guid": "stable-guid-yt",
+            }
+        ],
     )
     extract_search_shortcuts(profile, tmp_path)
 
@@ -1032,10 +1205,18 @@ def test_extract_search_shortcuts_excludes_prepopulated(tmp_path: Path) -> None:
     _make_web_data(
         profile / "Web Data",
         [
-            {"keyword": "custom", "short_name": "Custom", "url": "https://c.com/?q={searchTerms}",
-             "prepopulate_id": 0},
-            {"keyword": "google", "short_name": "Google", "url": "https://g.com/?q={searchTerms}",
-             "prepopulate_id": 1},
+            {
+                "keyword": "custom",
+                "short_name": "Custom",
+                "url": "https://c.com/?q={searchTerms}",
+                "prepopulate_id": 0,
+            },
+            {
+                "keyword": "google",
+                "short_name": "Google",
+                "url": "https://g.com/?q={searchTerms}",
+                "prepopulate_id": 1,
+            },
         ],
     )
     extract_search_shortcuts(profile, tmp_path)
@@ -1048,11 +1229,16 @@ def test_extract_search_shortcuts_excludes_prepopulated(tmp_path: Path) -> None:
 def test_restore_search_shortcuts_uses_sync_guid(tmp_path: Path) -> None:
     shortcuts_json = tmp_path / "search_shortcuts.json"
     shortcuts_json.write_text(
-        json.dumps([{
-            "keyword": "yt", "short_name": "YouTube",
-            "url": "https://yt.com/?q={searchTerms}",
-            "sync_guid": "my-stable-guid",
-        }]),
+        json.dumps(
+            [
+                {
+                    "keyword": "yt",
+                    "short_name": "YouTube",
+                    "url": "https://yt.com/?q={searchTerms}",
+                    "sync_guid": "my-stable-guid",
+                }
+            ]
+        ),
         encoding="utf-8",
     )
     profile = tmp_path / "profile"
@@ -1070,10 +1256,15 @@ def test_restore_search_shortcuts_uses_sync_guid(tmp_path: Path) -> None:
 def test_restore_search_shortcuts_empty_guid_when_missing(tmp_path: Path) -> None:
     shortcuts_json = tmp_path / "search_shortcuts.json"
     shortcuts_json.write_text(
-        json.dumps([{
-            "keyword": "yt", "short_name": "YouTube",
-            "url": "https://yt.com/?q={searchTerms}",
-        }]),
+        json.dumps(
+            [
+                {
+                    "keyword": "yt",
+                    "short_name": "YouTube",
+                    "url": "https://yt.com/?q={searchTerms}",
+                }
+            ]
+        ),
         encoding="utf-8",
     )
     profile = tmp_path / "profile"
@@ -1094,10 +1285,18 @@ def test_extract_search_shortcuts_marks_default(tmp_path: Path) -> None:
     _make_web_data(
         profile / "Web Data",
         [
-            {"keyword": "gru", "short_name": "Google RU", "url": "https://g.ru/?q={searchTerms}",
-             "sync_guid": "default-guid-123"},
-            {"keyword": "yt", "short_name": "YouTube", "url": "https://yt.com/?q={searchTerms}",
-             "sync_guid": "other-guid-456"},
+            {
+                "keyword": "gru",
+                "short_name": "Google RU",
+                "url": "https://g.ru/?q={searchTerms}",
+                "sync_guid": "default-guid-123",
+            },
+            {
+                "keyword": "yt",
+                "short_name": "YouTube",
+                "url": "https://yt.com/?q={searchTerms}",
+                "sync_guid": "other-guid-456",
+            },
         ],
     )
     profile.mkdir(parents=True, exist_ok=True)
@@ -1119,20 +1318,30 @@ def test_extract_search_shortcuts_adopts_prefs_guid_when_db_guid_empty(tmp_path:
     _make_web_data(
         profile / "Web Data",
         [
-            {"keyword": "gru", "short_name": "Google RU",
-             "url": "https://g.ru/?q={searchTerms}", "sync_guid": ""},
-            {"keyword": "yt", "short_name": "YouTube",
-             "url": "https://yt.com/?q={searchTerms}", "sync_guid": ""},
+            {
+                "keyword": "gru",
+                "short_name": "Google RU",
+                "url": "https://g.ru/?q={searchTerms}",
+                "sync_guid": "",
+            },
+            {
+                "keyword": "yt",
+                "short_name": "YouTube",
+                "url": "https://yt.com/?q={searchTerms}",
+                "sync_guid": "",
+            },
         ],
     )
     profile.mkdir(parents=True, exist_ok=True)
     (profile / "Preferences").write_text(
-        json.dumps({
-            "default_search_provider": {"guid": "known-guid-from-prefs"},
-            "default_search_provider_data": {
-                "mirrored_template_url_data": {"url": "https://g.ru/?q={searchTerms}"},
-            },
-        }),
+        json.dumps(
+            {
+                "default_search_provider": {"guid": "known-guid-from-prefs"},
+                "default_search_provider_data": {
+                    "mirrored_template_url_data": {"url": "https://g.ru/?q={searchTerms}"},
+                },
+            }
+        ),
         encoding="utf-8",
     )
     extract_search_shortcuts(profile, tmp_path)
@@ -1153,20 +1362,30 @@ def test_extract_search_shortcuts_marks_default_when_prefs_guid_empty(tmp_path: 
     _make_web_data(
         profile / "Web Data",
         [
-            {"keyword": "gru", "short_name": "Google RU",
-             "url": "https://g.ru/?q={searchTerms}", "sync_guid": ""},
-            {"keyword": "yt", "short_name": "YouTube",
-             "url": "https://yt.com/?q={searchTerms}", "sync_guid": ""},
+            {
+                "keyword": "gru",
+                "short_name": "Google RU",
+                "url": "https://g.ru/?q={searchTerms}",
+                "sync_guid": "",
+            },
+            {
+                "keyword": "yt",
+                "short_name": "YouTube",
+                "url": "https://yt.com/?q={searchTerms}",
+                "sync_guid": "",
+            },
         ],
     )
     profile.mkdir(parents=True, exist_ok=True)
     (profile / "Preferences").write_text(
-        json.dumps({
-            "default_search_provider": {"guid": ""},
-            "default_search_provider_data": {
-                "mirrored_template_url_data": {"url": "https://g.ru/?q={searchTerms}"},
-            },
-        }),
+        json.dumps(
+            {
+                "default_search_provider": {"guid": ""},
+                "default_search_provider_data": {
+                    "mirrored_template_url_data": {"url": "https://g.ru/?q={searchTerms}"},
+                },
+            }
+        ),
         encoding="utf-8",
     )
     extract_search_shortcuts(profile, tmp_path)
@@ -1180,11 +1399,24 @@ def test_extract_search_shortcuts_marks_default_when_prefs_guid_empty(tmp_path: 
 
 def test_extract_search_shortcuts_no_webdata_preserves_existing_json(tmp_path: Path) -> None:
     """Missing Web Data does not wipe the existing search_shortcuts.json."""
-    existing = [{"keyword": "gru", "short_name": "Google Russia", "url": "https://gru.com",
-                 "is_default": True, "sync_guid": "gru-guid", "prepopulate_id": 0,
-                 "is_active": 1, "date_created": 0, "last_modified": 0,
-                 "safe_for_autoreplace": 0, "input_encodings": "UTF-8",
-                 "alternate_urls": "[]", "favicon_url": "", "suggest_url": ""}]
+    existing = [
+        {
+            "keyword": "gru",
+            "short_name": "Google Russia",
+            "url": "https://gru.com",
+            "is_default": True,
+            "sync_guid": "gru-guid",
+            "prepopulate_id": 0,
+            "is_active": 1,
+            "date_created": 0,
+            "last_modified": 0,
+            "safe_for_autoreplace": 0,
+            "input_encodings": "UTF-8",
+            "alternate_urls": "[]",
+            "favicon_url": "",
+            "suggest_url": "",
+        }
+    ]
     (tmp_path / "search_shortcuts.json").write_text(json.dumps(existing), encoding="utf-8")
 
     profile = tmp_path / "profile_no_webdata"  # no Web Data file here
@@ -1201,19 +1433,38 @@ def test_sync_browser_profile_both_pulls_when_remote_ts_newer(tmp_path: Path) ->
     (sf / SYNC_DIR_NAME).mkdir(parents=True)
     sync_profile = tmp_path / "sync_profile"
     sync_profile.mkdir()
-    existing = [{"keyword": "gru", "short_name": "GRU", "url": "https://gru.com",
-                 "is_default": True, "sync_guid": "gru-guid", "prepopulate_id": 0,
-                 "is_active": 1, "date_created": 0, "last_modified": 500,
-                 "safe_for_autoreplace": 0, "input_encodings": "UTF-8",
-                 "alternate_urls": "[]", "favicon_url": "", "suggest_url": ""}]
+    existing = [
+        {
+            "keyword": "gru",
+            "short_name": "GRU",
+            "url": "https://gru.com",
+            "is_default": True,
+            "sync_guid": "gru-guid",
+            "prepopulate_id": 0,
+            "is_active": 1,
+            "date_created": 0,
+            "last_modified": 500,
+            "safe_for_autoreplace": 0,
+            "input_encodings": "UTF-8",
+            "alternate_urls": "[]",
+            "favicon_url": "",
+            "suggest_url": "",
+        }
+    ]
     shortcuts_json = sf / SYNC_DIR_NAME / "search_shortcuts.json"
     shortcuts_json.write_text(json.dumps(existing), encoding="utf-8")
 
     profile = tmp_path / "profile"
     _make_web_data(
         profile / "Web Data",
-        [{"keyword": "bing", "short_name": "Bing", "url": "https://bing.com/?q={searchTerms}",
-          "last_modified": 100}],
+        [
+            {
+                "keyword": "bing",
+                "short_name": "Bing",
+                "url": "https://bing.com/?q={searchTerms}",
+                "last_modified": 100,
+            }
+        ],
     )
     (profile / "Preferences").write_text("{}", encoding="utf-8")
 
@@ -1234,19 +1485,40 @@ def test_sync_browser_profile_both_pushes_when_local_ts_newer(tmp_path: Path) ->
     sync_profile.mkdir()
     shortcuts_json = sf / SYNC_DIR_NAME / "search_shortcuts.json"
     shortcuts_json.write_text(
-        json.dumps([{"keyword": "old", "short_name": "Old", "url": "https://old.com",
-                     "is_default": False, "sync_guid": "", "prepopulate_id": 0,
-                     "is_active": 1, "date_created": 0, "last_modified": 100,
-                     "safe_for_autoreplace": 0, "input_encodings": "UTF-8",
-                     "alternate_urls": "[]", "favicon_url": "", "suggest_url": ""}]),
+        json.dumps(
+            [
+                {
+                    "keyword": "old",
+                    "short_name": "Old",
+                    "url": "https://old.com",
+                    "is_default": False,
+                    "sync_guid": "",
+                    "prepopulate_id": 0,
+                    "is_active": 1,
+                    "date_created": 0,
+                    "last_modified": 100,
+                    "safe_for_autoreplace": 0,
+                    "input_encodings": "UTF-8",
+                    "alternate_urls": "[]",
+                    "favicon_url": "",
+                    "suggest_url": "",
+                }
+            ]
+        ),
         encoding="utf-8",
     )
 
     profile = tmp_path / "profile"
     _make_web_data(
         profile / "Web Data",
-        [{"keyword": "new", "short_name": "New", "url": "https://new.com/?q={searchTerms}",
-          "last_modified": 500}],
+        [
+            {
+                "keyword": "new",
+                "short_name": "New",
+                "url": "https://new.com/?q={searchTerms}",
+                "last_modified": 500,
+            }
+        ],
     )
     (profile / "Preferences").write_text("{}", encoding="utf-8")
 
@@ -1269,13 +1541,20 @@ def test_sync_browser_profile_both_skips_when_content_equal(tmp_path: Path) -> N
     profile = tmp_path / "profile"
     _make_web_data(
         profile / "Web Data",
-        [{"keyword": "a", "short_name": "A", "url": "https://a.com/?q={searchTerms}",
-          "last_modified": 100}],
+        [
+            {
+                "keyword": "a",
+                "short_name": "A",
+                "url": "https://a.com/?q={searchTerms}",
+                "last_modified": 100,
+            }
+        ],
     )
     (profile / "Preferences").write_text("{}", encoding="utf-8")
 
     shortcuts_json = sf / SYNC_DIR_NAME / "search_shortcuts.json"
     from src.sync.shortcuts import snapshot_shortcuts
+
     shortcuts_json.write_text(json.dumps(snapshot_shortcuts(profile)), encoding="utf-8")
     mtime_before = shortcuts_json.stat().st_mtime_ns
 
@@ -1293,11 +1572,26 @@ def test_sync_browser_profile_push_direction_does_extract_shortcuts(tmp_path: Pa
     sync_profile.mkdir()
     shortcuts_json = sf / SYNC_DIR_NAME / "search_shortcuts.json"
     shortcuts_json.write_text(
-        json.dumps([{"keyword": "old", "short_name": "Old", "url": "https://old.com",
-                     "is_default": False, "sync_guid": "", "prepopulate_id": 0,
-                     "is_active": 1, "date_created": 0, "last_modified": 0,
-                     "safe_for_autoreplace": 0, "input_encodings": "UTF-8",
-                     "alternate_urls": "[]", "favicon_url": "", "suggest_url": ""}]),
+        json.dumps(
+            [
+                {
+                    "keyword": "old",
+                    "short_name": "Old",
+                    "url": "https://old.com",
+                    "is_default": False,
+                    "sync_guid": "",
+                    "prepopulate_id": 0,
+                    "is_active": 1,
+                    "date_created": 0,
+                    "last_modified": 0,
+                    "safe_for_autoreplace": 0,
+                    "input_encodings": "UTF-8",
+                    "alternate_urls": "[]",
+                    "favicon_url": "",
+                    "suggest_url": "",
+                }
+            ]
+        ),
         encoding="utf-8",
     )
 
@@ -1322,14 +1616,24 @@ def test_restore_search_shortcuts_preserves_stored_guid_and_updates_preferences(
 ) -> None:
     shortcuts_json = tmp_path / "search_shortcuts.json"
     shortcuts_json.write_text(
-        json.dumps([
-            {"keyword": "gru", "short_name": "Google RU",
-             "url": "https://g.ru/?q={searchTerms}",
-             "sync_guid": "old-guid", "is_default": True},
-            {"keyword": "yt", "short_name": "YouTube",
-             "url": "https://yt.com/?q={searchTerms}",
-             "sync_guid": "yt-guid", "is_default": False},
-        ]),
+        json.dumps(
+            [
+                {
+                    "keyword": "gru",
+                    "short_name": "Google RU",
+                    "url": "https://g.ru/?q={searchTerms}",
+                    "sync_guid": "old-guid",
+                    "is_default": True,
+                },
+                {
+                    "keyword": "yt",
+                    "short_name": "YouTube",
+                    "url": "https://yt.com/?q={searchTerms}",
+                    "sync_guid": "yt-guid",
+                    "is_default": False,
+                },
+            ]
+        ),
         encoding="utf-8",
     )
     profile = tmp_path / "profile"
@@ -1356,16 +1660,19 @@ def test_restore_search_shortcuts_preserves_stored_guid_and_updates_preferences(
 def test_restore_search_shortcuts_writes_mirrored_template_url_data(tmp_path: Path) -> None:
     shortcuts_json = tmp_path / "search_shortcuts.json"
     shortcuts_json.write_text(
-        json.dumps([
-            {
-                "keyword": "gru", "short_name": "Google RU",
-                "url": "https://g.ru/?q={searchTerms}",
-                "sync_guid": "test-guid-gru",
-                "is_default": True,
-                "input_encodings": "UTF-8",
-                "alternate_urls": "[]",
-            },
-        ]),
+        json.dumps(
+            [
+                {
+                    "keyword": "gru",
+                    "short_name": "Google RU",
+                    "url": "https://g.ru/?q={searchTerms}",
+                    "sync_guid": "test-guid-gru",
+                    "is_default": True,
+                    "input_encodings": "UTF-8",
+                    "alternate_urls": "[]",
+                },
+            ]
+        ),
         encoding="utf-8",
     )
     profile = tmp_path / "profile"
@@ -1414,8 +1721,9 @@ def test_restore_search_shortcuts_writes_url_hash_when_key_available(tmp_path: P
     aesgcm = AESGCM(os.urandom(32))
     shortcuts_json = tmp_path / "search_shortcuts.json"
     shortcuts_json.write_text(
-        json.dumps([{"keyword": "yt", "short_name": "YouTube",
-                     "url": "https://yt.com/?q={searchTerms}"}]),
+        json.dumps(
+            [{"keyword": "yt", "short_name": "YouTube", "url": "https://yt.com/?q={searchTerms}"}]
+        ),
         encoding="utf-8",
     )
     profile = tmp_path / "profile"
@@ -1470,8 +1778,9 @@ def test_restore_search_shortcuts_null_url_hash_without_key(tmp_path: Path) -> N
     On Windows: restore is skipped entirely to avoid inserting rows Chromium will drop."""
     shortcuts_json = tmp_path / "search_shortcuts.json"
     shortcuts_json.write_text(
-        json.dumps([{"keyword": "yt", "short_name": "YouTube",
-                     "url": "https://yt.com/?q={searchTerms}"}]),
+        json.dumps(
+            [{"keyword": "yt", "short_name": "YouTube", "url": "https://yt.com/?q={searchTerms}"}]
+        ),
         encoding="utf-8",
     )
     profile = tmp_path / "profile"
@@ -1496,11 +1805,17 @@ def test_restore_search_shortcuts_default_engine_empty_guid_generates_uuid(
     """If is_default=True but sync_guid is empty, a UUID is generated so Preferences can be set."""
     shortcuts_json = tmp_path / "search_shortcuts.json"
     shortcuts_json.write_text(
-        json.dumps([{
-            "keyword": "gru", "short_name": "Google RU",
-            "url": "https://g.ru/?q={searchTerms}",
-            "sync_guid": "", "is_default": True,
-        }]),
+        json.dumps(
+            [
+                {
+                    "keyword": "gru",
+                    "short_name": "Google RU",
+                    "url": "https://g.ru/?q={searchTerms}",
+                    "sync_guid": "",
+                    "is_default": True,
+                }
+            ]
+        ),
         encoding="utf-8",
     )
     profile = tmp_path / "profile"
@@ -1535,29 +1850,36 @@ def test_restore_search_shortcuts_updates_keywords_metadata(tmp_path: Path) -> N
     )
     shortcuts_json = tmp_path / "search_shortcuts.json"
     shortcuts_json.write_text(
-        json.dumps([{
-            "keyword": "gru", "short_name": "GRU",
-            "url": "https://gru.com/?q={searchTerms}",
-            "sync_guid": "gru-guid", "is_default": True, "prepopulate_id": 0,
-            "is_active": 1, "date_created": 0, "last_modified": 0,
-            "safe_for_autoreplace": 0, "input_encodings": "UTF-8",
-            "alternate_urls": "[]", "favicon_url": "", "suggest_url": "",
-        }]),
+        json.dumps(
+            [
+                {
+                    "keyword": "gru",
+                    "short_name": "GRU",
+                    "url": "https://gru.com/?q={searchTerms}",
+                    "sync_guid": "gru-guid",
+                    "is_default": True,
+                    "prepopulate_id": 0,
+                    "is_active": 1,
+                    "date_created": 0,
+                    "last_modified": 0,
+                    "safe_for_autoreplace": 0,
+                    "input_encodings": "UTF-8",
+                    "alternate_urls": "[]",
+                    "favicon_url": "",
+                    "suggest_url": "",
+                }
+            ]
+        ),
         encoding="utf-8",
     )
     prefs_path = profile / "Preferences"
-    prefs_path.write_text(
-        json.dumps({"default_search_provider": {"guid": ""}}), encoding="utf-8"
-    )
+    prefs_path.write_text(json.dumps({"default_search_provider": {"guid": ""}}), encoding="utf-8")
     with patch("src.sync.shortcuts.load_oscrypt_key", return_value=_make_aesgcm()):
         restore_search_shortcuts(profile, tmp_path)
 
     conn = sqlite3.connect(str(profile / "Web Data"))
     inserted_id = conn.execute("SELECT id FROM keywords WHERE keyword='gru'").fetchone()[0]
-    meta = {
-        r[0]: r[1]
-        for r in conn.execute("SELECT key, value FROM keywords_metadata").fetchall()
-    }
+    meta = {r[0]: r[1] for r in conn.execute("SELECT key, value FROM keywords_metadata").fetchall()}
     conn.close()
 
     assert meta.get("Default Search Provider ID") == str(inserted_id)
@@ -1567,19 +1889,31 @@ def test_restore_search_shortcuts_updates_keywords_metadata(tmp_path: Path) -> N
 def test_restore_search_shortcuts_choice_screen_timestamp_is_string(tmp_path: Path) -> None:
     shortcuts_json = tmp_path / "search_shortcuts.json"
     shortcuts_json.write_text(
-        json.dumps([{"keyword": "g", "short_name": "G",
-                     "url": "https://g.com/?q={searchTerms}",
-                     "sync_guid": "g-guid", "is_default": True}]),
+        json.dumps(
+            [
+                {
+                    "keyword": "g",
+                    "short_name": "G",
+                    "url": "https://g.com/?q={searchTerms}",
+                    "sync_guid": "g-guid",
+                    "is_default": True,
+                }
+            ]
+        ),
         encoding="utf-8",
     )
     profile = tmp_path / "profile"
     _make_web_data(profile / "Web Data", [])
     prefs_path = profile / "Preferences"
     prefs_path.write_text(
-        json.dumps({"default_search_provider": {
-            "guid": "",
-            "choice_screen_random_shuffle_seed": "12345",
-        }}),
+        json.dumps(
+            {
+                "default_search_provider": {
+                    "guid": "",
+                    "choice_screen_random_shuffle_seed": "12345",
+                }
+            }
+        ),
         encoding="utf-8",
     )
     (profile.parent / "Last Version").write_text("146.0.0.0", encoding="utf-8")
@@ -1613,9 +1947,11 @@ def test_find_rclone_fallback() -> None:
     find_rclone.cache_clear()
     fake_path = Path("/fake/rclone")
     try:
-        with patch("shutil.which", return_value=None), \
-             patch("src.rclone._FALLBACK_PATHS", [fake_path]), \
-             patch.object(Path, "exists", lambda self: self == fake_path):
+        with (
+            patch("shutil.which", return_value=None),
+            patch("src.rclone._FALLBACK_PATHS", [fake_path]),
+            patch.object(Path, "exists", lambda self: self == fake_path),
+        ):
             result = find_rclone()
         assert result == fake_path
     finally:
@@ -1627,8 +1963,10 @@ def test_find_rclone_fallback_windows() -> None:
     find_rclone.cache_clear()
     expected = "C:/Program Files/rclone/rclone.exe"
     try:
-        with patch("shutil.which", return_value=None), \
-             patch.object(Path, "exists", lambda self: str(self).replace("\\", "/") == expected):
+        with (
+            patch("shutil.which", return_value=None),
+            patch.object(Path, "exists", lambda self: str(self).replace("\\", "/") == expected),
+        ):
             result = find_rclone()
         assert result == Path(expected)
     finally:
@@ -1638,8 +1976,10 @@ def test_find_rclone_fallback_windows() -> None:
 def test_find_rclone_not_found() -> None:
     find_rclone.cache_clear()
     try:
-        with patch("shutil.which", return_value=None), \
-             patch.object(Path, "exists", return_value=False):
+        with (
+            patch("shutil.which", return_value=None),
+            patch.object(Path, "exists", return_value=False),
+        ):
             result = find_rclone()
         assert result is None
     finally:

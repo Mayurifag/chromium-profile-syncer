@@ -59,6 +59,7 @@ class TrayApp(QSystemTrayIcon):
         self._last_sync: str = self._config.get_last_sync()
         self._last_error: str = ""
         self._update_thread: UpdateCheckThread | None = None
+        self._rclone_warning_shown = False
 
         installed_browsers = [b for b in ALL_BROWSERS if b.is_installed()]
         self._browser_monitor = BrowserMonitor(installed_browsers, parent=self)
@@ -119,6 +120,9 @@ class TrayApp(QSystemTrayIcon):
     def _warn_rclone_missing(self) -> None:
         import sys
 
+        if self._rclone_warning_shown:
+            return
+        self._rclone_warning_shown = True
         if sys.platform == "darwin":
             msg = "rclone is required for sync. Install via Homebrew: brew install rclone"
         elif sys.platform == "win32":

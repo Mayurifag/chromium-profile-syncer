@@ -41,9 +41,11 @@ _LDB_CACHE_SKIP_PREFIXES: dict[str, tuple[bytes, ...]] = {
     "cjpalhdlnbpafiamejdnhcphjbkeiagm": _UBLOCK_CACHE_SKIP_PREFIXES,
     "blockjmkbacgjkknlgpkjjiijinjdanf": _UBLOCK_CACHE_SKIP_PREFIXES,
 }
-_IDB_FILTER_CACHE_ONLY_EXT_IDS: frozenset[str] = frozenset({
-    "blockjmkbacgjkknlgpkjjiijinjdanf",
-})
+_IDB_FILTER_CACHE_ONLY_EXT_IDS: frozenset[str] = frozenset(
+    {
+        "blockjmkbacgjkknlgpkjjiijinjdanf",
+    }
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -59,6 +61,7 @@ class SyncEngine:
         self.sync_folder = sync_folder
         if browsers is None:
             from src.browsers import ALL_BROWSERS
+
             browsers = ALL_BROWSERS
         self.browsers = browsers
         self._progress_cb: Callable[[str], None] | None = None
@@ -167,24 +170,40 @@ class SyncEngine:
                 _extensions.update_webstore_manifest(
                     profile_path, sync_profile_path, ext_id_aliases
                 )
+            keep_ext_ids = _extensions.extension_install_ids(
+                sync_profile_path, profile_path, ext_id_aliases
+            )
+            pruned = _extensions.prune_orphan_extension_data(sync_profile_path, keep_ext_ids)
+            if pruned:
+                _LOG.info(
+                    "Pruned orphan extension data: %s",
+                    ", ".join(sorted(pruned)),
+                )
 
-            les_key_filter = {
-                k: v for k, v in _LDB_CACHE_SKIP_PREFIXES.items() if k not in skip
-            }
+            les_key_filter = {k: v for k, v in _LDB_CACHE_SKIP_PREFIXES.items() if k not in skip}
             self._sync_leveldb(
-                profile_path, sync_profile_path, "Local Extension Settings", direction,
-                name_filter=lambda n, s=skip: n not in s,
+                profile_path,
+                sync_profile_path,
+                "Local Extension Settings",
+                direction,
+                name_filter=lambda n, s=skip, keep=keep_ext_ids: n in keep and n not in s,
                 key_skip_prefixes=les_key_filter or None,
             )
             self._sync_leveldb(
-                profile_path, sync_profile_path, "Sync Extension Settings", direction
+                profile_path,
+                sync_profile_path,
+                "Sync Extension Settings",
+                direction,
+                name_filter=lambda n, s=skip, keep=keep_ext_ids: n in keep and n not in s,
             )
             idb_skip = skip | _IDB_FILTER_CACHE_ONLY_EXT_IDS
             self._sync_leveldb(
-                profile_path, sync_profile_path, "IndexedDB", direction,
-                name_filter=lambda n, s=idb_skip: (
-                    n.startswith("chrome-extension_")
-                    and not any(n.startswith(f"chrome-extension_{e}_") for e in s)
+                profile_path,
+                sync_profile_path,
+                "IndexedDB",
+                direction,
+                name_filter=lambda n, s=idb_skip, keep=keep_ext_ids: (
+                    (ext_id := _extensions.indexeddb_extension_id(n)) in keep and ext_id not in s
                 ),
             )
 
@@ -196,6 +215,14 @@ class SyncEngine:
         )
         self._synced_count += s
         self._skipped_count += sk
+
+        if dt.get("extensions", True):
+            pruned = _extensions.prune_orphan_extension_data(sync_profile_path, keep_ext_ids)
+            if pruned:
+                _LOG.info(
+                    "Pruned orphan extension preferences: %s",
+                    ", ".join(sorted(pruned)),
+                )
 
         plain_files: list[tuple[str, str | None]] = [
             ("Bookmarks", "bookmarks"),
@@ -233,12 +260,8 @@ class SyncEngine:
                 direction,
                 remote_json=sync_root / "typed_urls.json",
                 snapshot=lambda: _history.snapshot_typed_urls(profile_path),
-                extract=lambda: _history.extract_typed_urls(
-                    profile_path, sync_root, self._report
-                ),
-                restore=lambda: _history.restore_typed_urls(
-                    profile_path, sync_root, self._report
-                ),
+                extract=lambda: _history.extract_typed_urls(profile_path, sync_root, self._report),
+                restore=lambda: _history.restore_typed_urls(profile_path, sync_root, self._report),
                 ts_key="last_visit_time",
             )
 
@@ -262,9 +285,24 @@ class SyncEngine:
 
         _LOG.info("Restoring profile from backup: %s → %s", sync_profile_path, profile_path)
 
+        if dt.get("extensions", True):
+            keep_ext_ids = _extensions.extension_install_ids(
+                sync_profile_path,
+                profile_path,
+                aliases=browser.ext_id_aliases if browser is not None else None,
+            )
+            pruned = _extensions.prune_orphan_extension_data(sync_profile_path, keep_ext_ids)
+            if pruned:
+                _LOG.info(
+                    "Pruned orphan extension data before restore: %s",
+                    ", ".join(sorted(pruned)),
+                )
+
         _ext_parents = {"Local Extension Settings", "Sync Extension Settings", "IndexedDB"}
         skipped_empty: list[tuple[str, str]] = []
         for src in sync_profile_path.iterdir():
+            if src.name == "Extensions":
+                continue
             dst = profile_path / src.name
             if not dst.exists():
                 continue
@@ -289,7 +327,9 @@ class SyncEngine:
 
         for parent, ext_id in skipped_empty:
             _LOG.info(
-                "Restore: kept profile %s/%s — backup is an empty stub", parent, ext_id,
+                "Restore: kept profile %s/%s — backup is an empty stub",
+                parent,
+                ext_id,
             )
 
         is_ungoogled = browser.ungoogled if browser is not None else True
@@ -298,15 +338,23 @@ class SyncEngine:
         )
 
         cmd = [
-            str(_rclone.find_rclone() or "rclone"), "copy",
-            str(sync_profile_path), str(profile_path),
-            "--stats", "1s",
+            str(_rclone.find_rclone() or "rclone"),
+            "copy",
+            str(sync_profile_path),
+            str(profile_path),
+            "--stats",
+            "1s",
             "--stats-one-line",
-            "--transfers", "8",
-            "--checkers", "16",
-            "--exclude", "._*",
-            "--exclude", "preferences.json",
-            "--exclude", "Extensions/**",
+            "--transfers",
+            "8",
+            "--checkers",
+            "16",
+            "--exclude",
+            "._*",
+            "--exclude",
+            "preferences.json",
+            "--exclude",
+            "Extensions/**",
         ]
         for parent, ext_id in skipped_empty:
             cmd += ["--exclude", f"{parent}/{ext_id}/**"]
@@ -354,10 +402,14 @@ class SyncEngine:
                 continue
             for profile_path in profiles:
                 self.restore_profile_from_backup(
-                    profile_path, current_dir, browser=b, on_progress=on_progress,
+                    profile_path,
+                    current_dir,
+                    browser=b,
+                    on_progress=on_progress,
                 )
                 _extensions.install_external_extensions(
-                    current_dir, b,
+                    current_dir,
+                    b,
                     ungoogled_only_ext_ids=ungoogled_only,
                     windows_only_ext_ids=windows_only,
                 )
@@ -455,10 +507,19 @@ class SyncEngine:
         except OSError:
             _LOG.exception("Flags sync failed for %s", browser.name)
 
-    def _repull_ext_data(self, profile_path: Path, source_dir: Path) -> None:
+    def _repull_ext_data(
+        self,
+        profile_path: Path,
+        source_dir: Path,
+        aliases: dict[str, str] | None = None,
+    ) -> None:
         if not source_dir.exists():
             return
         skip = set(_config.get_excluded_ext_settings_ids())
+        keep_ext_ids = _extensions.extension_install_ids(source_dir, profile_path, aliases)
+        pruned = _extensions.prune_orphan_extension_data(source_dir, keep_ext_ids)
+        if pruned:
+            _LOG.info("Pruned orphan extension data before repull: %s", ", ".join(sorted(pruned)))
         for sub in ("Local Extension Settings", "Sync Extension Settings"):
             src_base = source_dir / sub
             if not src_base.exists():
@@ -466,13 +527,14 @@ class SyncEngine:
             dst_base = profile_path / sub
             dst_base.mkdir(parents=True, exist_ok=True)
             for ext_dir in src_base.iterdir():
-                if not ext_dir.is_dir() or ext_dir.name in skip:
+                if not ext_dir.is_dir() or ext_dir.name in skip or ext_dir.name not in keep_ext_ids:
                     continue
                 dst = dst_base / ext_dir.name
                 if _is_empty(ext_dir) and dst.exists() and not _is_empty(dst):
                     _LOG.info(
                         "Ext repull: kept profile %s/%s — source is empty stub",
-                        sub, ext_dir.name,
+                        sub,
+                        ext_dir.name,
                     )
                     continue
                 prefixes = (
@@ -482,6 +544,7 @@ class SyncEngine:
                 )
                 if prefixes:
                     from src.sync.ldb_filter import copy_filtered
+
                     copy_filtered(ext_dir, dst, prefixes)
                 else:
                     _leveldb.copy_atomic(ext_dir, dst, self._report)
@@ -494,7 +557,8 @@ class SyncEngine:
             for d in src_idb.iterdir():
                 if not d.is_dir() or not d.name.startswith("chrome-extension_"):
                     continue
-                if any(d.name.startswith(f"chrome-extension_{e}_") for e in idb_skip):
+                ext_id = _extensions.indexeddb_extension_id(d.name)
+                if ext_id not in keep_ext_ids or ext_id in idb_skip:
                     continue
                 dst = dst_idb / d.name
                 if _is_empty(d) and dst.exists() and not _is_empty(dst):
@@ -527,11 +591,15 @@ class SyncEngine:
         try:
             if needs_restore:
                 self.restore_profile_from_backup(
-                    profile_path, current_dir, data_types,
-                    browser=browser, on_progress=self._progress_cb,
+                    profile_path,
+                    current_dir,
+                    data_types,
+                    browser=browser,
+                    on_progress=self._progress_cb,
                 )
                 _extensions.install_external_extensions(
-                    current_dir, browser,
+                    current_dir,
+                    browser,
                     ungoogled_only_ext_ids=ungoogled_only_ext_ids,
                     windows_only_ext_ids=windows_only_ext_ids,
                 )
@@ -540,16 +608,20 @@ class SyncEngine:
                 _config.clear_restore_flag(browser.name, profile_path.name)
             else:
                 if needs_ext_repull and direction in ("pull", "both"):
-                    self._repull_ext_data(profile_path, work_dir)
+                    self._repull_ext_data(profile_path, work_dir, aliases or None)
                     _config.clear_ext_repull_flag(browser.name, profile_path.name)
                 self.sync_browser_profile(
-                    profile_path, work_dir, data_types,
-                    direction=direction, on_progress=self._progress_cb,
+                    profile_path,
+                    work_dir,
+                    data_types,
+                    direction=direction,
+                    on_progress=self._progress_cb,
                     ext_id_aliases=aliases or None,
                 )
                 if direction in ("pull", "both"):
                     _extensions.install_external_extensions(
-                        work_dir, browser,
+                        work_dir,
+                        browser,
                         ungoogled_only_ext_ids=ungoogled_only_ext_ids,
                         windows_only_ext_ids=windows_only_ext_ids,
                     )
@@ -582,16 +654,18 @@ class SyncEngine:
         else:
             _LOG.info(
                 "Starting sync_all (only_browser=%s, only_profile=%s, force_direction=%s)",
-                only_browser, only_profile, force_direction,
+                only_browser,
+                only_profile,
+                force_direction,
             )
 
         browsers_to_sync = [
-            b for b in self.browsers
-            if only_browser is None or b.name == only_browser
+            b for b in self.browsers if only_browser is None or b.name == only_browser
         ]
 
         manageable = [
-            b for b in browsers_to_sync
+            b
+            for b in browsers_to_sync
             if enabled_browsers.get(b.name) is not False and b.is_installed()
         ]
         if manageable and all(b.is_running() for b in manageable):
@@ -625,7 +699,8 @@ class SyncEngine:
                     continue
                 if browser.is_running():
                     _LOG.warning(
-                        "Browser %s is running — skipping to avoid data corruption", browser.name,
+                        "Browser %s is running — skipping to avoid data corruption",
+                        browser.name,
                     )
                     skipped_running.append(browser.name)
                     continue
@@ -638,9 +713,7 @@ class SyncEngine:
                 allowed = enabled_profiles.get(browser.name)
                 manual_pull = force_direction == "pull" and only_profile is not None
                 if not allowed and not manual_pull:
-                    _LOG.info(
-                        "Browser %s: no enabled profiles in config — skipping", browser.name
-                    )
+                    _LOG.info("Browser %s: no enabled profiles in config — skipping", browser.name)
                     continue
 
                 if not manual_pull:
@@ -648,9 +721,7 @@ class SyncEngine:
                 if only_profile:
                     profiles = [p for p in profiles if p.name == only_profile]
                 if not profiles:
-                    _LOG.info(
-                        "Browser %s: no matching profiles — skipping", browser.name
-                    )
+                    _LOG.info("Browser %s: no matching profiles — skipping", browser.name)
                     continue
 
                 _LOG.info("Browser %s: syncing %d profile(s)", browser.name, len(profiles))
@@ -665,19 +736,26 @@ class SyncEngine:
                     )
                     needs_ext_repull = (
                         not needs_restore
-                        and profile_path.name
-                        in profiles_needing_ext_repull.get(browser.name, [])
+                        and profile_path.name in profiles_needing_ext_repull.get(browser.name, [])
                     )
                     try:
                         self._sync_single_profile(
-                            browser, profile_path, work_dir, direction, needs_restore,
-                            needs_ext_repull, force_direction, data_types,
-                            ungoogled_only_ext_ids, windows_only_ext_ids,
+                            browser,
+                            profile_path,
+                            work_dir,
+                            direction,
+                            needs_restore,
+                            needs_ext_repull,
+                            force_direction,
+                            data_types,
+                            ungoogled_only_ext_ids,
+                            windows_only_ext_ids,
                         )
                     except OSError:
                         _LOG.exception(
                             "Failed to sync profile %s for browser %s",
-                            profile_path.name, browser.name,
+                            profile_path.name,
+                            browser.name,
                         )
                         if needs_restore and force_direction != "pull":
                             raise
@@ -687,8 +765,7 @@ class SyncEngine:
             if pruned:
                 _LOG.info("Pruned flags for unused browser(s): %s", ", ".join(pruned))
             local_browser_states = [
-                (b.name, ls) for b in self.browsers
-                if (ls := b.local_state_path()) is not None
+                (b.name, ls) for b in self.browsers if (ls := b.local_state_path()) is not None
             ]
             local_pruned = _flags.prune_local_flags(local_browser_states, keep_browsers)
             if local_pruned:
@@ -705,8 +782,7 @@ class SyncEngine:
             shutil.rmtree(work_dir)
 
         summary = (
-            f"Synced: {self._synced_count} items, "
-            f"Skipped: {self._skipped_count} items (unchanged)"
+            f"Synced: {self._synced_count} items, Skipped: {self._skipped_count} items (unchanged)"
         )
         if is_first_sync:
             _LOG.info("Initial sync complete — %s", summary)

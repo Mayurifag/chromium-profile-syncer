@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -58,6 +59,7 @@ class FlagsManagerDialog(QDialog):
 
     def _sync_root(self) -> Path:
         from src.sync.sync_dir import SYNC_DIR_NAME
+
         return self._sync_folder / SYNC_DIR_NAME
 
     def _build_ui(self) -> None:
@@ -67,11 +69,13 @@ class FlagsManagerDialog(QDialog):
         ignore_set = set(_config.get_flags_ignore())
 
         if not flag_sources:
-            root.addWidget(QLabel(
-                "No flags found.\n\n"
-                "Enable some flags in chrome://flags or helium://flags, "
-                "close the browser, and run a sync."
-            ))
+            root.addWidget(
+                QLabel(
+                    "No flags found.\n\n"
+                    "Enable some flags in chrome://flags or helium://flags, "
+                    "close the browser, and run a sync."
+                )
+            )
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
             buttons.rejected.connect(self.reject)
             for btn in buttons.buttons():
@@ -87,6 +91,11 @@ class FlagsManagerDialog(QDialog):
         info.setWordWrap(True)
         root.addWidget(info)
 
+        search = QLineEdit()
+        search.setPlaceholderText("Search flags")
+        search.textChanged.connect(self._filter_rows)
+        root.addWidget(search)
+
         table = QTableWidget(len(flag_sources), 4)
         table.setHorizontalHeaderLabels(["Flag", "Source", "Ignore", "Remove"])
         hdr = table.horizontalHeader()
@@ -97,6 +106,7 @@ class FlagsManagerDialog(QDialog):
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         table.verticalHeader().setVisible(False)
+        self._table = table
 
         from PySide6.QtWidgets import QWidget
 
@@ -126,9 +136,7 @@ class FlagsManagerDialog(QDialog):
 
             remove_chk = QCheckBox()
             self._remove_checks[flag] = remove_chk
-            remove_chk.toggled.connect(
-                lambda checked, ic=ignore_chk: ic.setEnabled(not checked)
-            )
+            remove_chk.toggled.connect(lambda checked, ic=ignore_chk: ic.setEnabled(not checked))
             table.setCellWidget(row, 3, _wrap(remove_chk))
 
         root.addWidget(table)
@@ -142,6 +150,16 @@ class FlagsManagerDialog(QDialog):
             btn.setIcon(QIcon())
         root.addWidget(buttons)
 
+    def _filter_rows(self, text: str) -> None:
+        query = text.casefold().strip()
+        for row in range(self._table.rowCount()):
+            flag_item = self._table.item(row, 0)
+            source_item = self._table.item(row, 1)
+            haystack = " ".join(
+                item.text() for item in (flag_item, source_item) if item is not None
+            ).casefold()
+            self._table.setRowHidden(row, bool(query and query not in haystack))
+
     def _save(self) -> None:
         to_remove = {f for f, chk in self._remove_checks.items() if chk.isChecked()}
         if to_remove:
@@ -154,8 +172,7 @@ class FlagsManagerDialog(QDialog):
             _LOG.info("Removed %d flag(s) from sync and local browsers", len(to_remove))
 
         ignore = [
-            f for f, chk in self._ignore_checks.items()
-            if chk.isChecked() and f not in to_remove
+            f for f, chk in self._ignore_checks.items() if chk.isChecked() and f not in to_remove
         ]
         _config.set_flags_ignore(ignore)
         self.accept()

@@ -106,7 +106,7 @@ class BrowserBase(ABC):
     def linux_managed_policy_dir(self) -> Path | None:
         return None
 
-    def macos_managed_pref_domain(self) -> str | None:
+    def macos_policy_domain(self) -> str | None:
         return None
 
     @property

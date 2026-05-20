@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import platform
 import plistlib
 import shlex
 import shutil
 import subprocess
 import tempfile
+import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -35,11 +35,13 @@ def _winreg_enum(fn: Callable[..., Any], key: Any) -> list:
 
 def _winreg_enum_subkeys(key) -> list[str]:
     import winreg
+
     return _winreg_enum(winreg.EnumKey, key)
 
 
 def _winreg_enum_values(key) -> list[str]:
     import winreg
+
     return _winreg_enum(lambda k, i: winreg.EnumValue(k, i)[0], key)
 
 
@@ -165,7 +167,10 @@ def _sync_extension_id(
             ext_name = _extension_name(profile_best)
             _LOG.info(
                 "Extension %s (%s): profile %s > sync %s — syncing",
-                ext_name, ext_id, profile_ver, sync_ver,
+                ext_name,
+                ext_id,
+                profile_ver,
+                sync_ver,
             )
             sync_id_dir.mkdir(parents=True, exist_ok=True)
             copy_atomic(profile_best, dest, report, display_name=ext_name)
@@ -177,7 +182,10 @@ def _sync_extension_id(
             ext_name = _extension_name(sync_best)
             _LOG.info(
                 "Extension %s (%s): sync %s > profile %s — syncing",
-                ext_name, ext_id, sync_ver, profile_ver,
+                ext_name,
+                ext_id,
+                sync_ver,
+                profile_ver,
             )
             profile_id_dir.mkdir(parents=True, exist_ok=True)
             copy_atomic(sync_best, dest, report, display_name=ext_name)
@@ -240,8 +248,6 @@ def update_webstore_manifest(
     profile_dir: Path, sync_dir: Path, aliases: dict[str, str] | None = None
 ) -> None:
     profile_ext_dir = profile_dir / "Extensions"
-    if not profile_ext_dir.exists():
-        return
     manifest_path = sync_dir / "webstore_extensions.json"
     existing: dict[str, str] = {}
     if manifest_path.exists():
@@ -251,26 +257,36 @@ def update_webstore_manifest(
         except (json.JSONDecodeError, OSError):
             pass
     webstore_map: dict[str, str] = {}
-    for id_dir in profile_ext_dir.iterdir():
-        if not id_dir.is_dir():
-            continue
-        ext_id = id_dir.name
-        canonical = (aliases or {}).get(ext_id, ext_id)
-        best = _best_version_dir(id_dir)
-        if best and _is_webstore_extension(best):
-            name = _extension_name(best)
-            webstore_map[canonical] = name if name != ext_id else existing.get(canonical, ext_id)
-        elif canonical != ext_id:
-            name = _extension_name(best) if best else ""
-            if not name or name == ext_id:
-                name = existing.get(canonical, "")
-            webstore_map[canonical] = name
+    if profile_ext_dir.exists():
+        for id_dir in profile_ext_dir.iterdir():
+            if not id_dir.is_dir():
+                continue
+            ext_id = id_dir.name
+            canonical = (aliases or {}).get(ext_id, ext_id)
+            best = _best_version_dir(id_dir)
+            if best and _is_webstore_extension(best):
+                name = _extension_name(best)
+                webstore_map[canonical] = (
+                    name if name != ext_id else existing.get(canonical, ext_id)
+                )
+            elif canonical != ext_id:
+                name = _extension_name(best) if best else ""
+                if not name or name == ext_id:
+                    name = existing.get(canonical, "")
+                webstore_map[canonical] = name
+    if aliases:
+        data_ids = _profile_extension_data_ids(profile_dir)
+        for alias_id, canonical in aliases.items():
+            if alias_id in data_ids and canonical not in webstore_map:
+                webstore_map[canonical] = existing.get(canonical, "")
     if not webstore_map and existing:
         _LOG.info(
             "Profile has 0 web-store extensions; preserving %d existing manifest entries",
             len(existing),
         )
         return
+    if existing:
+        webstore_map = existing | webstore_map
     if write_text_if_changed(manifest_path, json.dumps(webstore_map, sort_keys=True)):
         _LOG.info("Updated webstore manifest: %d extensions", len(webstore_map))
 
@@ -290,9 +306,170 @@ def collect_webstore_extensions(profile_dir: Path) -> dict[str, str]:
     return result
 
 
-def _drop_ids(
-    ext_ids: list[str], drop: set[str], log_msg: str, *log_args: object
-) -> list[str]:
+def _read_webstore_ids(sync_dir: Path) -> set[str]:
+    manifest_path = sync_dir / "webstore_extensions.json"
+    if not manifest_path.exists():
+        return set()
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return set()
+    if isinstance(data, dict):
+        return {ext_id for ext_id in data if isinstance(ext_id, str)}
+    if isinstance(data, list):
+        return {ext_id for ext_id in data if isinstance(ext_id, str)}
+    return set()
+
+
+def _extension_dir_ids(base: Path) -> set[str]:
+    if not base.exists():
+        return set()
+    return {entry.name for entry in base.iterdir() if entry.is_dir()}
+
+
+def _with_alias_ids(ext_ids: set[str], aliases: dict[str, str] | None) -> set[str]:
+    if not aliases:
+        return ext_ids
+    expanded = set(ext_ids)
+    for alias_id, canonical_id in aliases.items():
+        if canonical_id in expanded:
+            expanded.add(alias_id)
+        if alias_id in expanded:
+            expanded.add(canonical_id)
+    return expanded
+
+
+def extension_install_ids(
+    sync_dir: Path,
+    profile_dir: Path | None = None,
+    aliases: dict[str, str] | None = None,
+) -> set[str]:
+    ext_ids = _read_webstore_ids(sync_dir)
+    ext_ids.update(_extension_dir_ids(sync_dir / "Extensions"))
+    if profile_dir is not None:
+        ext_ids.update(_extension_dir_ids(profile_dir / "Extensions"))
+    return _with_alias_ids(ext_ids, aliases)
+
+
+def indexeddb_extension_id(name: str) -> str:
+    if not name.startswith("chrome-extension_"):
+        return ""
+    return name.removeprefix("chrome-extension_").split("_")[0]
+
+
+def _extension_data_ids(sync_dir: Path) -> set[str]:
+    ext_ids: set[str] = set()
+    for subdir in ("Local Extension Settings", "Sync Extension Settings"):
+        ext_ids.update(_extension_dir_ids(sync_dir / subdir))
+    indexed_db = sync_dir / "IndexedDB"
+    if indexed_db.exists():
+        for entry in indexed_db.iterdir():
+            if entry.is_dir() and (ext_id := indexeddb_extension_id(entry.name)):
+                ext_ids.add(ext_id)
+    prefs_path = sync_dir / "preferences.json"
+    if prefs_path.exists():
+        try:
+            prefs = json.loads(prefs_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return ext_ids
+        extensions = prefs.get("extensions", {})
+        if isinstance(extensions, dict):
+            pinned = extensions.get("pinned_extensions")
+            if isinstance(pinned, list):
+                ext_ids.update(ext_id for ext_id in pinned if isinstance(ext_id, str))
+            settings = extensions.get("settings")
+            if isinstance(settings, dict):
+                ext_ids.update(ext_id for ext_id in settings if isinstance(ext_id, str))
+    return ext_ids
+
+
+def _profile_extension_data_ids(profile_dir: Path) -> set[str]:
+    ext_ids: set[str] = set()
+    for subdir in (
+        "Local Extension Settings",
+        "Sync Extension Settings",
+        "Managed Extension Settings",
+    ):
+        ext_ids.update(_extension_dir_ids(profile_dir / subdir))
+    indexed_db = profile_dir / "IndexedDB"
+    if indexed_db.exists():
+        for entry in indexed_db.iterdir():
+            if entry.is_dir() and (ext_id := indexeddb_extension_id(entry.name)):
+                ext_ids.add(ext_id)
+    return ext_ids
+
+
+def remove_extension_data(
+    sync_dir: Path,
+    ext_ids: set[str],
+    *,
+    remove_install_records: bool = False,
+) -> None:
+    if not ext_ids:
+        return
+    manifest_path = sync_dir / "webstore_extensions.json"
+    if remove_install_records and manifest_path.exists():
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                for ext_id in ext_ids:
+                    data.pop(ext_id, None)
+            elif isinstance(data, list):
+                data = [ext_id for ext_id in data if ext_id not in ext_ids]
+            else:
+                return
+            manifest_path.write_text(json.dumps(data), encoding="utf-8")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    subdirs = ["Local Extension Settings", "Sync Extension Settings"]
+    if remove_install_records:
+        subdirs.append("Extensions")
+    for ext_id in ext_ids:
+        for subdir in subdirs:
+            target = sync_dir / subdir / ext_id
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+
+    indexed_db = sync_dir / "IndexedDB"
+    if indexed_db.exists():
+        prefixes = tuple(f"chrome-extension_{ext_id}_" for ext_id in ext_ids)
+        for entry in list(indexed_db.iterdir()):
+            if entry.name.startswith(prefixes):
+                shutil.rmtree(entry, ignore_errors=True)
+
+    prefs_path = sync_dir / "preferences.json"
+    if prefs_path.exists():
+        try:
+            prefs = json.loads(prefs_path.read_text(encoding="utf-8"))
+            extensions = prefs.get("extensions", {})
+            if not isinstance(extensions, dict):
+                return
+            changed = False
+            pinned = extensions.get("pinned_extensions")
+            if isinstance(pinned, list):
+                kept = [ext_id for ext_id in pinned if ext_id not in ext_ids]
+                if kept != pinned:
+                    extensions["pinned_extensions"] = kept
+                    changed = True
+            settings = extensions.get("settings")
+            if isinstance(settings, dict):
+                for ext_id in ext_ids:
+                    if settings.pop(ext_id, None) is not None:
+                        changed = True
+            if changed:
+                prefs_path.write_text(json.dumps(prefs), encoding="utf-8")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+
+def prune_orphan_extension_data(sync_dir: Path, keep_ext_ids: set[str]) -> set[str]:
+    orphan_ids = _extension_data_ids(sync_dir) - keep_ext_ids
+    remove_extension_data(sync_dir, orphan_ids)
+    return orphan_ids
+
+
+def _drop_ids(ext_ids: list[str], drop: set[str], log_msg: str, *log_args: object) -> list[str]:
     if not drop:
         return ext_ids
     kept = [e for e in ext_ids if e not in drop]
@@ -309,18 +486,22 @@ def _filter_install_ids(
     windows_only_ext_ids: list[str] | None,
 ) -> list[str]:
     ext_ids = _drop_ids(
-        ext_ids, set(browser.ext_id_aliases.values()),
-        "Skipping %d internally-bundled extension(s) for %s", browser.name,
+        ext_ids,
+        set(browser.ext_id_aliases.values()),
+        "Skipping %d internally-bundled extension(s) for %s",
+        browser.name,
     )
     if not browser.ungoogled:
         ext_ids = _drop_ids(
-            ext_ids, set(ungoogled_only_ext_ids),
+            ext_ids,
+            set(ungoogled_only_ext_ids),
             "Skipping %d ungoogled-only extension(s) for non-ungoogled browser %s",
             browser.name,
         )
     if platform.system() != "Windows" and windows_only_ext_ids:
         ext_ids = _drop_ids(
-            ext_ids, set(windows_only_ext_ids),
+            ext_ids,
+            set(windows_only_ext_ids),
             "Skipping %d windows-only extension(s) on non-Windows platform",
         )
     return ext_ids
@@ -355,16 +536,17 @@ def install_external_extensions(
         return
 
     ext_ids = _filter_install_ids(
-        ext_ids, browser, ungoogled_only_ext_ids, windows_only_ext_ids,
+        ext_ids,
+        browser,
+        ungoogled_only_ext_ids,
+        windows_only_ext_ids,
     )
 
     update_url = browser.web_store_update_url
     system = platform.system()
     reg_key = browser.windows_extensions_registry_key() if system == "Windows" else None
     linux_policy_dir = browser.linux_managed_policy_dir() if system == "Linux" else None
-    macos_domain = (
-        browser.macos_managed_pref_domain() if system == "Darwin" else None
-    )
+    macos_domain = browser.macos_policy_domain() if system == "Darwin" else None
     ext_dir = browser.external_extensions_dir()
 
     if reg_key:
@@ -374,19 +556,13 @@ def install_external_extensions(
             _install_via_force_list(ext_ids, force_key)
         _wipe_stubs(ext_dir, "Removed orphaned extension stub (now using registry): %s")
     elif linux_policy_dir:
-        _install_via_linux_policy(ext_ids, linux_policy_dir, browser.name)
-        _wipe_stubs(ext_dir, "Removed orphaned extension stub (now using policy): %s")
+        if _install_via_linux_policy(ext_ids, linux_policy_dir, browser.name):
+            _wipe_stubs(ext_dir, "Removed orphaned extension stub (now using policy): %s")
+        elif ext_dir is not None:
+            _install_via_stubs(ext_ids, ext_dir, update_url)
     elif macos_domain:
-        _install_via_macos_managed_prefs(ext_ids, macos_domain, browser.name)
-        _wipe_stubs(ext_dir, "Removed orphaned extension stub (now using policy): %s")
-    elif system == "Darwin":
-        _LOG.info(
-            "%s: macOS extension auto-install not configured (no managed-pref domain) "
-            "— %d extension(s) need manual install:",
-            browser.name, len(ext_ids),
-        )
-        for ext_id in ext_ids:
-            _LOG.info("  https://chromewebstore.google.com/detail/%s", ext_id)
+        _install_via_macos_profile(ext_ids, macos_domain, browser.name)
+        _wipe_stubs(ext_dir, "Removed orphaned extension stub (now using profile): %s")
     elif ext_dir is not None:
         _install_via_stubs(ext_ids, ext_dir, update_url)
     else:
@@ -473,12 +649,10 @@ def _linux_policy_filename(browser_name: str) -> str:
     return f"{browser_name.lower().replace(' ', '-')}-syncer.json"
 
 
-def _install_via_linux_policy(
-    ext_ids: list[str], policy_dir: Path, browser_name: str
-) -> None:
+def _install_via_linux_policy(ext_ids: list[str], policy_dir: Path, browser_name: str) -> bool:
     if shutil.which("pkexec") is None:
         _LOG.warning("pkexec not found — cannot install force-list policy on Linux")
-        return
+        return False
 
     target = policy_dir / _linux_policy_filename(browser_name)
     payload = json.dumps(
@@ -488,13 +662,11 @@ def _install_via_linux_policy(
 
     try:
         if target.read_text(encoding="utf-8") == payload:
-            return
+            return True
     except (OSError, ValueError):
         pass
 
-    with tempfile.NamedTemporaryFile(
-        "w", suffix=".json", delete=False, encoding="utf-8"
-    ) as f:
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
         f.write(payload)
         tmp_path = f.name
 
@@ -510,100 +682,184 @@ def _install_via_linux_policy(
         if result.returncode == 0:
             _LOG.info(
                 "Installed %s force-list policy at %s: %d extensions",
-                browser_name, target, len(ext_ids),
+                browser_name,
+                target,
+                len(ext_ids),
             )
+            return True
         else:
             _LOG.warning(
                 "Failed to install %s policy via pkexec (rc=%d): %s",
-                browser_name, result.returncode, result.stderr.strip(),
+                browser_name,
+                result.returncode,
+                result.stderr.strip(),
             )
+            return False
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
 
-def _macos_managed_pref_path(domain: str) -> Path:
-    user = os.environ.get("USER")
-    if not user:
-        import pwd
-        user = pwd.getpwuid(os.getuid()).pw_name
-    return Path(f"/Library/Managed Preferences/{user}/{domain}.plist")
+def _macos_profile_identifier(browser_name: str) -> str:
+    slug = browser_name.lower().replace(" ", "-")
+    return f"com.chromium-profile-syncer.{slug}.extension-forcelist"
 
 
-def _read_macos_plist(path: Path) -> dict | None:
-    if not path.exists():
-        return {}
-    try:
-        return plistlib.loads(path.read_bytes())
-    except PermissionError as e:
-        _LOG.warning(
-            "Cannot read existing plist %s: %s — refusing to overwrite", path, e,
-        )
-        return None
-    except (OSError, ValueError, plistlib.InvalidFileException) as e:
-        _LOG.warning("Cannot parse plist %s: %s — treating as empty", path, e)
-        return {}
+def _macos_stale_profile_identifiers(browser_name: str) -> list[str]:
+    slug = browser_name.lower().replace(" ", "-")
+    return [
+        f"com.chromium-profile-syncer.{slug}.extensions",
+        f"com.chromium-profile-syncer.{slug}.external-extensions",
+    ]
 
 
-def _applescript_quote(s: str) -> str:
-    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+def _remove_stale_macos_profiles(browser_name: str) -> None:
+    for identifier in _macos_stale_profile_identifiers(browser_name):
+        try:
+            result = subprocess.run(
+                ["profiles", "remove", "-identifier", identifier],
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            continue
+        if result.returncode == 0:
+            _LOG.info("Removed stale macOS profile: %s", identifier)
 
 
-def _run_osascript_admin(shell_cmd: str, label: str) -> bool:
-    applescript = (
-        f"do shell script {_applescript_quote(shell_cmd)} "
-        f"with prompt {_applescript_quote(label)} "
-        "with administrator privileges"
-    )
-    try:
-        result = subprocess.run(
-            ["osascript", "-e", applescript], capture_output=True, text=True
-        )
-    except OSError as e:
-        _LOG.warning("Failed to invoke osascript for %s: %s", label, e)
-        return False
-    if result.returncode == 0:
-        return True
-    err = result.stderr.strip()
-    if "User canceled" in err or "(-128)" in err:
-        _LOG.warning("Admin prompt cancelled by user — %s skipped", label)
-    else:
-        _LOG.warning("osascript failed (%s): %s", label, err)
+def _macos_profile_path(browser_name: str) -> Path:
+    from src import config as _config
+
+    return _config.CONFIG_DIR / "profiles" / f"{browser_name.lower()}-extensions.mobileconfig"
+
+
+def _macos_extension_install_settings(ext_ids: list[str]) -> dict:
+    return {"ExtensionInstallForcelist": sorted(set(ext_ids))}
+
+
+def _macos_profile_payload(ext_ids: list[str], domain: str, browser_name: str) -> dict:
+    identifier = _macos_profile_identifier(browser_name)
+    return {
+        "PayloadContent": [
+            {
+                "PayloadContent": {
+                    domain: {
+                        "Forced": [
+                            {"mcx_preference_settings": _macos_extension_install_settings(ext_ids)}
+                        ]
+                    }
+                },
+                "PayloadDisplayName": f"{browser_name} extension policy",
+                "PayloadIdentifier": f"{identifier}.payload",
+                "PayloadType": "com.apple.ManagedClient.preferences",
+                "PayloadUUID": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{identifier}.payload")),
+                "PayloadVersion": 1,
+            }
+        ],
+        "PayloadDescription": f"Forces {browser_name} to install synced Web Store extensions.",
+        "PayloadDisplayName": f"{browser_name} Synced Extensions",
+        "PayloadIdentifier": identifier,
+        "PayloadOrganization": "Chromium Profile Syncer",
+        "PayloadRemovalDisallowed": False,
+        "PayloadType": "Configuration",
+        "PayloadUUID": str(uuid.uuid5(uuid.NAMESPACE_URL, identifier)),
+        "PayloadVersion": 1,
+    }
+
+
+def _iter_dicts(value: object):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _iter_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_dicts(child)
+
+
+def _macos_profile_has_policy(data: object, ext_ids: list[str], domain: str) -> bool:
+    target = _macos_extension_install_settings(ext_ids)
+    for item in _iter_dicts(data):
+        managed = item.get("PayloadContentManagedPreferences")
+        if not isinstance(managed, dict):
+            continue
+        domain_data = managed.get(domain)
+        if not isinstance(domain_data, dict):
+            continue
+        forced = domain_data.get("Forced")
+        if not isinstance(forced, list):
+            continue
+        for entry in forced:
+            settings = entry.get("mcx_preference_settings") if isinstance(entry, dict) else None
+            if isinstance(settings, dict) and all(settings.get(k) == v for k, v in target.items()):
+                return True
     return False
 
 
-def _install_via_macos_managed_prefs(
-    ext_ids: list[str], domain: str, browser_name: str
-) -> None:
-    target = _macos_managed_pref_path(domain)
-    existing = _read_macos_plist(target)
-    if existing is None:
+def _macos_matching_profiles(data: object, identifier: str):
+    if isinstance(data, dict) and data.get("ProfileIdentifier") == identifier:
+        yield data
         return
-    new_data = dict(existing)
-    new_data["ExtensionInstallForcelist"] = sorted(ext_ids)
-    if existing == new_data:
+    if isinstance(data, dict):
+        for value in data.values():
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict) and item.get("ProfileIdentifier") == identifier:
+                        yield item
+
+
+def _macos_profile_installed(ext_ids: list[str], domain: str, browser_name: str) -> bool:
+    identifier = _macos_profile_identifier(browser_name)
+    try:
+        result = subprocess.run(
+            [
+                "profiles",
+                "show",
+                "-type",
+                "configuration",
+                "-identifier",
+                identifier,
+                "-output",
+                "stdout-xml",
+            ],
+            capture_output=True,
+        )
+    except OSError:
+        return False
+    if result.returncode != 0 or not result.stdout:
+        return False
+    try:
+        data = plistlib.loads(result.stdout)
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return False
+    return any(
+        _macos_profile_has_policy(profile, ext_ids, domain)
+        for profile in _macos_matching_profiles(data, identifier)
+    )
+
+
+def _install_via_macos_profile(ext_ids: list[str], domain: str, browser_name: str) -> None:
+    _remove_stale_macos_profiles(browser_name)
+    if _macos_profile_installed(ext_ids, domain, browser_name):
         return
 
-    payload = plistlib.dumps(new_data, fmt=plistlib.FMT_XML)
-    with tempfile.NamedTemporaryFile(suffix=".plist", delete=False) as f:
-        f.write(payload)
-        tmp_path = f.name
+    profile_path = _macos_profile_path(browser_name)
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = plistlib.dumps(
+        _macos_profile_payload(ext_ids, domain, browser_name),
+        fmt=plistlib.FMT_XML,
+        sort_keys=False,
+    )
+    profile_path.write_bytes(payload)
 
     try:
-        cmd = (
-            f"mkdir -p {shlex.quote(str(target.parent))} && "
-            f"install -m 0644 -o root -g wheel "
-            f"{shlex.quote(tmp_path)} {shlex.quote(str(target))}"
+        subprocess.run(["open", str(profile_path)], capture_output=True)
+        _LOG.warning(
+            "Opened %s extension policy profile for installation: %s",
+            browser_name,
+            profile_path,
         )
-        ok = _run_osascript_admin(
-            cmd, f"install {browser_name} extension policy"
-        )
-        if ok:
-            _LOG.info(
-                "Installed %s force-list policy at %s: %d extensions",
-                browser_name, target, len(ext_ids),
-            )
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
+    except OSError as e:
+        _LOG.warning("Failed to open %s extension policy profile: %s", browser_name, e)
 
 
 def _install_via_stubs(ext_ids: list[str], ext_dir: Path, update_url: str) -> None:
@@ -621,5 +877,3 @@ def _install_via_stubs(ext_ids: list[str], ext_dir: Path, update_url: str) -> No
         if not stub.exists():
             stub.write_text(payload, encoding="utf-8")
             _LOG.info("Registered Web Store extension via stub: %s", ext_id)
-
-

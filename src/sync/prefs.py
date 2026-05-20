@@ -103,6 +103,15 @@ def sync_preferences_json(
             found, value = _get_nested(prefs, keys)
             if found:
                 _set_nested(extracted, keys, value)
+        found_pins, pins = _get_nested(extracted, ["extensions", "pinned_extensions"])
+        if found_pins and pins == [] and json_path.exists():
+            try:
+                current = json.loads(json_path.read_bytes())
+                found_old_pins, old_pins = _get_nested(current, ["extensions", "pinned_extensions"])
+                if found_old_pins and isinstance(old_pins, list) and old_pins:
+                    _set_nested(extracted, ["extensions", "pinned_extensions"], old_pins)
+            except (json.JSONDecodeError, OSError):
+                pass
         if not write_text_if_changed(json_path, json.dumps(extracted)):
             return 0, 1
         report("preferences.json")

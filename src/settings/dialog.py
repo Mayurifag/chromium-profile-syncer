@@ -95,6 +95,7 @@ class SettingsDialog(QDialog):
         self._helium_version_label: QLabel | None = None
         self._folder_edit: QLineEdit | None = None
         self._clean_btn: QPushButton | None = None
+        self._extensions_btn: QPushButton | None = None
         self._profiles_group: QGroupBox | None = None
         self._profiles_scroll_layout: QVBoxLayout | None = None
         self._activity_log_check: QCheckBox | None = None
@@ -222,6 +223,7 @@ class SettingsDialog(QDialog):
         view_ext_btn = QPushButton("Extensions")
         view_ext_btn.clicked.connect(self._open_extension_links)
         actions_row.addWidget(view_ext_btn)
+        self._extensions_btn = view_ext_btn
 
         flags_btn = QPushButton("Flags")
         flags_btn.clicked.connect(self._open_flags_manager)
@@ -300,6 +302,7 @@ class SettingsDialog(QDialog):
 
     def _refresh_for_folder(self, folder: Path) -> None:
         has_data = _sync_folder_has_data(folder)
+        self._refresh_extension_count(folder if has_data else None)
         if self._clean_btn:
             self._clean_btn.setVisible(has_data)
         if not has_data:
@@ -312,6 +315,7 @@ class SettingsDialog(QDialog):
             self._rebuild_profiles(folder)
 
     def _hide_profiles(self) -> None:
+        self._refresh_extension_count(None)
         if self._profiles_group:
             self._profiles_group.setVisible(False)
         if self._selects_row:
@@ -550,6 +554,16 @@ class SettingsDialog(QDialog):
             self._desktop_buttons.refresh()
         self.adjustSize()
 
+    def _refresh_extension_count(self, folder: Path | None) -> None:
+        if self._extensions_btn is None:
+            return
+        count = 0
+        if folder is not None:
+            from src.settings.extensions_manager import extension_backup_count
+
+            count = extension_backup_count(folder)
+        self._extensions_btn.setText(f"Extensions ({count})" if count else "Extensions")
+
     def _save_profiles_config(self) -> None:
         enabled_profiles: dict[str, list[str]] = {
             bn: [pn for pn, on in pm.items() if on] for bn, pm in self._profile_states.items()
@@ -566,6 +580,7 @@ class SettingsDialog(QDialog):
     def _refresh_profiles(self) -> None:
         folder_text = self._folder_edit.text().strip() if self._folder_edit else ""
         if folder_text and (folder := Path(folder_text)).is_dir():
+            self._refresh_extension_count(folder)
             self._rebuild_profiles(folder)
 
     def _do_remove_profile(self, browser_name: str, profile_name: str, profile_path: Path) -> None:

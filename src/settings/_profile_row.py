@@ -64,6 +64,8 @@ def add_profile_row(
     for w in prefix_widgets:
         top_layout.addWidget(w)
 
+    _add_repull_badge(top_layout, browser_name, profile_name)
+
     if browser_name == "Thorium" and profile_path is not None:
         _add_remove_button(ctx, top_layout, browser_name, profile_name, is_running, profile_path)
 
@@ -91,6 +93,18 @@ def add_profile_row(
     row_layout.addWidget(progress_bar)
     row_layout.addWidget(info_label)
     layout.addWidget(row)
+
+
+def _add_repull_badge(top_layout: QHBoxLayout, browser_name: str, profile_name: str) -> None:
+    pending = config_module.get_profiles_needing_ext_repull().get(browser_name, [])
+    if profile_name not in pending:
+        return
+    label = QLabel("Ext repull pending")
+    label.setStyleSheet(SMALL_MUTED)
+    label.setToolTip(
+        "Extension settings will be re-applied after extensions install and browser closes."
+    )
+    top_layout.addWidget(label)
 
 
 def _add_remove_button(
