@@ -446,7 +446,25 @@ def test_sync_browser_profile_syncs_plain_files(tmp_path: Path) -> None:
     _write_file(profile / "Bookmarks", '{"roots":{}}', mtime=2000.0)
     _write_file(
         profile / "Preferences",
-        '{"enable_do_not_track":true,"settings":{}}',
+        json.dumps(
+            {
+                "enable_do_not_track": True,
+                "settings": {},
+                "browser": {"theme": {"is_grayscale2": True}},
+                "devtools": {"preferences": {"resources-cookies-expanded": "true"}},
+                "savefile": {"default_directory": "/Users/me/Downloads"},
+                "selectfile": {"last_directory": "/Users/me/Desktop"},
+                "partition": {"per_host_zoom_levels": {"x.example.com": {"zoom_level": 1}}},
+                "profile": {
+                    "content_settings": {
+                        "exceptions": {
+                            "notifications": {"https://example.com:443,*": {"setting": 2}},
+                            "http_allowed": {"https://example.com:443,*": {"setting": {}}},
+                        }
+                    }
+                },
+            }
+        ),
         mtime=2000.0,
     )
     _write_file(profile / "Custom Dictionary.txt", "word1\nword2", mtime=2000.0)
@@ -456,7 +474,13 @@ def test_sync_browser_profile_syncs_plain_files(tmp_path: Path) -> None:
     assert (sync_profile / "Bookmarks").read_text() == '{"roots":{}}'
     saved = json.loads((sync_profile / "preferences.json").read_bytes())
     assert saved.get("enable_do_not_track") is True
+    assert saved["browser"]["theme"] == {"is_grayscale2": True}
+    assert saved["devtools"]["preferences"] == {"resources-cookies-expanded": "true"}
     assert "settings" not in saved  # not in PREFERENCES_KEYS — must not be copied
+    assert "savefile" not in saved
+    assert "selectfile" not in saved
+    assert "partition" not in saved
+    assert "profile" not in saved
     assert not (sync_profile / "Preferences").exists()  # raw file replaced by preferences.json
     assert (sync_profile / "Custom Dictionary.txt").read_text() == "word1\nword2"
 
