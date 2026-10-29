@@ -23,7 +23,7 @@ class WatcherController(QObject):
         self._sync_folder: Path | None = None
         self._watcher: QFileSystemWatcher | None = None
         self._paused = False
-        self._last_metadata_mtime: float | None = None
+        self._last_metadata: bytes | None = None
 
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -47,13 +47,14 @@ class WatcherController(QObject):
         logger.debug("File watcher paused")
 
     def resume(self) -> None:
-        self._record_mtime_baseline()
         self._refresh_paths()
         self._paused = False
+        if self._metadata() != self._last_metadata:
+            self._debounce.start()
         logger.debug("File watcher resumed")
 
-    def record_mtime_baseline(self) -> None:
-        self._record_mtime_baseline()
+    def record_baseline(self) -> None:
+        self._last_metadata = self._metadata()
 
     def _teardown(self) -> None:
         if self._watcher is None:
@@ -77,21 +78,20 @@ class WatcherController(QObject):
         current = self._sync_folder / self._sync_dir_name
         if current.is_dir():
             paths.append(str(current))
-            for sub in current.rglob("*"):
-                if sub.is_dir():
-                    paths.append(str(sub))
+            metadata = current / "metadata.json"
+            if metadata.exists():
+                paths.append(str(metadata))
         self._watcher.addPaths(paths)
         logger.debug("Watching %d paths under %s", len(paths), self._sync_folder)
 
-    def _record_mtime_baseline(self) -> None:
+    def _metadata(self) -> bytes | None:
         if self._sync_folder is None:
-            self._last_metadata_mtime = None
-            return
+            return None
         metadata = self._sync_folder / self._sync_dir_name / "metadata.json"
         try:
-            self._last_metadata_mtime = metadata.stat().st_mtime if metadata.exists() else None
+            return metadata.read_bytes()
         except OSError:
-            self._last_metadata_mtime = None
+            return None
 
     def _on_changed(self, path: str) -> None:
         if self._paused:
@@ -100,13 +100,7 @@ class WatcherController(QObject):
         self._debounce.start()
 
     def _on_debounce_fired(self) -> None:
-        if self._sync_folder is not None and self._last_metadata_mtime is not None:
-            metadata = self._sync_folder / self._sync_dir_name / "metadata.json"
-            if metadata.exists():
-                try:
-                    if metadata.stat().st_mtime == self._last_metadata_mtime:
-                        logger.debug("Watcher fired but metadata.json unchanged — skipping")
-                        return
-                except OSError:
-                    pass
+        self._refresh_paths()
+        if self._last_metadata is not None and self._metadata() == self._last_metadata:
+            return
         self.change_detected.emit()

@@ -37,8 +37,8 @@ ICON_COLORS = {
 
 # Browser running indicator colors
 RUNNING_GLOW = (80, 200, 120, 60)  # RGBA
-RUNNING_DOT = (80, 200, 120)       # RGB
-NOT_RUNNING_DOT = (98, 114, 164)   # RGB (#6272a4)
+RUNNING_DOT = (80, 200, 120)  # RGB
+NOT_RUNNING_DOT = (98, 114, 164)  # RGB (#6272a4)
 
 # Text styles (for setStyleSheet calls)
 MUTED_TEXT = f"color: {COMMENT}; font-size: 10px;"
@@ -47,14 +47,6 @@ BOLD_LABEL = "font-weight: bold; margin-top: 8px;"
 SMALL_MUTED = f"font-size: 10px; color: {COMMENT};"
 
 # Widget-specific styles
-LOG_VIEWER_TEXTEDIT = f"""
-QTextEdit {{
-    background-color: {BACKGROUND_DARK};
-    color: {DEFAULT_LOG_COLOR};
-    border: none;
-}}
-"""
-
 PROFILE_ROW_STYLE = f"""
 QWidget#profile_row {{
     background-color: {BACKGROUND};

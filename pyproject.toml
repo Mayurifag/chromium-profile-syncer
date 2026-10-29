@@ -3,12 +3,7 @@ name = "chromium-profile-syncer"
 version = "0.1.0"
 description = "Cross-platform PySide6 system tray app to sync Chromium browser profiles"
 requires-python = ">=3.12"
-dependencies = [
-    "PySide6>=6.7",
-    "cramjam>=2.11.0",
-    "cryptography>=46.0.7",
-    "psutil>=5.9",
-]
+dependencies = ["PySide6>=6.7", "cryptography>=46.0.7", "psutil>=5.9"]
 
 [project.scripts]
 chromium-profile-syncer = "src.main:main"
@@ -31,7 +26,4 @@ select = ["E", "F", "I", "UP"]
 testpaths = ["tests"]
 
 [dependency-groups]
-dev = [
-    "pyinstaller>=6.0",
-    "pytest>=8.0",
-]
+dev = ["pyinstaller>=6.0", "pytest>=8.0", "ruff==0.15.6"]

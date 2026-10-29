@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 from src.sync.flags import (
     FLAGS_FILE,
@@ -14,6 +17,7 @@ from src.sync.flags import (
     remove_flags,
     sync_flags,
 )
+from src.sync.sync_dir import mark_changed, seed_work_dir, validate_snapshot
 
 
 def _write_local_state(path: Path, flags: list[str], mtime: float) -> None:
@@ -41,9 +45,7 @@ def test_get_local_flags_empty(tmp_path: Path) -> None:
 
 def test_get_local_flags_returns_array(tmp_path: Path) -> None:
     p = tmp_path / "Local State"
-    p.write_text(
-        json.dumps({"browser": {FLAGS_KEY: ["a@1", "b@2"]}}), encoding="utf-8"
-    )
+    p.write_text(json.dumps({"browser": {FLAGS_KEY: ["a@1", "b@2"]}}), encoding="utf-8")
     assert get_local_flags(p) == ["a@1", "b@2"]
 
 
@@ -166,9 +168,7 @@ def test_prune_local_flags_clears_absent_browsers(tmp_path: Path) -> None:
     _write_local_state(local_a, ["a@1"], 1000.0)
     _write_local_state(local_b, ["b@1"], 1000.0)
 
-    pruned = prune_local_flags(
-        [("A", local_a), ("B", local_b)], keep_browsers={"A"}
-    )
+    pruned = prune_local_flags([("A", local_a), ("B", local_b)], keep_browsers={"A"})
     assert pruned == ["B"]
     assert get_local_flags(local_a) == ["a@1"]
     assert get_local_flags(local_b) == []
@@ -187,10 +187,12 @@ def test_remove_flags_strips_from_sync_and_local(tmp_path: Path) -> None:
     sync_root = tmp_path / "sync"
     sync_root.mkdir()
     (sync_root / FLAGS_FILE).write_text(
-        json.dumps({
-            "A": {FLAGS_KEY: ["keep@1", "drop@1"], "mtime": 1.0},
-            "B": {FLAGS_KEY: ["drop@1"], "mtime": 1.0},
-        }),
+        json.dumps(
+            {
+                "A": {FLAGS_KEY: ["keep@1", "drop@1"], "mtime": 1.0},
+                "B": {FLAGS_KEY: ["drop@1"], "mtime": 1.0},
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -213,3 +215,32 @@ def test_remove_flags_empty_set_noop(tmp_path: Path) -> None:
     remove_flags(sync_root, set(), [])
     data = load_sync_flags(sync_root)
     assert data["A"][FLAGS_KEY] == ["x@1"]
+
+
+def test_remove_flags_publishes_valid_snapshot(tmp_path: Path) -> None:
+    current = tmp_path / "current"
+    _write_sync(current, "A", ["keep@1", "drop@1"], 1.0)
+    (current / "Bookmarks").write_text("keep bookmarks")
+    mark_changed(current)
+    before = (current / "metadata.json").read_bytes()
+    remove_flags(current, {"drop@1"}, [])
+    assert load_sync_flags(current)["A"][FLAGS_KEY] == ["keep@1"]
+    assert (current / "metadata.json").read_bytes() != before
+    seed_work_dir(current, tmp_path / "work")
+    assert (tmp_path / "work" / "Bookmarks").read_text() == "keep bookmarks"
+
+
+def test_failed_flag_publication_preserves_shared_and_local_state(tmp_path: Path) -> None:
+    current, local = tmp_path / "current", tmp_path / "Local State"
+    _write_sync(current, "A", ["drop@1"], 1.0)
+    _write_local_state(local, ["drop@1"], 1.0)
+    mark_changed(current)
+    before = (current / FLAGS_FILE).read_bytes(), (current / "metadata.json").read_bytes()
+    with (
+        patch("src.sync.sync_dir.merge_to_sync_dir", side_effect=OSError("disk full")),
+        pytest.raises(OSError, match="disk full"),
+    ):
+        remove_flags(current, {"drop@1"}, [("A", local)])
+    assert ((current / FLAGS_FILE).read_bytes(), (current / "metadata.json").read_bytes()) == before
+    assert get_local_flags(local) == ["drop@1"]
+    validate_snapshot(current)

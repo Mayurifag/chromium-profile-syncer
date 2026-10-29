@@ -6,7 +6,7 @@ import platform
 import re
 import shutil
 import sys
-from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import psutil
@@ -26,44 +26,37 @@ def scan_running_procs() -> set[str]:
     return results
 
 
-class BrowserBase(ABC):
-    @property
-    @abstractmethod
-    def name(self) -> str: ...
-
-    @property
-    @abstractmethod
-    def unix_process_names(self) -> list[str]: ...
-
-    @property
-    @abstractmethod
-    def windows_exe_substr(self) -> str: ...
-
-    @property
-    def ungoogled(self) -> bool:
-        return False
-
-    @property
-    def ext_id_aliases(self) -> dict[str, str]:
-        """Maps browser-internal extension IDs to their canonical Web Store IDs."""
-        return {}
-
-    @property
-    def web_store_update_url(self) -> str:
-        return "https://clients2.google.com/service/update2/crx"
+@dataclass(frozen=True)
+class BrowserBase:
+    name: str
+    unix_process_names: tuple[str, ...]
+    windows_exe_substr: str
+    windows_profile: tuple[str, ...]
+    macos_profile: str
+    linux_profile: str
+    windows_executable_name: str
+    linux_binary_names: tuple[str, ...]
+    macos_app_bundle: str
+    ungoogled: bool = False
+    ext_id_aliases: dict[str, str] = field(default_factory=dict)
+    extensions_registry: str | None = None
+    force_list_registry: str | None = None
+    managed_policy_dir: str | None = None
+    policy_domain: str | None = None
+    web_store_update_url: str = "https://clients2.google.com/service/update2/crx"
 
     @staticmethod
     def _localappdata() -> str:
         return os.environ.get("LOCALAPPDATA", "")
 
-    @abstractmethod
-    def _windows_path(self) -> Path: ...
+    def _windows_path(self) -> Path:
+        return Path(self._localappdata()).joinpath(*self.windows_profile)
 
-    @abstractmethod
-    def _macos_path(self) -> Path: ...
+    def _macos_path(self) -> Path:
+        return Path.home() / "Library" / "Application Support" / self.macos_profile
 
-    @abstractmethod
-    def _linux_path(self) -> Path: ...
+    def _linux_path(self) -> Path:
+        return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / self.linux_profile
 
     def profile_root(self) -> Path | None:
         match platform.system():
@@ -98,20 +91,16 @@ class BrowserBase(ABC):
         return (root / "Local State") if root else None
 
     def windows_extensions_registry_key(self) -> str | None:
-        return None
+        return self.extensions_registry
 
     def windows_force_list_registry_key(self) -> str | None:
-        return None
+        return self.force_list_registry
 
     def linux_managed_policy_dir(self) -> Path | None:
-        return None
+        return Path(self.managed_policy_dir) if self.managed_policy_dir else None
 
     def macos_policy_domain(self) -> str | None:
-        return None
-
-    @property
-    def windows_executable_name(self) -> str | None:
-        return None
+        return self.policy_domain
 
     def executable(self) -> Path | None:
         if sys.platform != "win32":
@@ -122,16 +111,13 @@ class BrowserBase(ABC):
         root = self.profile_root()
         if not root:
             return None
-        exe = root.parent / "Application" / exe_name
-        return exe if exe.exists() else None
-
-    @property
-    def linux_binary_names(self) -> list[str]:
-        return []
-
-    @property
-    def macos_app_bundle(self) -> str | None:
-        return None
+        candidates = [root.parent / "Application" / exe_name]
+        for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)"):
+            if directory := os.environ.get(variable):
+                candidates.append(
+                    Path(directory).joinpath(*self.windows_profile[:-1]) / "Application" / exe_name
+                )
+        return next((path for path in candidates if path.is_file()), None)
 
     def launch_command(self) -> list[str] | None:
         if sys.platform == "win32":

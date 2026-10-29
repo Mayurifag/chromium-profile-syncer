@@ -3,17 +3,15 @@ from __future__ import annotations
 import json
 import os
 import platform
-import plistlib
 import sqlite3
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from src.rclone import find_rclone
-from src.sync.extensions import _parse_version, install_external_extensions, sync_extensions
+from src.sync.extension_install import install_external_extensions
+from src.sync.extensions import _best_version_dir, _parse_version
 from src.sync.leveldb import copy_atomic, sync_dir
 from src.sync.shortcuts import (
     extract_search_shortcuts,
@@ -22,6 +20,12 @@ from src.sync.shortcuts import (
 )
 from src.sync.sync_dir import SYNC_DIR_NAME
 from src.sync_engine import NEVER_SYNC, SyncEngine
+
+
+@pytest.fixture(autouse=True)
+def isolated_extension_observations(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.config.CONFIG_PATH", tmp_path / "config.json")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -120,7 +124,10 @@ def test_copy_leveldb_atomic_failure_dst_untouched(tmp_path: Path) -> None:
     dst = tmp_path / "dst_db"
     dst.mkdir()
     (dst / "original.txt").write_text("original")
-    with patch("shutil.copytree", side_effect=OSError("disk full")):
+    with (
+        patch("shutil.copytree", side_effect=OSError("disk full")),
+        pytest.raises(OSError, match="disk full"),
+    ):
         copy_atomic(src, dst)
 
     # dst must be untouched
@@ -128,7 +135,7 @@ def test_copy_leveldb_atomic_failure_dst_untouched(tmp_path: Path) -> None:
     assert not (dst / "file.txt").exists()
 
 
-def test_copy_leveldb_atomic_tmp_cleaned_before_retry(tmp_path: Path) -> None:
+def test_copy_leveldb_does_not_remove_unrelated_temp_directory(tmp_path: Path) -> None:
     src = tmp_path / "src_db"
     src.mkdir()
     (src / "a.txt").write_text("a")
@@ -142,7 +149,7 @@ def test_copy_leveldb_atomic_tmp_cleaned_before_retry(tmp_path: Path) -> None:
 
     assert dst.exists()
     assert (dst / "a.txt").read_text() == "a"
-    assert not tmp_dir.exists()
+    assert (tmp_dir / "stale.txt").read_text() == "stale"
 
 
 # ---------------------------------------------------------------------------
@@ -307,74 +314,12 @@ def _make_ext_version_dir(
     return ver_dir
 
 
-def test_sync_extensions_profile_version_wins(tmp_path: Path) -> None:
-    profile = tmp_path / "profile"
-    sync = tmp_path / "sync"
-    _make_ext_version_dir(profile, "abc123", "1.5.0", "1.5.0")
-    _make_ext_version_dir(sync, "abc123", "1.0.0", "1.0.0")
-    sync_extensions(profile, sync)
-
-    # sync should now have 1.5.0
-    assert (sync / "Extensions" / "abc123" / "1.5.0").exists()
-
-
-def test_sync_extensions_sync_version_wins(tmp_path: Path) -> None:
-    profile = tmp_path / "profile"
-    sync = tmp_path / "sync"
-    _make_ext_version_dir(profile, "abc123", "1.0.0", "1.0.0")
-    _make_ext_version_dir(sync, "abc123", "2.0.0", "2.0.0")
-    sync_extensions(profile, sync)
-
-    # profile should now have 2.0.0
-    assert (profile / "Extensions" / "abc123" / "2.0.0").exists()
-
-
-def test_sync_extensions_equal_versions_no_copy(tmp_path: Path) -> None:
-    profile = tmp_path / "profile"
-    sync = tmp_path / "sync"
-    _make_ext_version_dir(profile, "abc123", "1.0.0", "1.0.0")
-    _make_ext_version_dir(sync, "abc123", "1.0.0", "1.0.0")
-    # Should not raise and should result in no additional dirs created
-    sync_extensions(profile, sync)
-
-    profile_subdirs = list((profile / "Extensions" / "abc123").iterdir())
-    sync_subdirs = list((sync / "Extensions" / "abc123").iterdir())
-    assert len(profile_subdirs) == 1
-    assert len(sync_subdirs) == 1
-
-
-def test_sync_extensions_missing_manifest_fallback_to_dirname(tmp_path: Path) -> None:
-    profile = tmp_path / "profile"
-    sync = tmp_path / "sync"
-    # No manifest.json — version parsed from dir name
-    _make_ext_version_dir(profile, "extxyz", "2.0.0")  # no manifest
-    _make_ext_version_dir(sync, "extxyz", "1.0.0")  # no manifest
-    sync_extensions(profile, sync)
-
-    # profile 2.0.0 > sync 1.0.0 → copied to sync
-    assert (sync / "Extensions" / "extxyz" / "2.0.0").exists()
-
-
-def test_sync_extensions_version_dir_with_0_suffix(tmp_path: Path) -> None:
-    profile = tmp_path / "profile"
-    sync = tmp_path / "sync"
-    # Chromium _0 suffix stripped
-    _make_ext_version_dir(profile, "extabc", "1.5.0_0")  # effectively 1.5.0
-    _make_ext_version_dir(sync, "extabc", "1.4.0_0")  # effectively 1.4.0
-    sync_extensions(profile, sync)
-
-    # profile 1.5.0 > sync 1.4.0 → sync gets 1.5.0_0
-    assert (sync / "Extensions" / "extabc" / "1.5.0_0").exists()
-
-
-def test_sync_extensions_only_in_sync_copies_to_profile(tmp_path: Path) -> None:
-    profile = tmp_path / "profile"
-    sync = tmp_path / "sync"
-    # Extension only in sync — should be copied to profile
-    _make_ext_version_dir(sync, "newext", "3.0.0", "3.0.0")
-    sync_extensions(profile, sync)
-
-    assert (profile / "Extensions" / "newext" / "3.0.0").exists()
+def test_best_extension_version_uses_manifest_and_directory_fallback(tmp_path: Path) -> None:
+    _make_ext_version_dir(tmp_path, "ext", "1.0.0_0")
+    newest = _make_ext_version_dir(tmp_path, "ext", "2.0.0_0", "3.0.0")
+    _make_ext_version_dir(tmp_path, "ext", "2.5.0_0")
+    assert _best_version_dir(tmp_path / "Extensions" / "ext") == newest
+    assert _best_version_dir(tmp_path / "missing") is None
 
 
 # ---------------------------------------------------------------------------
@@ -583,10 +528,10 @@ def test_sync_browser_profile_prunes_orphan_extension_data(tmp_path: Path) -> No
         sync_profile / "IndexedDB" / f"chrome-extension_{orphan}_0.indexeddb.leveldb"
     ).exists()
     saved = json.loads((sync_profile / "preferences.json").read_text())
-    assert saved["extensions"]["pinned_extensions"] == [valid]
+    assert saved["extensions"]["pinned_extensions"] == [valid, orphan]
 
 
-def test_sync_browser_profile_does_not_overwrite_pins_with_empty_list(tmp_path: Path) -> None:
+def test_sync_browser_profile_respects_unpinning_every_extension(tmp_path: Path) -> None:
     profile = tmp_path / "profile"
     sync_profile = tmp_path / "sync_profile"
     existing = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -603,7 +548,7 @@ def test_sync_browser_profile_does_not_overwrite_pins_with_empty_list(tmp_path: 
     engine.sync_browser_profile(profile, sync_profile, direction="push")
 
     saved = json.loads((sync_profile / "preferences.json").read_text())
-    assert saved["extensions"]["pinned_extensions"] == [existing]
+    assert saved["extensions"]["pinned_extensions"] == []
 
 
 def test_sync_browser_profile_empty_profile_dir(tmp_path: Path) -> None:
@@ -789,18 +734,18 @@ def test_install_external_extensions_writes_stubs(tmp_path: Path) -> None:
     ext_dir = tmp_path / "External Extensions"
 
     (sync_profile / "webstore_extensions.json").write_text(
-        json.dumps(["aaabbbccc", "dddeeefff"]), encoding="utf-8"
+        json.dumps(["a" * 32, "b" * 32]), encoding="utf-8"
     )
 
     browser = _make_browser()
     browser.external_extensions_dir.return_value = ext_dir
-    with patch("src.sync.extensions.platform.system", return_value="Linux"):
+    with patch("src.sync.extension_install.platform.system", return_value="Linux"):
         install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
 
-    assert (ext_dir / "aaabbbccc.json").exists()
-    assert (ext_dir / "dddeeefff.json").exists()
+    assert (ext_dir / f"{'a' * 32}.json").exists()
+    assert (ext_dir / f"{'b' * 32}.json").exists()
 
-    data = json.loads((ext_dir / "aaabbbccc.json").read_text())
+    data = json.loads((ext_dir / f"{'a' * 32}.json").read_text())
     assert data == {"external_update_url": "https://clients2.google.com/service/update2/crx"}
 
 
@@ -809,20 +754,18 @@ def test_install_external_extensions_idempotent(tmp_path: Path) -> None:
     sync_profile.mkdir(parents=True)
     ext_dir = tmp_path / "External Extensions"
 
-    (sync_profile / "webstore_extensions.json").write_text(
-        json.dumps(["aaabbbccc"]), encoding="utf-8"
-    )
+    (sync_profile / "webstore_extensions.json").write_text(json.dumps(["a" * 32]), encoding="utf-8")
 
     browser = _make_browser()
     browser.external_extensions_dir.return_value = ext_dir
-    with patch("src.sync.extensions.platform.system", return_value="Linux"):
+    with patch("src.sync.extension_install.platform.system", return_value="Linux"):
         install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
         # Write custom content to simulate an existing stub
-        (ext_dir / "aaabbbccc.json").write_text('{"custom": true}', encoding="utf-8")
+        (ext_dir / f"{'a' * 32}.json").write_text('{"custom": true}', encoding="utf-8")
         install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
 
     # Must not overwrite existing stub
-    assert json.loads((ext_dir / "aaabbbccc.json").read_text()) == {"custom": True}
+    assert json.loads((ext_dir / f"{'a' * 32}.json").read_text()) == {"custom": True}
 
 
 def test_install_external_extensions_no_extensions_dir(tmp_path: Path) -> None:
@@ -833,7 +776,7 @@ def test_install_external_extensions_no_extensions_dir(tmp_path: Path) -> None:
     browser = _make_browser()
     browser.external_extensions_dir.return_value = ext_dir
     # Should not raise when no manifest exists; ext_dir must not be created
-    with patch("src.sync.extensions.platform.system", return_value="Linux"):
+    with patch("src.sync.extension_install.platform.system", return_value="Linux"):
         install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
     assert not ext_dir.exists()
 
@@ -843,74 +786,66 @@ def test_install_external_extensions_macos_writes_stubs(tmp_path: Path) -> None:
     sync_profile.mkdir(parents=True)
 
     (sync_profile / "webstore_extensions.json").write_text(
-        json.dumps(["aaabbbccc", "dddeeefff"]), encoding="utf-8"
+        json.dumps(["a" * 32, "b" * 32]), encoding="utf-8"
     )
 
     browser = _make_browser()
     ext_dir = tmp_path / "External Extensions"
     browser.external_extensions_dir.return_value = ext_dir
 
-    with patch("src.sync.extensions.platform.system", return_value="Darwin"):
+    with patch("src.sync.extension_install.platform.system", return_value="Darwin"):
         install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
 
-    assert (ext_dir / "aaabbbccc.json").exists()
-    assert (ext_dir / "dddeeefff.json").exists()
+    assert (ext_dir / f"{'a' * 32}.json").exists()
+    assert (ext_dir / f"{'b' * 32}.json").exists()
 
 
-def test_install_external_extensions_macos_opens_policy_profile(tmp_path: Path) -> None:
+def test_install_external_extensions_macos_releases_old_policy(tmp_path: Path) -> None:
     sync_profile = tmp_path / "sync_profile"
     sync_profile.mkdir(parents=True)
     ext_dir = tmp_path / "External Extensions"
     _write_file(ext_dir / "stale.json", "{}")
 
     (sync_profile / "webstore_extensions.json").write_text(
-        json.dumps(["aaabbbccc", "dddeeefff"]), encoding="utf-8"
+        json.dumps(["a" * 32, "b" * 32]), encoding="utf-8"
     )
 
     calls = []
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
-        return MagicMock(returncode=1, stdout=b"")
+        return MagicMock(
+            returncode=0,
+            stdout="com.chromium-profile-syncer.helium.extension-forcelist",
+        )
 
     browser = _make_browser(name="Helium")
     browser.external_extensions_dir.return_value = ext_dir
     browser.macos_policy_domain.return_value = "net.imput.helium"
 
     with (
-        patch("src.sync.extensions.platform.system", return_value="Darwin"),
-        patch("src.sync.extensions.subprocess.run", side_effect=fake_run),
+        patch("src.sync.extension_install.platform.system", return_value="Darwin"),
+        patch("src.sync.extension_install.subprocess.run", side_effect=fake_run),
         patch("src.config.CONFIG_DIR", tmp_path / "config"),
     ):
         install_external_extensions(sync_profile, browser, ungoogled_only_ext_ids=[])
 
-    profile_path = tmp_path / "config" / "profiles" / "helium-extensions.mobileconfig"
-    profile = plistlib.loads(profile_path.read_bytes())
-    settings = profile["PayloadContent"][0]["PayloadContent"]["net.imput.helium"]["Forced"][0][
-        "mcx_preference_settings"
-    ]
-    assert settings == {"ExtensionInstallForcelist": ["aaabbbccc", "dddeeefff"]}
     assert [
         "profiles",
         "remove",
         "-identifier",
-        "com.chromium-profile-syncer.helium.extensions",
+        "com.chromium-profile-syncer.helium.extension-forcelist",
     ] in calls
-    assert [
-        "profiles",
-        "remove",
-        "-identifier",
-        "com.chromium-profile-syncer.helium.external-extensions",
-    ] in calls
-    assert ["open", str(profile_path)] in calls
-    assert not ext_dir.exists() or not list(ext_dir.iterdir())
+    assert not any(command[0] == "open" for command in calls)
+    assert (ext_dir / "stale.json").exists()
+    assert (ext_dir / f"{'a' * 32}.json").exists()
 
 
 def test_sync_all_registers_external_extensions(tmp_path: Path) -> None:
     profile = tmp_path / "profiles" / "Default"
     ext_dir = tmp_path / "Ext"
     # Create a Web Store extension (will be registered but not synced)
-    _make_ext_version_dir(profile, "testext", "1.0.0", "1.0.0", webstore=True)
+    _make_ext_version_dir(profile, "a" * 32, "1.0.0", "1.0.0", webstore=True)
     _write_file(profile / "Preferences", "{}", mtime=1000.0)
 
     browser = _make_browser(name="TB", installed=True, running=False, profiles=[profile])
@@ -924,11 +859,11 @@ def test_sync_all_registers_external_extensions(tmp_path: Path) -> None:
         patch("src.config.get_enabled_browsers", return_value={"TB": True}),
         patch("src.config.get_enabled_profiles", return_value={"TB": ["Default"]}),
         patch("src.config.get_profile_directions", return_value={}),
-        patch("src.sync.extensions.platform.system", return_value="Linux"),
+        patch("src.sync.extension_install.platform.system", return_value="Linux"),
     ):
         engine.sync_all()
 
-    assert (ext_dir / "testext.json").exists()
+    assert (ext_dir / f"{'a' * 32}.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -942,7 +877,8 @@ def test_never_sync_files_excluded(tmp_path: Path) -> None:
     profile.mkdir()
 
     for name in NEVER_SYNC:
-        _write_file(profile / name, "sensitive", mtime=9999.0)
+        content = '{"sensitive": true}' if name == "Secure Preferences" else "sensitive"
+        _write_file(profile / name, content, mtime=9999.0)
     _write_file(profile / "Bookmarks", "safe", mtime=9999.0)
     engine = _make_engine(tmp_path)
     engine.sync_browser_profile(profile, sync_profile)
@@ -1082,6 +1018,7 @@ def test_restore_only_deletes_items_present_in_backup(tmp_path: Path) -> None:
     # Items NOT in backup: untouched
     assert (profile / "Extensions" / "ext123" / "1.0").exists()
     assert (profile / "Other File.txt").read_text() == "keep-me"
+    assert not (profile / "webstore_extensions.json").exists()
 
 
 def test_restore_preserves_local_extension_settings_in_preferences(tmp_path: Path) -> None:
@@ -1112,8 +1049,7 @@ def test_restore_preserves_local_extension_settings_in_preferences(tmp_path: Pat
     )
 
     engine = _make_engine(tmp_path)
-    with patch("src.sync_engine._rclone.run"):
-        engine.restore_profile_from_backup(profile, sync_profile, {"extensions": True})
+    engine.restore_profile_from_backup(profile, sync_profile, {"extensions": True})
 
     restored = json.loads((profile / "Preferences").read_bytes())
     assert restored["extensions"]["settings"] == extension_settings
@@ -1455,8 +1391,7 @@ def test_sync_browser_profile_both_pulls_when_remote_ts_newer(tmp_path: Path) ->
     """In 'both', remote JSON with higher last_modified wins over local DB."""
     sf = tmp_path / "sync"
     (sf / SYNC_DIR_NAME).mkdir(parents=True)
-    sync_profile = tmp_path / "sync_profile"
-    sync_profile.mkdir()
+    sync_profile = sf / SYNC_DIR_NAME
     existing = [
         {
             "keyword": "gru",
@@ -1505,8 +1440,7 @@ def test_sync_browser_profile_both_pushes_when_local_ts_newer(tmp_path: Path) ->
     """In 'both', local DB with higher last_modified overwrites remote JSON."""
     sf = tmp_path / "sync"
     (sf / SYNC_DIR_NAME).mkdir(parents=True)
-    sync_profile = tmp_path / "sync_profile"
-    sync_profile.mkdir()
+    sync_profile = sf / SYNC_DIR_NAME
     shortcuts_json = sf / SYNC_DIR_NAME / "search_shortcuts.json"
     shortcuts_json.write_text(
         json.dumps(
@@ -1559,8 +1493,7 @@ def test_sync_browser_profile_both_skips_when_content_equal(tmp_path: Path) -> N
     """Identical JSON and DB content → no write."""
     sf = tmp_path / "sync"
     (sf / SYNC_DIR_NAME).mkdir(parents=True)
-    sync_profile = tmp_path / "sync_profile"
-    sync_profile.mkdir()
+    sync_profile = sf / SYNC_DIR_NAME
 
     profile = tmp_path / "profile"
     _make_web_data(
@@ -1592,8 +1525,7 @@ def test_sync_browser_profile_push_direction_does_extract_shortcuts(tmp_path: Pa
     """In 'push' direction the local browser's shortcuts overwrite the JSON."""
     sf = tmp_path / "sync"
     (sf / SYNC_DIR_NAME).mkdir(parents=True)
-    sync_profile = tmp_path / "sync_profile"
-    sync_profile.mkdir()
+    sync_profile = sf / SYNC_DIR_NAME
     shortcuts_json = sf / SYNC_DIR_NAME / "search_shortcuts.json"
     shortcuts_json.write_text(
         json.dumps(
@@ -1950,61 +1882,3 @@ def test_restore_search_shortcuts_choice_screen_timestamp_is_string(tmp_path: Pa
     assert dsp["choice_screen_completion_timestamp"].isdigit()
     assert dsp["choice_screen_completion_program"] == 3
     assert dsp["choice_screen_completion_version"] == "146.0.0.0"
-
-
-# ---------------------------------------------------------------------------
-# find_rclone
-# ---------------------------------------------------------------------------
-
-
-def test_find_rclone_from_path() -> None:
-    find_rclone.cache_clear()
-    try:
-        with patch("shutil.which", return_value="/usr/bin/rclone"):
-            result = find_rclone()
-        assert result == Path("/usr/bin/rclone")
-    finally:
-        find_rclone.cache_clear()
-
-
-def test_find_rclone_fallback() -> None:
-    find_rclone.cache_clear()
-    fake_path = Path("/fake/rclone")
-    try:
-        with (
-            patch("shutil.which", return_value=None),
-            patch("src.rclone._FALLBACK_PATHS", [fake_path]),
-            patch.object(Path, "exists", lambda self: self == fake_path),
-        ):
-            result = find_rclone()
-        assert result == fake_path
-    finally:
-        find_rclone.cache_clear()
-
-
-@pytest.mark.skipif(sys.platform != "win32", reason="Tests Windows-specific fallback paths")
-def test_find_rclone_fallback_windows() -> None:
-    find_rclone.cache_clear()
-    expected = "C:/Program Files/rclone/rclone.exe"
-    try:
-        with (
-            patch("shutil.which", return_value=None),
-            patch.object(Path, "exists", lambda self: str(self).replace("\\", "/") == expected),
-        ):
-            result = find_rclone()
-        assert result == Path(expected)
-    finally:
-        find_rclone.cache_clear()
-
-
-def test_find_rclone_not_found() -> None:
-    find_rclone.cache_clear()
-    try:
-        with (
-            patch("shutil.which", return_value=None),
-            patch.object(Path, "exists", return_value=False),
-        ):
-            result = find_rclone()
-        assert result is None
-    finally:
-        find_rclone.cache_clear()

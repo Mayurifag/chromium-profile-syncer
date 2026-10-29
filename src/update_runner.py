@@ -6,6 +6,7 @@ from collections.abc import Callable
 from PySide6.QtCore import QThread, Signal
 
 from src import updater
+from src.operations import operation_lock
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,13 @@ class UpdateCheckThread(QThread):
 
     def run(self) -> None:
         try:
+            self._run_update()
+        except OSError as exc:
+            logger.warning("Update deferred: %s", exc)
+            self.completed.emit(False)
+
+    def _run_update(self) -> None:
+        try:
             result = updater.check_for_update()
         except updater.UpdateCheckError as exc:
             logger.warning("update: %s", exc)
@@ -50,7 +58,8 @@ class UpdateCheckThread(QThread):
             return
         logger.info("update: installing %s", target_sha[:8])
         try:
-            updater.install_update(asset_url, sha_url)
+            with operation_lock():
+                updater.install_update(asset_url, sha_url)
         except Exception as exc:
             logger.error("update: install failed: %s", exc)
             if not self._silent:

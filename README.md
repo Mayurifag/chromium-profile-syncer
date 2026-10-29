@@ -1,158 +1,145 @@
 # chromium-profile-syncer
 
-Highly vibecoded! Unstable! Proof of concept! Dont use (yet)!
+Desktop tray app for syncing Chromium profiles through a shared folder, including cloud folders such as OpenCloud.
+Supports Windows, macOS and Linux, with browser definitions for Chrome, Helium, Thorium and Yandex.
 
-Cross-platform (Windows/MacOS/Linux) Chromium-based browsers bidirectional
-profiles sync system to use with cloud folders (I use selfhosted OpenCloud).
+Browsers must be fully closed before syncing. The app watches for browser closure, shared-folder changes and its
+periodic sync interval. Keep an independent backup before trying a new build: this software writes browser profile data.
 
-It will keep extensions (with their settings!) and some other stuff to be 
-identical across my systems. Google Sync makes a little part of that - also not 
-open-source and not available on Helium/Ungoogled Chromium.
+## Extension management
 
-## Supported Browsers
+Manage extension removal and disabling in the browser normally. The syncer no longer creates forced-install policies or
+writes protected extension preferences.
 
-- **Thorium**
-- **Helium**
-- **Chrome**
-- **Yandex**
+- **Active:** shared install list and backed-up settings.
+- **Saved:** removed/archived extension, with its last backed-up settings retained on disk. It is excluded from
+  installation and settings restoration.
+- **Archive:** move an extension to Saved across all synced browsers. Existing copies in other browsers cannot silently
+  reactivate the shared record.
+- **Restore:** return it to Active and open its Web Store page after saving. Install/confirm it in the browser, then
+  close the browser to restore settings.
 
-The architecture supports adding more Chromium-derived browsers with minimal
-changes (one file per browser) onto `src\browsers`.
+The Extensions dialog supports searching, Archive/Restore, direct Web Store links and saved-settings sizes. Cancel
+discards pending changes. Opening the dialog does not delete or prune anything, scrape Web Store names or generate HTML
+files.
 
-## What Gets Synced
+### Removal and disabling
 
-| Data                             | Synced                                   |
-| -------------------------------- | ---------------------------------------- |
-| Bookmarks                        | Yes                                      |
-| Extensions                       | IDs only / unpacked ones sync full code  |
-| Extension settings/storage/cache | Yes (not 100% sure works for everything) |
-| Local Storage                    | Yes                                      |
-| Preferences                      | Yes — part of unencrypted ones           |
-| Custom Dictionary                | Yes                                      |
-| Search Shortcuts                 | Yes — user-created engines only          |
-| Themes                           | Yes — only active one                    |
-| Flags                            | Yes — changed ones                       |
+After a successful sync, the app remembers which extensions were installed in each local profile. If an extension
+disappears on a later sync, it becomes Saved globally. A new empty profile does not count as a mass removal. Disabled
+extensions remain installed and are not archived; their browser-local enabled state is left alone.
 
-### Search Shortcuts
+The saved settings are the **last successful backup**, not data recovered after uninstall. If an extension was never
+backed up, uninstalling it may lose its settings. Saved entries are logical archive records; their data stays in the
+shared backup rather than being deleted or copied back into profiles.
 
-User-created search engines (custom shortcuts in the omnibox) are extracted from
-the browser's `Web Data` SQLite database and stored as `search_shortcuts.json`
-in the sync folder root. This file is shared across all browsers syncing to the
-same folder.
+### Installation limits
 
-Built-in engines (Google, Bing, etc.) are INTENTIONALLY always deleted. User
-has to replace the default one with its own one.
+The app registers active Web Store IDs using removable external-extension entries: per-user registry keys on Windows and
+JSON stubs on macOS/Linux. Support varies by browser; Windows/macOS may require confirmation, and some browsers require
+manual installation. Reinstalling an extension previously rejected/uninstalled by the user may also require its Web
+Store page.
 
-### What Does NOT Sync
+Archiving removes matching external registration. Browsers can then remove externally installed copies on restart.
+**Manually installed copies may still need removal in each browser.** Desktop-only mode cannot safely force universal
+uninstall or change protected enable/disable state. Chrome and Thorium share Windows registry paths, so their external
+install lists are not isolated.
 
-Passwords, cookies, payment data, and browsing history are
-**intentionally excluded**. These are protected by OS-level encryption (e.g.
-macOS Keychain, Windows DPAPI) that ties the data to a specific machine.
+### Upgrading from forced installation
 
-Sessions, autofill data/profiles - no need, annoying for my use cases.
+On the first extension-registration pass for each browser, the app releases its legacy policies. Windows cleanup removes
+only bare force-list values matching known saved/active IDs; it does not wipe shared registry keys. Linux cleanup
+removes only `<browser>-syncer.json` and requires `pkexec` authorization. macOS cleanup targets only the syncer's own
+configuration-profile identifiers and may require manual removal in System Settings. Failures are reported and retried;
+successful cleanup is recorded locally and is not repeated on every sync.
 
-Favicons - not worth syncing.
+Unrelated or URL-bearing policies are left alone. If an extension is still managed, inspect the browser's policy page
+and remove the responsible policy through its owner. Fully restart the browser after migration.
 
-### Trash Files Excluded
+## Synced data
 
-Files automatically excluded from sync (waste space, no value):
-- `._*` — macOS metadata files on exFAT/FAT32 drives
+- Web Store extension IDs/names and extension settings (Local/Sync Extension Settings and extension IndexedDB, with
+  databases copied unchanged rather than parsed and rewritten to strip caches). Backups may be larger, but no database
+  records are deliberately discarded.
+- Bookmarks, custom dictionary, local storage and selected unencrypted preferences.
+- User-created search shortcuts, omnibox shortcuts and typed URLs.
+- Browser flags and theme preferences.
 
-## Installation
+Passwords, cookies, payment/autofill data, sessions, full browsing history and favicons are excluded. Extension
+executable files are not automatically restored; Web Store extensions are fetched by the browser.
 
-### Build from Source
+Search shortcuts are shared between browsers. Restoration intentionally replaces built-in engines with the saved custom
+engines. Windows requires valid encrypted URL hashes; see [search shortcut implementation](docs/search-shortcuts.md).
 
-Requirements: **Python 3.12+**, **[uv](https://docs.astral.sh/uv/)**, **rclone**
+Restoration copies selected data into staging before replacing live files and databases. App metadata, saved-library
+records and archived extension data are not copied into browser profiles. Disabled data types are not restored.
 
-~~~sh
+## Build and checks
+
+Requirements: Python 3.12+ and [uv](https://docs.astral.sh/uv/). No rclone is needed.
+
+```sh
+make ci
 make install
-~~~
-
-**What `install` does:**
-1. Builds the executable/bundle
-2. Kills any running instance
-3. Installs to platform-specific location
-4. Launches the app
-5. **(macOS only)** Removes Gatekeeper quarantine
-
-### Key Design Decisions
-
-#### Search shortcuts
-
-Extracts user-created search engines from `Web Data` SQLite
-(`prepopulate_id = 0` only). On Windows, computes mandatory `url_hash` BLOB
-(AES-256-GCM over SHA-256 of a Chromium Pickle); rows without a valid hash are
-silently dropped at startup. See
-[docs/search-shortcuts.md](./docs/search-shortcuts.md) for full implementation
-details.
-
-#### Extensions installation system
-
-It's impossible to have identically working extensions installing system across
-all browsers and it also may conflict. For example, Thorium and Chrome use the
-same registry paths to look for extensions, so if you start managing Thorium,
-extensions will also install to all used profiles of Chrome.
-
-For Windows extensions installed via registry keys (per-extension prefs key
-plus `ExtensionInstallForcelist` policy key, both under `HKCU`).
-
-For Linux: force-list policy files written to
-`/etc/chromium/policies/managed/<browser>-syncer.json` via `pkexec` for
-browsers that support it (e.g. Helium); falls back to per-user
-`External Extensions/<id>.json` stubs otherwise. **Force-list entries are
-bare IDs (no `;<url>` suffix)** — this is the only reliable path on
-ungoogled-chromium / Helium, where the bundled `extstore-fixups` extension
-proxies Web Store fetches when no explicit update URL is given.
-
-For macOS: per-user `External Extensions/<id>.json` stubs only.
-
-Some files are intentionally excluded being useless and taking a lot of space.
-For example, uBlock Origin rules compilated file has no need to be synced, it 
-might be generated on browser launch.
-
-#### Ungoogled browsers and extension exclusions
-
-Some browsers are marked as **ungoogled** in their definition (currently: Helium).
-Ungoogled browsers strip out Google-specific built-in features such as translation,
-so they need extensions to compensate (e.g. a translation extension like Linguist).
-Installing those same extensions in a regular browser (Chrome, Thorium) that already
-provides the feature natively would be redundant.
-
-To mark an extension as ungoogled-only, add its Chrome Web Store extension ID to the
-`ungoogled_only_extensions` list in the app config
-(`%APPDATA%\chromium-profile-syncer\config.json` on Windows,
-`~/.config/chromium-profile-syncer/config.json` elsewhere):
-
-~~~json
-{
-  "ungoogled_only_extensions": [
-    "gbefmodhlophhakmoecijeppjblibmie"
-  ]
-}
-~~~
-
-During restore and extension registration, these IDs are silently skipped for
-non-ungoogled browsers. The backup archive always contains the extension settings
-(they are sourced from whichever ungoogled browser is being synced), so the data
-is preserved — it just is not applied to browsers that don't need it.
-
-# Nice flags to set enabled/always in my opinion
-
-```conf
-#middle-click-autoscroll
-#force-dark-mode
-#enable-force-dark
-#set-ipv6-probe-false
-#disable-search-engine-collection
-#force-punycode-hostnames
-#scroll-tabs
-#popups-to-tabs
-#disable-link-drag - well, check whats this owo
-#hide-fullscreen-exit-ui
-#disable-top-sites
-
 ```
 
-# TODO
+`make install` builds, stops the existing app, installs it and launches it. Install locations are
+`%LOCALAPPDATA%\Programs\chromium-profile-syncer` on Windows, `~/Applications` on macOS and `~/.local/bin` on Linux.
 
-- search shortcut gru by default - is that possible to do automatically?
+App settings live in `%APPDATA%\chromium-profile-syncer\config.json` on Windows and
+`$XDG_CONFIG_HOME/chromium-profile-syncer/config.json` (default `~/.config/chromium-profile-syncer/config.json`)
+elsewhere. Shared data lives in `current/` inside the chosen sync folder. Local extension observations stay in app
+settings, not the shared folder.
+
+GUI and CLI share local operation locks. Paused profiles are excluded from automatic sync; explicit Sync and Restore
+actions can still run. Extension Restore reapplies only the selected extensions' settings after installation. Browser
+updating, including Helium/winget integration, is not part of this app.
+
+Shared snapshots are staged, checked for conflicting changes and published with checksums. Incomplete cloud downloads
+are rejected rather than used for restoration. Desktop archive restoration validates and stages the archive before
+replacing the existing backup. These protections are not a distributed lock or a replacement for independent backups.
+
+### CLI
+
+The packaged executable and `uv run python -m src.main` accept the same subcommands:
+
+```sh
+uv run python -m src.main browsers
+uv run python -m src.main sync --browser Chrome --profile Default
+uv run python -m src.main restore --browser Chrome --profile Default
+uv run python -m src.main config show
+```
+
+`remove-profile --browser Chrome --profile Default --yes` deletes only that local profile, not the shared backup. The
+old standalone CLI and destructive browser E2E scripts have been removed. `make e2e` runs disposable-fixture lifecycle
+tests without changing installed browsers or real app settings.
+
+Optional extension filters in app settings:
+
+- `ungoogled_only_extensions`: install only in ungoogled browsers such as Helium.
+- `windows_only_extensions`: install only on Windows.
+- `excluded_ext_settings_ids`: exclude settings for selected extensions.
+
+## Network and privacy
+
+Extension names come from local manifests; the Extensions dialog makes no background Web Store requests. Web Store links
+open only when requested or when saving a Restore action. Browser-managed installation/update traffic still occurs. The
+packaged app checks GitHub releases for its own updates. It does not check or update browser versions. Local logs and
+sync progress remain enabled.
+
+## TODO / future work
+
+- Optional companion browser extension for live change tracking and supported enable/disable/uninstall actions. Keep
+  desktop-only mode available.
+- Companion-assisted cross-browser removal of manually installed extensions, with browser confirmation where required.
+- Explicit target-browser/profile selection for restoring saved extensions.
+- Test removable external installation and legacy-policy migration end to end on every supported browser and operating
+  system.
+- Consider a verified extension-package cache for faster/offline reinstalls, without bypassing signatures, permissions
+  or browser installation controls.
+- Recovery/version history for simultaneous writes from multiple machines and cloud-provider conflict copies; current
+  snapshot conflict detection is not a distributed lock.
+- Settings snapshots/version history and an explicit permanent-purge action for Saved extensions. Archive must remain
+  non-destructive by default.
+- Revisit search-engine default reconciliation across Chromium forks; document whether the `gru` shortcut can be
+  selected automatically in each browser.

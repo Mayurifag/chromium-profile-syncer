@@ -5,17 +5,17 @@ import tempfile
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal
-from PySide6.QtWidgets import QDialog, QLabel, QProgressBar, QVBoxLayout
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtWidgets import QDialog, QLabel, QMessageBox, QProgressBar, QVBoxLayout
 
-from src.sync import write_text_if_changed
+from src.operations import operation_lock
+from src.sync.extensions import record_observation
 from src.sync.sync_dir import SYNC_DIR_NAME, merge_to_sync_dir
 from src.sync_engine import SyncEngine
 
 
 class _InitialUploadWorker(QThread):
     step = Signal(str)
-    done = Signal()
 
     def __init__(
         self, src: Path, folder: Path, ext_id_aliases: dict[str, str] | None = None
@@ -24,23 +24,30 @@ class _InitialUploadWorker(QThread):
         self._src = src
         self._folder = folder
         self._ext_id_aliases = ext_id_aliases
+        self.failure: str | None = None
 
     def run(self) -> None:
         engine = SyncEngine(self._folder)
         work_dir = Path(tempfile.mkdtemp(prefix="cps-upload-"))
         try:
-            engine.sync_browser_profile(
-                self._src, work_dir, direction="push",
-                on_progress=self.step.emit,
-                ext_id_aliases=self._ext_id_aliases,
-            )
-            self.step.emit("Syncing to folder...")
-            current_dir = self._folder / SYNC_DIR_NAME
-            merge_to_sync_dir(work_dir, current_dir)
-            write_text_if_changed(current_dir / "metadata.json", "{}")
+            with operation_lock():
+                engine.sync_browser_profile(
+                    self._src,
+                    work_dir,
+                    direction="push",
+                    on_progress=self.step.emit,
+                    ext_id_aliases=self._ext_id_aliases,
+                )
+                if self._ext_id_aliases:
+                    engine._translate_ext_aliases(work_dir, self._ext_id_aliases, to_alias=False)
+                self.step.emit("Syncing to folder...")
+                current_dir = self._folder / SYNC_DIR_NAME
+                merge_to_sync_dir(work_dir, current_dir, expected_state={})
+                record_observation(self._src, self._ext_id_aliases)
+        except Exception as exc:
+            self.failure = str(exc)
         finally:
             shutil.rmtree(work_dir)
-        self.done.emit()
 
 
 class InitialUploadDialog(QDialog):
@@ -59,6 +66,7 @@ class InitialUploadDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Uploading Profile")
         self.setMinimumWidth(420)
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.setWindowFlags(self.windowFlags() & ~0x00000008)
 
         layout = QVBoxLayout(self)
@@ -79,8 +87,9 @@ class InitialUploadDialog(QDialog):
         self._start = 0.0
 
         self._worker = _InitialUploadWorker(profile_path, folder, ext_id_aliases)
+        self._worker.setParent(self)
         self._worker.step.connect(self._on_step)
-        self._worker.done.connect(self._on_done)
+        self._worker.finished.connect(self._on_done)
 
     def start(self) -> None:
         self._start = time.monotonic()
@@ -98,6 +107,20 @@ class InitialUploadDialog(QDialog):
         )
 
     def _on_done(self) -> None:
+        if self._worker.failure is not None:
+            self.reject()
+            QMessageBox.critical(self.parentWidget(), "Upload failed", self._worker.failure)
+            return
         elapsed = time.monotonic() - self._start
         self.close()
         self.upload_done.emit(self._browser_name, self._profile_name, self._count, elapsed)
+
+    def reject(self) -> None:
+        if not self._worker.isRunning():
+            super().reject()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        if self._worker.isRunning():
+            event.ignore()
+        else:
+            super().closeEvent(event)

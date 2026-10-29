@@ -1,157 +1,96 @@
 from __future__ import annotations
 
-import atexit
-import importlib.metadata
-import logging
-import os
-import signal
-import socket
-import sys
-from collections.abc import Callable
-from pathlib import Path
+import hashlib
 
-import psutil
+from PySide6.QtCore import QCoreApplication, QLockFile, QObject, Signal, Slot
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-from src.config import CONFIG_DIR
-
-_LOG = logging.getLogger(__name__)
-
-_LOCK_FILE: Path = CONFIG_DIR / "app.lock"
-
-try:
-    _VERSION: str = importlib.metadata.version("chromium-profile-syncer")
-except importlib.metadata.PackageNotFoundError:
-    _VERSION = "dev"
+from src import config
 
 
-def _read_lock() -> tuple[int, str] | None:
-    """Return (pid, version) from the lock file, or None if missing/corrupt."""
-    try:
-        parts = _LOCK_FILE.read_text(encoding="utf-8").strip().split(":", 1)
-        if len(parts) == 2:
-            return int(parts[0]), parts[1]
-    except (FileNotFoundError, ValueError, OSError):
-        pass
-    return None
+def server_name() -> str:
+    identity = str(config.CONFIG_PATH.resolve()).casefold().encode()
+    return "chromium-profile-syncer-" + hashlib.sha256(identity).hexdigest()[:24]
 
 
-def _write_lock() -> None:
-    _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _LOCK_FILE.write_text(f"{os.getpid()}:{_VERSION}", encoding="utf-8")
-    _LOG.debug("Lock written: pid=%d version=%s", os.getpid(), _VERSION)
-
-
-def _remove_lock() -> None:
-    try:
-        _LOCK_FILE.unlink()
-    except FileNotFoundError:
-        pass
-
-
-def _process_running(pid: int) -> bool:
-    try:
-        return psutil.pid_exists(pid) and psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
+def send_command(command: str, timeout: int = 1500) -> bool:
+    _application = QCoreApplication.instance() or QCoreApplication([])
+    socket = QLocalSocket()
+    socket.connectToServer(server_name())
+    if not socket.waitForConnected(timeout):
         return False
+    socket.write((command + "\n").encode("ascii"))
+    if socket.bytesToWrite() and not socket.waitForBytesWritten(timeout):
+        socket.abort()
+        return False
+    socket.disconnectFromServer()
+    return True
 
 
-def _signal_existing(pid: int) -> None:
-    if sys.platform == "win32":
-        _LOG.warning("Cannot signal existing instance on Windows — doing nothing")
-    else:
-        try:
-            os.kill(pid, signal.SIGUSR1)
-        except (ProcessLookupError, PermissionError) as exc:
-            _LOG.warning("Could not signal pid %d: %s", pid, exc)
+class SingleInstance(QObject):
+    show_requested = Signal()
+    quit_requested = Signal()
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        config.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self.lock = QLockFile(str(config.CONFIG_PATH.with_name("gui.lock")))
+        self.lock.setStaleLockTime(0)
+        self.server = QLocalServer(self)
+        self._connections: set[QLocalSocket] = set()
+        self.server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
+        self.server.newConnection.connect(self._accept)
 
-_EXPECTED_NAMES = {"chromium-profile-syncer", "python", "python3"}
-
-
-def _terminate(pid: int) -> None:
-    try:
-        proc = psutil.Process(pid)
-        name = proc.name().lower()
-        if name not in _EXPECTED_NAMES:
-            _LOG.warning("PID %d is %s, not our process — skipping terminate", pid, name)
-            return
-        proc.terminate()
-        try:
-            proc.wait(timeout=3)
-        except psutil.TimeoutExpired:
-            proc.kill()
-    except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
-        _LOG.warning("Could not terminate pid %d: %s", pid, exc)
-
-
-def acquire() -> None:
-    """Enforce single-instance policy before Qt starts.
-
-    - Same version running  → signal it to open settings, then sys.exit(0).
-    - Different version running → terminate old process, then continue.
-    - No running instance  → continue normally.
-
-    Writes a fresh lock file and registers cleanup on process exit.
-    """
-    existing = _read_lock()
-    if existing is not None:
-        pid, version = existing
-        if _process_running(pid):
-            if version == _VERSION:
-                _LOG.info("Same version already running (pid=%d) — raising it", pid)
-                _signal_existing(pid)
-                sys.exit(0)
-            else:
-                _LOG.info(
-                    "Different version running (pid=%d ver=%s) — terminating it", pid, version
+    def acquire(self, *, show_existing: bool = True) -> bool:
+        if not self.lock.tryLock(0):
+            if show_existing and not send_command("show"):
+                raise OSError(
+                    "App is already running but its settings window could not be contacted"
                 )
-                _terminate(pid)
-        else:
-            _LOG.debug("Stale lock (pid=%d) — ignoring", pid)
+            return False
+        if not self.server.listen(server_name()):
+            QLocalServer.removeServer(server_name())
+            if not self.server.listen(server_name()):
+                self.lock.unlock()
+                raise OSError(self.server.errorString())
+        return True
 
-    _write_lock()
-    atexit.register(_remove_lock)
+    @Slot()
+    def _accept(self) -> None:
+        while self.server.hasPendingConnections():
+            socket = self.server.nextPendingConnection()
+            self._connections.add(socket)
+            socket.setReadBufferSize(64)
+            socket.readyRead.connect(self._read_ready)
+            socket.disconnected.connect(self._disconnected)
+            self._read(socket)
 
+    @Slot()
+    def _read_ready(self) -> None:
+        self._read(self.sender())
 
-def setup_signal_handler(open_settings_callback: Callable[[], None]) -> None:
-    """Register SIGUSR1 → open_settings_callback.
+    @Slot()
+    def _disconnected(self) -> None:
+        socket = self.sender()
+        self._connections.discard(socket)
+        socket.deleteLater()
 
-    Uses a self-pipe + QSocketNotifier so the signal is delivered inside Qt's
-    event loop without blocking, avoiding the "signal in non-main thread" issue.
-    Must be called after QApplication is created.
-    """
-    if sys.platform == "win32":
-        return
+    def _read(self, socket: QLocalSocket) -> None:
+        if not socket.canReadLine():
+            return
+        command = bytes(socket.readLine(64)).strip()
+        socket.disconnectFromServer()
+        if command == b"show":
+            self.show_requested.emit()
+        elif command == b"quit":
+            self.quit_requested.emit()
 
-    from PySide6.QtCore import QSocketNotifier
-    from PySide6.QtWidgets import QApplication
-
-    app = QApplication.instance()
-
-    rsock, wsock = socket.socketpair()
-    rsock.setblocking(False)
-    wsock.setblocking(False)
-
-    def _py_handler(signum, frame):  # noqa: ARG001
-        try:
-            wsock.send(b"\x00")
-        except OSError:
-            pass
-
-    signal.signal(signal.SIGUSR1, _py_handler)
-
-    notifier = QSocketNotifier(rsock.fileno(), QSocketNotifier.Type.Read, app)
-
-    def _on_activated():
-        try:
-            rsock.recv(1)
-        except OSError:
-            pass
-        _LOG.info("SIGUSR1 received — opening settings")
-        open_settings_callback()
-
-    notifier.activated.connect(_on_activated)
-
-    # Keep sockets and notifier alive for the lifetime of the app
-    app._si_socks = (rsock, wsock)
-    app._si_notifier = notifier
+    def close(self) -> None:
+        self.server.close()
+        for socket in list(self._connections):
+            socket.readyRead.disconnect(self._read_ready)
+            socket.disconnected.disconnect(self._disconnected)
+            socket.abort()
+            socket.deleteLater()
+        self._connections.clear()
+        self.lock.unlock()

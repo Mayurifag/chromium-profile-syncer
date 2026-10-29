@@ -42,7 +42,9 @@ class _ProfileProgressTracker:
 
 
 class SyncWorker(QThread):
-    finished = Signal(str, bool, list, str)  # ts, is_first_sync, skipped_running, triggered_browser
+    completed = Signal(
+        str, bool, list, str
+    )  # ts, is_first_sync, skipped_running, triggered_browser
     error = Signal(str)
     progress = Signal(str)  # type: ignore[assignment]
     profile_progress = Signal(str, str, str, int, float)  # browser, profile, dir, count, elapsed
@@ -53,12 +55,15 @@ class SyncWorker(QThread):
         only_browser: str | None = None,
         only_profile: str | None = None,
         force_direction: str | None = None,
+        *,
+        automatic: bool = True,
     ) -> None:
         super().__init__()
         self._engine = engine
         self._only_browser = only_browser
         self._only_profile = only_profile
         self._force_direction = force_direction
+        self._automatic = automatic
 
     def run(self) -> None:
         logger.info("SyncWorker: sync started")
@@ -69,12 +74,13 @@ class SyncWorker(QThread):
                 only_profile=self._only_profile,
                 force_direction=self._force_direction,
                 on_progress=tracker,
+                automatic=self._automatic,
             )
             ts = datetime.now(tz=UTC).isoformat()
             is_first_sync = result.get("is_first_sync", False)
             skipped_running = result.get("skipped_running", [])
             logger.info("SyncWorker: sync finished at %s", ts)
-            self.finished.emit(ts, is_first_sync, skipped_running, self._only_browser or "")
+            self.completed.emit(ts, is_first_sync, skipped_running, self._only_browser or "")
         except Exception as exc:
             logger.exception("SyncWorker: sync error")
             self.error.emit(str(exc))

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import os
+import plistlib
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -65,7 +67,7 @@ def _windows(enabled: bool) -> None:
         winreg.KEY_SET_VALUE,
     ) as key:
         if enabled:
-            cmd = " ".join(_exe_args())
+            cmd = subprocess.list2cmdline(_exe_args())
             winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, cmd)
         else:
             try:
@@ -77,28 +79,17 @@ def _windows(enabled: bool) -> None:
 def _macos(enabled: bool) -> None:
     plist_path = Path.home() / "Library" / "LaunchAgents" / f"com.{APP_NAME}.plist"
     if enabled:
-        args = _exe_args()
-        program_args = "\n".join(f"        <string>{a}</string>" for a in args)
-        plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.{APP_NAME}</string>
-    <key>ProgramArguments</key>
-    <array>
-{program_args}
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <false/>
-</dict>
-</plist>
-"""
         plist_path.parent.mkdir(parents=True, exist_ok=True)
-        plist_path.write_text(plist_content, encoding="utf-8")
+        plist_path.write_bytes(
+            plistlib.dumps(
+                {
+                    "Label": f"com.{APP_NAME}",
+                    "ProgramArguments": _exe_args(),
+                    "RunAtLoad": True,
+                    "KeepAlive": False,
+                }
+            )
+        )
     else:
         plist_path.unlink(missing_ok=True)
 
@@ -126,9 +117,13 @@ X-GNOME-Autostart-Delay=10
         desktop_path.parent.mkdir(parents=True, exist_ok=True)
         desktop_path.write_text(desktop_content, encoding="utf-8")
         desktop_path.chmod(
-            stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
-            | stat.S_IRGRP | stat.S_IXGRP
-            | stat.S_IROTH | stat.S_IXOTH
+            stat.S_IRUSR
+            | stat.S_IWUSR
+            | stat.S_IXUSR
+            | stat.S_IRGRP
+            | stat.S_IXGRP
+            | stat.S_IROTH
+            | stat.S_IXOTH
         )
         _LOG.info("Autostart enabled: %s exec=%s", desktop_path, exec_cmd)
     else:

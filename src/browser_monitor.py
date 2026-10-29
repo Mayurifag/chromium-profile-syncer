@@ -26,7 +26,7 @@ class BrowserMonitor(QObject):
         self._timer.setInterval(5000)
         self._timer.timeout.connect(self._poll)
         self._timer.start()
-        QTimer.singleShot(0, self._poll)
+        self._poll()
         logger.debug("BrowserMonitor started for: %s", [b.name for b in browsers])
 
     def is_running(self, browser_name: str) -> bool:

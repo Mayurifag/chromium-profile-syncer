@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from src import config as _config
 from src.browsers import ALL_BROWSERS
+from src.operations import operation_lock
 from src.sync.flags import get_local_flags, load_sync_flags, remove_flags
 
 _LOG = logging.getLogger(__name__)
@@ -161,6 +163,15 @@ class FlagsManagerDialog(QDialog):
             self._table.setRowHidden(row, bool(query and query not in haystack))
 
     def _save(self) -> None:
+        try:
+            with operation_lock():
+                self._save_changes()
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Could not save flags", str(exc))
+            return
+        self.accept()
+
+    def _save_changes(self) -> None:
         to_remove = {f for f, chk in self._remove_checks.items() if chk.isChecked()}
         if to_remove:
             browser_states = [
@@ -175,4 +186,3 @@ class FlagsManagerDialog(QDialog):
             f for f, chk in self._ignore_checks.items() if chk.isChecked() and f not in to_remove
         ]
         _config.set_flags_ignore(ignore)
-        self.accept()

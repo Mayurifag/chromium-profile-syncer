@@ -61,6 +61,28 @@ def test_make_icon_idle(qapp):
     assert not icon.isNull()
 
 
+@pytest.mark.parametrize("failed", [False, True])
+def test_sync_worker_keeps_native_thread_finished_signal(qapp, failed):
+    from PySide6.QtTest import QSignalSpy
+
+    from src.sync_worker import SyncWorker
+
+    engine = MagicMock()
+    engine.sync_all.return_value = {"is_first_sync": False, "skipped_running": []}
+    if failed:
+        engine.sync_all.side_effect = OSError("test failure")
+    worker = SyncWorker(engine)
+    stopped = QSignalSpy(worker.finished)
+    completed = QSignalSpy(worker.completed)
+    errors = QSignalSpy(worker.error)
+    worker.start()
+    assert worker.wait(5000)
+    qapp.processEvents()
+    assert stopped.count() == 1
+    assert completed.count() == (0 if failed else 1)
+    assert errors.count() == (1 if failed else 0)
+
+
 @pytest.mark.parametrize("state", ["idle", "syncing", "waiting", "error"])
 def test_make_icon_all_states(qapp, state):
     from PySide6.QtGui import QIcon
@@ -114,7 +136,7 @@ def test_open_settings_creates_dialog(qapp, tmp_path):
     with patch("src.tray.SettingsDialog", return_value=mock_dialog) as mock_cls:
         tray.open_settings()
 
-    mock_cls.assert_called_once_with(browser_monitor=ANY, winget_manager=ANY, parent=None)
+    mock_cls.assert_called_once_with(browser_monitor=ANY, parent=None)
     mock_dialog.settings_saved.connect.assert_called_once_with(tray._on_settings_saved)
     mock_dialog.exec.assert_called_once()
 
@@ -188,8 +210,10 @@ def test_trigger_sync_warns_on_bad_permissions(qapp, tmp_path):
     mock_config.get_sync_interval.return_value = 30
     tray._config = mock_config
 
-    with patch("src.tray.notify") as mock_notify, \
-         patch("src.tray.TrayApp._check_sync_folder_permissions", return_value=False):
+    with (
+        patch("src.tray.notify") as mock_notify,
+        patch("src.tray.TrayApp._check_sync_folder_permissions", return_value=False),
+    ):
         tray._trigger_sync()
 
     assert tray._worker is None
@@ -201,39 +225,17 @@ def test_trigger_sync_warns_on_bad_permissions(qapp, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_warn_rclone_missing_on_init(qapp, tmp_path):
-    """TrayApp shows a Warning tray message at init when rclone is missing."""
-    from src import config
-    from src.sync_engine import SyncEngine
-    from src.tray import TrayApp
-
-    engine = SyncEngine(tmp_path)
-
-    with patch("src.tray.find_rclone", return_value=None):
-        tray = TrayApp(engine, config)
-        with patch("src.tray.notify") as mock_notify:
-            from PySide6.QtCore import QCoreApplication
-            QCoreApplication.processEvents()
-            tray._warn_rclone_missing()
-
-    mock_notify.assert_called_once()
-
-
-def test_open_settings_warns_rclone_missing(qapp, tmp_path):
-    """open_settings calls showMessage with Warning when rclone is missing."""
+def test_quit_waits_for_active_sync_worker(qapp, tmp_path):
     tray = _make_tray(qapp, tmp_path)
-
-    mock_dialog = MagicMock()
-    mock_dialog.settings_saved = MagicMock()
-    mock_dialog.settings_saved.connect = MagicMock()
-    mock_dialog.sync_requested = MagicMock()
-    mock_dialog.sync_requested.connect = MagicMock()
-    mock_dialog.finished = MagicMock()
-    mock_dialog.finished.connect = MagicMock()
-
-    with patch("src.tray.find_rclone", return_value=None), \
-         patch("src.tray.SettingsDialog", return_value=mock_dialog), \
-         patch("src.tray.notify") as mock_notify:
-        tray.open_settings()
-
-    mock_notify.assert_called_once()
+    tray._worker = MagicMock()
+    tray._worker.isRunning.return_value = True
+    with (
+        patch("src.tray.QApplication.quit") as quit_app,
+        patch("src.tray.QTimer.singleShot") as retry,
+    ):
+        tray.request_quit()
+        quit_app.assert_not_called()
+        retry.assert_called_once_with(250, tray.request_quit)
+        tray._worker.isRunning.return_value = False
+        tray.request_quit()
+        quit_app.assert_called_once()

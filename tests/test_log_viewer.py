@@ -5,7 +5,7 @@ import logging
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from src.log_viewer import GUILogHandler, LogSignaler, LogViewerDialog
+from src.log_viewer import GUILogHandler, LogSignaler
 
 
 @pytest.fixture(scope="module")
@@ -45,31 +45,20 @@ def test_log_signaler_creation(qapp):
     logger.removeHandler(handler)
 
 
-def test_log_viewer_dialog_creation(qapp):
-    """Test that LogViewerDialog can be created."""
-    # Get root logger handlers before creating dialog
+def test_embedded_activity_log_is_bounded_and_releases_handler(qapp):
+    from src.settings._activity_log import ActivityLogWidget
+
     root_logger = logging.getLogger()
     initial_handlers = len(root_logger.handlers)
 
-    dialog = LogViewerDialog()
-
-    # Verify window properties
-    assert dialog.windowTitle() == "Activity Log — Chromium Profile Syncer"
-    assert dialog.minimumWidth() == 800
-    assert dialog.minimumHeight() == 500
-
-    # Verify text edit is read-only
-    assert dialog._text_edit.isReadOnly()
-
-    # Verify log cap
-    assert dialog._text_edit.document().maximumBlockCount() == 1000
-
-    # Handler should be added
-    assert dialog._handler in root_logger.handlers
+    widget = ActivityLogWidget()
+    widget.enable()
+    assert widget._text.isReadOnly()
+    assert widget._text.document().maximumBlockCount() == 1000
+    handler = widget._log_handler
+    assert handler in root_logger.handlers
     assert len(root_logger.handlers) == initial_handlers + 1
 
-    dialog.close()
-
-    # Handler should be removed after close
-    assert dialog._handler not in root_logger.handlers
+    widget.cleanup()
+    assert handler not in root_logger.handlers
     assert len(root_logger.handlers) == initial_handlers

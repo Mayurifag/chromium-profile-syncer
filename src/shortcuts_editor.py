@@ -17,6 +17,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from src.sync import write_text_if_changed
+from src.sync.sync_dir import edit_snapshot
+
 _LOG = logging.getLogger(__name__)
 
 
@@ -84,11 +87,7 @@ class ShortcutsEditorDialog(QDialog):
 
         except (json.JSONDecodeError, OSError) as exc:
             _LOG.exception("Failed to load search shortcuts: %s", exc)
-            QMessageBox.critical(
-                self,
-                "Error",
-                f"Failed to load search shortcuts:\n{exc}"
-            )
+            QMessageBox.critical(self, "Error", f"Failed to load search shortcuts:\n{exc}")
 
     def _make_default_item(self, is_default: bool) -> QTableWidgetItem:
         item = QTableWidgetItem()
@@ -162,45 +161,42 @@ class ShortcutsEditorDialog(QDialog):
             old_shortcut = self.shortcuts[i] if i < len(self.shortcuts) else {}
             default_item = self.table.item(i, 3)
             is_default = (
-                default_item is not None
-                and default_item.checkState() == Qt.CheckState.Checked
+                default_item is not None and default_item.checkState() == Qt.CheckState.Checked
             )
-            shortcuts.append({
-                "keyword": keyword,
-                "short_name": name,
-                "url": url,
-                "favicon_url": old_shortcut.get("favicon_url", ""),
-                "suggest_url": old_shortcut.get("suggest_url", ""),
-                "prepopulate_id": old_shortcut.get("prepopulate_id", 0),
-                "is_active": old_shortcut.get("is_active", 1),
-                "date_created": old_shortcut.get("date_created", 0),
-                "last_modified": old_shortcut.get("last_modified", 0),
-                "sync_guid": old_shortcut.get("sync_guid", ""),
-                "safe_for_autoreplace": old_shortcut.get("safe_for_autoreplace", 0),
-                "input_encodings": old_shortcut.get("input_encodings", "UTF-8"),
-                "alternate_urls": old_shortcut.get("alternate_urls", "[]"),
-                "is_default": is_default,
-            })
+            shortcuts.append(
+                {
+                    "keyword": keyword,
+                    "short_name": name,
+                    "url": url,
+                    "favicon_url": old_shortcut.get("favicon_url", ""),
+                    "suggest_url": old_shortcut.get("suggest_url", ""),
+                    "prepopulate_id": old_shortcut.get("prepopulate_id", 0),
+                    "is_active": old_shortcut.get("is_active", 1),
+                    "date_created": old_shortcut.get("date_created", 0),
+                    "last_modified": old_shortcut.get("last_modified", 0),
+                    "sync_guid": old_shortcut.get("sync_guid", ""),
+                    "safe_for_autoreplace": old_shortcut.get("safe_for_autoreplace", 0),
+                    "input_encodings": old_shortcut.get("input_encodings", "UTF-8"),
+                    "alternate_urls": old_shortcut.get("alternate_urls", "[]"),
+                    "is_default": is_default,
+                }
+            )
 
         try:
-            self.shortcuts_json_path.write_text(
-                json.dumps(shortcuts, indent=2),
-                encoding="utf-8"
-            )
+            with edit_snapshot(self.shortcuts_json_path.parent) as work:
+                write_text_if_changed(
+                    work / self.shortcuts_json_path.name, json.dumps(shortcuts, indent=2)
+                )
 
             _LOG.info("Saved %d search shortcuts to %s", len(shortcuts), self.shortcuts_json_path)
             QMessageBox.information(
                 self,
                 "Success",
                 f"Saved {len(shortcuts)} search shortcuts to backup.\n\n"
-                f"They will be synced to browsers on next sync."
+                f"They will be synced to browsers on next sync.",
             )
             self.accept()
 
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             _LOG.exception("Failed to save search shortcuts: %s", exc)
-            QMessageBox.critical(
-                self,
-                "Error",
-                f"Failed to save search shortcuts:\n{exc}"
-            )
+            QMessageBox.critical(self, "Error", f"Failed to save search shortcuts:\n{exc}")

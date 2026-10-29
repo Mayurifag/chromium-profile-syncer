@@ -22,6 +22,7 @@ class ActivityLogWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self._text = QTextEdit()
+        self._text.document().setMaximumBlockCount(1000)
         self._text.setReadOnly(True)
         self._text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self._text.setMinimumHeight(200)

@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 import src.config as config_module
+from src import autostart
 from src.browser_monitor import BrowserMonitor
 from src.browsers import ALL_BROWSERS
 from src.dracula import PROFILE_ROW_STYLE, SMALL_MUTED
@@ -37,7 +38,6 @@ from src.settings.initial_upload import InitialUploadDialog
 from src.shortcuts_editor import ShortcutsEditorDialog
 from src.sync.sync_dir import SYNC_DIR_NAME
 from src.version import version_display
-from src.winget import WingetManager
 
 _LOG = logging.getLogger(__name__)
 
@@ -52,7 +52,10 @@ _USAGE_NOTES_HTML = (
     "2. Select profile → click <i>Apply Backup</i>.<br>"
     "3. Follow steps below, relaunch browser.<br><br>"
     "<b>Extensions</b><br>"
-    "If none of extensions installed automatically, install each from Web Store manually.<br><br>"
+    "Remove or disable extensions in the browser. On close, removals are saved in "
+    "<i>Extensions</i> for later restore instead of being force-installed again.<br><br>"
+    "Restore opens the Web Store; browser confirmation may be needed. "
+    "Manually installed extensions may need removal in each browser.<br><br>"
     "After first apply, close browser — second sync runs because some "
     "extensions (e.g. Better History) wipe their data on first install. "
     "Reapply restores their state.<br><br>"
@@ -73,7 +76,6 @@ class SettingsDialog(QDialog):
         *,
         browsers_list: list | None = None,
         browser_monitor: BrowserMonitor | None = None,
-        winget_manager: WingetManager | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Chromium Profile Syncer — Settings")
@@ -86,13 +88,10 @@ class SettingsDialog(QDialog):
             else [b for b in ALL_BROWSERS if b.is_installed()]
         )
         self._browser_monitor = browser_monitor
-        self._winget_manager = winget_manager
 
         self._profile_states: dict[str, dict[str, bool]] = {}
         self._profile_progress: dict[tuple[str, str], tuple[QProgressBar, QLabel]] = {}
         self._autostart_check: QCheckBox | None = None
-        self._helium_update_check: QCheckBox | None = None
-        self._helium_version_label: QLabel | None = None
         self._folder_edit: QLineEdit | None = None
         self._clean_btn: QPushButton | None = None
         self._extensions_btn: QPushButton | None = None
@@ -194,16 +193,6 @@ class SettingsDialog(QDialog):
         self._autostart_check.toggled.connect(self._on_autostart_changed)
         toggles_row.addWidget(self._autostart_check)
 
-        self._helium_update_check = QCheckBox("Auto-update Helium")
-        self._helium_update_check.setVisible(False)
-        self._helium_update_check.toggled.connect(self._on_helium_auto_update_changed)
-        toggles_row.addWidget(self._helium_update_check)
-
-        self._helium_version_label = QLabel()
-        self._helium_version_label.setStyleSheet(SMALL_MUTED)
-        self._helium_version_label.setVisible(False)
-        toggles_row.addWidget(self._helium_version_label)
-
         toggles_row.addStretch()
 
         version_label = QLabel(version_display())
@@ -254,13 +243,6 @@ class SettingsDialog(QDialog):
     def _connect_browser_monitor(self) -> None:
         if self._browser_monitor is not None:
             self._browser_monitor.state_changed.connect(self._on_browser_state_changed)
-        if self._winget_manager is not None:
-            self._winget_manager.detected.connect(self._on_winget_detected)
-            self._on_winget_detected(
-                self._winget_manager.is_managed,
-                self._winget_manager.installed_version,
-                self._winget_manager.available_version,
-            )
 
     def _on_browser_state_changed(self, browser_name: str, is_running: bool) -> None:
         indicator = self._browser_status_indicators.get(browser_name)
@@ -282,8 +264,14 @@ class SettingsDialog(QDialog):
             else:
                 btn.setToolTip("")
 
+    def on_sync_started(self) -> None:
+        self._syncing = True
+        self.setEnabled(False)
+        self._refresh_apply_backup_enabled()
+
     def on_sync_completed(self, success: bool) -> None:
         self._syncing = False
+        self.setEnabled(True)
         self._refresh_apply_backup_enabled()
 
     def _set_syncing(self, value: bool) -> None:
@@ -331,27 +319,8 @@ class SettingsDialog(QDialog):
 
     def _on_autostart_changed(self, checked: bool) -> None:
         config_module.set_autostart(checked)
+        autostart.apply(checked and any(config_module.get_enabled_profiles().values()))
         _LOG.info("Autostart %s", "enabled" if checked else "disabled")
-
-    def _on_helium_auto_update_changed(self, checked: bool) -> None:
-        config_module.set_helium_auto_update(checked)
-
-    def _on_winget_detected(self, managed: bool, installed: str, available: str) -> None:
-        if self._helium_update_check is None:
-            return
-        self._helium_update_check.blockSignals(True)
-        self._helium_update_check.setChecked(config_module.get_helium_auto_update())
-        self._helium_update_check.setVisible(managed)
-        self._helium_update_check.blockSignals(False)
-        if self._helium_version_label is not None:
-            if managed and installed:
-                if available:
-                    self._helium_version_label.setText(f"{installed} → {available}")
-                else:
-                    self._helium_version_label.setText(f"{installed} (latest)")
-                self._helium_version_label.setVisible(True)
-            else:
-                self._helium_version_label.setVisible(False)
 
     def _pick_initial_upload_profile(self) -> tuple[str, str] | None:
         options: list[tuple[str, str, str]] = []
@@ -404,6 +373,11 @@ class SettingsDialog(QDialog):
             return
 
         browser_obj = next((b for b in ALL_BROWSERS if b.name == browser_name), None)
+        if browser_obj is not None and browser_obj.is_running():
+            from PySide6.QtWidgets import QMessageBox
+
+            QMessageBox.warning(self, "Browser running", _CLOSE_BROWSER_HINT)
+            return
         dlg = InitialUploadDialog(
             self,
             profile_path=profile_path,
@@ -571,10 +545,7 @@ class SettingsDialog(QDialog):
         enabled_browsers: dict[str, bool] = {
             bn: any(pm.values()) for bn, pm in self._profile_states.items()
         }
-        data = config_module.load()
-        data["enabled_profiles"] = enabled_profiles
-        data["enabled_browsers"] = enabled_browsers
-        config_module.save(data)
+        config_module.update(enabled_profiles=enabled_profiles, enabled_browsers=enabled_browsers)
         _LOG.info("Profile configuration updated")
 
     def _refresh_profiles(self) -> None:
@@ -610,7 +581,7 @@ class SettingsDialog(QDialog):
             shutil.rmtree(profile_path)
             _LOG.info("Deleted profile directory: %s", profile_path)
 
-        config_module.remove_browser_profile(browser_name)
+        config_module.remove_profile(browser_name, profile_name, profile_path)
 
         folder_text = self._folder_edit.text().strip() if self._folder_edit else ""
         if folder_text:
@@ -740,6 +711,10 @@ class SettingsDialog(QDialog):
 
         from src.settings.extensions_manager import ExtensionsManagerDialog
 
+        if self._syncing:
+            QMessageBox.information(self, "Sync in progress", "Wait for sync to finish first.")
+            return
+
         current_dir = self._get_sync_dir_or_warn()
         if current_dir is None:
             return
@@ -749,7 +724,10 @@ class SettingsDialog(QDialog):
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to open extensions manager:\n{exc}")
             return
-        dlg.exec()
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._refresh_extension_count(current_dir.parent)
+            if not dlg.restoring:
+                self.sync_requested.emit()
 
     def _open_flags_manager(self) -> None:
         from PySide6.QtWidgets import QMessageBox
@@ -772,11 +750,6 @@ class SettingsDialog(QDialog):
         if self._browser_monitor is not None:
             try:
                 self._browser_monitor.state_changed.disconnect(self._on_browser_state_changed)
-            except RuntimeError:
-                pass
-        if self._winget_manager is not None:
-            try:
-                self._winget_manager.detected.disconnect(self._on_winget_detected)
             except RuntimeError:
                 pass
         super().closeEvent(event)

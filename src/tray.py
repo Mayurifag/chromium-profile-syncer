@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
@@ -15,15 +15,13 @@ from src import autostart, updater
 from src.browser_monitor import BrowserMonitor
 from src.browsers import ALL_BROWSERS
 from src.dracula import APP_ICON_SVG, ICON_COLORS
-from src.notify import notify
-from src.rclone import find_rclone
+from src.notify import notify, set_notification_icon
 from src.settings import SettingsDialog
 from src.sync.sync_dir import SYNC_DIR_NAME as _SYNC_DIR_NAME
 from src.sync_engine import SyncEngine
 from src.sync_worker import SyncWorker
 from src.update_runner import UpdateCheckThread, is_update_supported
 from src.watcher_controller import WatcherController
-from src.winget import WingetManager
 
 UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000
 
@@ -59,7 +57,8 @@ class TrayApp(QSystemTrayIcon):
         self._last_sync: str = self._config.get_last_sync()
         self._last_error: str = ""
         self._update_thread: UpdateCheckThread | None = None
-        self._rclone_warning_shown = False
+        self._quitting = False
+        set_notification_icon(self)
 
         installed_browsers = [b for b in ALL_BROWSERS if b.is_installed()]
         self._browser_monitor = BrowserMonitor(installed_browsers, parent=self)
@@ -77,7 +76,7 @@ class TrayApp(QSystemTrayIcon):
             self._action_check_updates.triggered.connect(self._manual_update_check)
         self._menu.addSeparator()
         self._action_quit = self._menu.addAction("Quit")
-        self._action_quit.triggered.connect(QApplication.quit)
+        self._action_quit.triggered.connect(self.request_quit)
         self.setContextMenu(self._menu)
 
         if is_update_supported():
@@ -93,16 +92,9 @@ class TrayApp(QSystemTrayIcon):
 
         self._watcher.update_sync_folder(self._config.get_sync_folder())
 
-        self._winget = WingetManager(self)
-        self._winget.detected.connect(self._on_winget_detected)
-        self._winget.upgrade_finished.connect(self._on_helium_upgrade_finished)
-
         QTimer.singleShot(2000, self._auto_update_check)
 
         logger.debug("TrayApp initialized")
-
-        if find_rclone() is None:
-            QTimer.singleShot(500, self._warn_rclone_missing)
 
     @staticmethod
     def _make_icon(state: str) -> QIcon:
@@ -116,20 +108,6 @@ class TrayApp(QSystemTrayIcon):
         painter.drawEllipse(1, 1, 20, 20)
         painter.end()
         return QIcon(pixmap)
-
-    def _warn_rclone_missing(self) -> None:
-        import sys
-
-        if self._rclone_warning_shown:
-            return
-        self._rclone_warning_shown = True
-        if sys.platform == "darwin":
-            msg = "rclone is required for sync. Install via Homebrew: brew install rclone"
-        elif sys.platform == "win32":
-            msg = "rclone is required for sync. Download from https://rclone.org/downloads/"
-        else:
-            msg = "rclone is required for sync. Install: sudo apt install rclone"
-        notify("rclone not found", msg)
 
     def _update_tooltip(self) -> None:
         if self._worker is not None and self._worker.isRunning():
@@ -155,8 +133,8 @@ class TrayApp(QSystemTrayIcon):
         # disabled — extensions installed by policy on first launch overwrite
         # restored LES with defaults, and only this post-launch sync re-applies
         # the synced data back over those defaults.
-        pending_repull = _config.get_profiles_needing_ext_repull().get(browser_name, [])
-        has_pending = any(p in pending_repull for p in profiles)
+        pending = _config.get_pending_extension_restores().get(browser_name, {})
+        has_pending = any(pending.get(p) for p in profiles)
         if not has_pending and not any(
             _config.is_profile_sync_enabled(browser_name, p) for p in profiles
         ):
@@ -228,19 +206,15 @@ class TrayApp(QSystemTrayIcon):
 
         dialog = SettingsDialog(
             browser_monitor=self._browser_monitor,
-            winget_manager=self._winget,
             parent=None,
         )
         dialog.settings_saved.connect(self._on_settings_saved)
-        dialog.sync_requested.connect(self._trigger_sync)
+        dialog.sync_requested.connect(lambda: self._trigger_sync(automatic=False))
         dialog.apply_backup_requested.connect(self._trigger_apply_backup)
         self.sync_completed.connect(dialog.on_sync_completed)
         dialog.finished.connect(lambda: self._on_settings_closed())
 
         self._settings_dialog = dialog
-
-        if find_rclone() is None:
-            self._warn_rclone_missing()
 
         dialog.exec()
 
@@ -259,11 +233,11 @@ class TrayApp(QSystemTrayIcon):
         logger.info("Settings saved — engine rebuilt with folder %s", sync_folder)
 
         self._watcher.update_sync_folder(sync_folder)
-        self._watcher.record_mtime_baseline()
+        self._watcher.record_baseline()
         self._restart_periodic_sync_timer()
 
         has_profiles = any(profiles for profiles in self._config.get_enabled_profiles().values())
-        autostart.apply(has_profiles)
+        autostart.apply(has_profiles and self._config.get_autostart())
         logger.info("Autostart %s", "enabled" if has_profiles else "disabled")
 
     @staticmethod
@@ -275,7 +249,11 @@ class TrayApp(QSystemTrayIcon):
         only_browser: str | None = None,
         only_profile: str | None = None,
         force_direction: str | None = None,
+        *,
+        automatic: bool = True,
     ) -> None:
+        if self._quitting:
+            return
         if self._worker is not None and self._worker.isRunning():
             logger.info("Sync already in progress — skipping")
             return
@@ -303,9 +281,12 @@ class TrayApp(QSystemTrayIcon):
             only_profile,
             force_direction,
         )
-        self._worker = SyncWorker(self._engine, only_browser, only_profile, force_direction)
+        self._worker = SyncWorker(
+            self._engine, only_browser, only_profile, force_direction, automatic=automatic
+        )
         self._worker.started.connect(self._on_sync_started)
-        self._worker.finished.connect(self._on_sync_finished)
+        self._worker.completed.connect(self._on_sync_finished)
+        self._worker.finished.connect(self._on_worker_stopped)
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker.error.connect(self._on_sync_error)
         self._worker.profile_progress.connect(self._on_profile_progress)
@@ -319,6 +300,13 @@ class TrayApp(QSystemTrayIcon):
         self.setIcon(self._make_icon("syncing"))
         self._action_settings.setEnabled(False)
         self._watcher.pause()
+        if self._settings_dialog is not None:
+            self._settings_dialog.on_sync_started()
+        self._update_tooltip()
+
+    def _on_worker_stopped(self) -> None:
+        if self.sender() is self._worker:
+            self._worker = None
         self._update_tooltip()
 
     def _on_profile_progress(
@@ -336,12 +324,11 @@ class TrayApp(QSystemTrayIcon):
         skipped_running: list,
         triggered_browser: str,
     ) -> None:
-        self._worker = None
         self._last_error = ""
         self._last_sync = last_sync
 
         if self._config.get_sync_folder() is not None:
-            self._watcher.record_mtime_baseline()
+            self._watcher.record_baseline()
             self._config.set_last_sync(last_sync)
 
         if is_first_sync:
@@ -378,7 +365,6 @@ class TrayApp(QSystemTrayIcon):
                 self._do_update_check(silent=True)
             else:
                 logger.debug("update: skip app update check — settings dialog open")
-        self._winget.detect()
 
     def _manual_update_check(self) -> None:
         self._do_update_check(silent=False)
@@ -395,31 +381,43 @@ class TrayApp(QSystemTrayIcon):
         thread.user_message.connect(lambda msg: notify("Chromium Profile Syncer", msg))
         thread.completed.connect(self._on_update_completed)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_update_stopped)
         self._update_thread = thread
         thread.start()
 
     def _on_update_completed(self, should_quit: bool) -> None:
-        self._update_thread = None
         if should_quit:
+            self.request_quit()
+
+    def _on_update_stopped(self) -> None:
+        if self.sender() is self._update_thread:
+            self._update_thread = None
+
+    def _threads(self) -> list[QThread]:
+        threads = self.findChildren(QThread)
+        if self._worker is not None:
+            threads.append(self._worker)
+        if self._settings_dialog is not None:
+            threads.extend(self._settings_dialog.findChildren(QThread))
+        return threads
+
+    def request_quit(self) -> None:
+        self._quitting = True
+        self._periodic_sync_timer.stop()
+        self._watcher.pause()
+        self._watcher.stop_debounce()
+        if hasattr(self, "_update_timer"):
+            self._update_timer.stop()
+        if any(thread.isRunning() for thread in self._threads()):
+            QTimer.singleShot(250, self.request_quit)
+        else:
             QApplication.quit()
 
-    def _on_winget_detected(self, managed: bool, _installed: str, available: str) -> None:
-        if not managed:
-            return
-        if not self._config.get_helium_auto_update():
-            return
-        if not available:
-            return
-        if self._browser_monitor.is_running("Helium"):
-            logger.debug("winget upgrade Helium: skipped — browser running")
-            return
-        self._winget.upgrade()
-
-    def _on_helium_upgrade_finished(self, success: bool, message: str) -> None:
-        notify("Chromium Profile Syncer", message, duration_ms=3000)
+    def wait_for_workers(self) -> None:
+        for thread in self._threads():
+            thread.wait()
 
     def _on_sync_error(self, msg: str) -> None:
-        self._worker = None
         self._last_error = msg
         logger.error("Sync error: %s", msg)
         self.setIcon(self._make_icon("error"))

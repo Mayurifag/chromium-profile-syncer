@@ -188,127 +188,68 @@ def test_settings_dialog_no_browsers(qapp):
     dlg.close()
 
 
-def test_extensions_manager_prunes_orphan_extension_data(tmp_path, monkeypatch):
+def test_extensions_manager_archive_preserves_settings(qapp, tmp_path):
     from src.settings.extensions_manager import ExtensionsManagerDialog
+    from src.sync.extensions import read_library
 
     current = tmp_path / SYNC_DIR_NAME
     current.mkdir()
-    (current / "webstore_extensions.json").write_text('{"webstore": "Web Store"}')
-    (current / "Local Extension Settings" / "webstore").mkdir(parents=True)
-    (current / "Local Extension Settings" / "settingsonly").mkdir(parents=True)
-    (current / "Sync Extension Settings" / "synconly").mkdir(parents=True)
-    (current / "IndexedDB" / "chrome-extension_idbonly_0.indexeddb.leveldb").mkdir(parents=True)
-    (current / "preferences.json").write_text(
-        '{"extensions": {"pinned_extensions": ["webstore", "pinnedonly"], '
-        '"settings": {"settingsonly": {}, "webstore": {}}}}'
-    )
-
-    monkeypatch.setattr("src.settings.extensions_manager._installed_extension_info", lambda ids: {})
-    monkeypatch.setattr("src.settings.extensions_manager._webstore_extension_names", lambda ids: {})
-
-    dlg = ExtensionsManagerDialog.__new__(ExtensionsManagerDialog)
-    dlg._work_dir = current
-
-    extensions = dlg._read_extensions()
-    assert {ext_id: info.name for ext_id, info in extensions.items()} == {
-        "webstore": "Web Store",
-    }
-    assert extensions["webstore"].sources == {"Web Store", "Settings", "Pinned"}
-    assert not (current / "Local Extension Settings" / "settingsonly").exists()
-    assert not (current / "Sync Extension Settings" / "synconly").exists()
-    assert not (current / "IndexedDB" / "chrome-extension_idbonly_0.indexeddb.leveldb").exists()
-    assert (current / "preferences.json").read_text() == (
-        '{"extensions": {"pinned_extensions": ["webstore"], "settings": {"webstore": {}}}}'
-    )
+    (current / "webstore_extensions.json").write_text('{"extension": "Example"}')
+    storage = current / "Local Extension Settings" / "extension"
+    storage.mkdir(parents=True)
+    (storage / "data.ldb").write_text("saved settings")
+    dlg = ExtensionsManagerDialog(None, tmp_path)
+    dlg._toggle(0)
+    assert read_library(current)["extension"]["archived"] is False
+    dlg._save()
+    assert read_library(current)["extension"]["archived"] is True
+    assert (storage / "data.ldb").read_text() == "saved settings"
+    assert (current / "webstore_extensions.json").read_text() == "{}"
 
 
-def test_extensions_manager_fallback_labels_are_clear():
-    from src.settings.extensions_manager import ExtensionInfo, _display_name, _source_text
+def test_extensions_manager_cancel_and_toggle_undo(qapp, tmp_path):
+    from src.settings.extensions_manager import ExtensionsManagerDialog
+    from src.sync.extensions import read_library
 
-    info = ExtensionInfo(sources={"Settings"})
-
-    assert _display_name(info) == "Extension data without install record"
-    assert _source_text(info) == "No install record"
-
-
-def test_extensions_manager_parses_webstore_title():
-    from src.settings.extensions_manager import _webstore_name_from_html
-
-    assert (
-        _webstore_name_from_html(
-            "<html><head><title>uBlock Origin - Chrome Web Store</title></head></html>"
-        )
-        == "uBlock Origin"
-    )
-    assert (
-        _webstore_name_from_html("<html><head><title>Chrome Web Store</title></head></html>") == ""
-    )
+    current = tmp_path / SYNC_DIR_NAME
+    current.mkdir()
+    (current / "webstore_extensions.json").write_text('{"extension": "Example"}')
+    dlg = ExtensionsManagerDialog(None, tmp_path)
+    dlg._toggle(0)
+    dlg._toggle(0)
+    assert dlg._changes == {}
+    dlg._toggle(0)
+    dlg.reject()
+    assert not read_library(current)["extension"]["archived"]
 
 
-def test_extensions_manager_detects_internal_alias_from_secure_preferences(tmp_path, monkeypatch):
+def test_extensions_manager_restore_opens_store_after_save(qapp, tmp_path, monkeypatch):
     from src.settings import extensions_manager
-
-    profile = tmp_path / "Default"
-    profile.mkdir()
-    (profile / "Secure Preferences").write_text(
-        '{"extensions": {"settings": {"internal": {'
-        '"from_webstore": false, '
-        '"path": "/Applications/Helium.app/Contents/Resources/ublock", '
-        '"manifest": {"name": "uBlock Origin"}'
-        "}}}}"
-    )
-
-    class Browser:
-        name = "Helium"
-        ext_id_aliases = {"internal": "canonical"}
-
-        def is_installed(self):
-            return True
-
-        def discover_profiles(self):
-            return [profile]
-
-    monkeypatch.setattr(extensions_manager, "ALL_BROWSERS", [Browser()])
-
-    info = extensions_manager._installed_extension_info({"canonical"})["canonical"]
-
-    assert info.name == "uBlock Origin"
-    assert info.sources == {"Helium internal"}
-    assert extensions_manager._source_text(info) == "Helium internal"
-
-
-def test_extensions_manager_html_uses_source_badge_tooltip():
-    from src.settings.extensions_manager import ExtensionInfo, _generate_html
-
-    html = _generate_html({"abc": ExtensionInfo("uBlock Origin", {"Helium internal"})})
-
-    assert 'title="Helium internal"' in html
-    assert ">He</span>" in html
-    assert ">Helium internal<" not in html
-
-
-def test_extensions_manager_delete_removes_prefs_and_storage(tmp_path):
-    from src.settings.extensions_manager import ExtensionsManagerDialog
+    from src.sync.extensions import read_library, set_archived
 
     current = tmp_path / SYNC_DIR_NAME
-    current.mkdir()
-    (current / "webstore_extensions.json").write_text('{"delete": "Delete", "keep": "Keep"}')
-    (current / "Local Extension Settings" / "delete").mkdir(parents=True)
-    (current / "preferences.json").write_text(
-        '{"extensions": {"pinned_extensions": ["delete", "keep"], '
-        '"settings": {"delete": {}, "keep": {}}}}'
-    )
+    set_archived(current, {"a" * 32}, True)
+    opened = []
+    monkeypatch.setattr(extensions_manager, "_open_urls", opened.extend)
+    dlg = extensions_manager.ExtensionsManagerDialog(None, tmp_path)
+    dlg._toggle(0)
+    assert opened == []
+    dlg._save()
+    assert not read_library(current)["a" * 32]["archived"]
+    assert opened == [f"https://chromewebstore.google.com/detail/{'a' * 32}"]
 
-    dlg = ExtensionsManagerDialog.__new__(ExtensionsManagerDialog)
-    dlg._work_dir = current
-    dlg._deleted = {"delete"}
-    dlg._apply_deletions()
 
-    assert not (current / "Local Extension Settings" / "delete").exists()
-    assert (current / "webstore_extensions.json").read_text() == '{"keep": "Keep"}'
-    assert (current / "preferences.json").read_text() == (
-        '{"extensions": {"pinned_extensions": ["keep"], "settings": {"keep": {}}}}'
-    )
+def test_extensions_manager_filter_includes_status(qapp, tmp_path):
+    from src.settings.extensions_manager import ExtensionsManagerDialog
+    from src.sync.extensions import set_archived
+
+    set_archived(tmp_path / SYNC_DIR_NAME, {"a" * 32}, True)
+    dlg = ExtensionsManagerDialog(None, tmp_path)
+    dlg._search.setText("saved")
+    assert not dlg._table.isRowHidden(0)
+    dlg._search.setText("missing")
+    assert dlg._table.isRowHidden(0)
+    dlg.close()
 
 
 def test_settings_dialog_profile_states_populated(qapp, tmp_path):
@@ -357,7 +298,7 @@ def test_settings_dialog_shows_ext_repull_pending(qapp, tmp_path):
     (sync_folder / SYNC_DIR_NAME).mkdir()
 
     config_module.set_enabled_profiles({"Helium": ["Default"]})
-    config_module.mark_profile_for_ext_repull("Helium", "Default")
+    config_module.request_extension_restore("Helium", "Default", {"a" * 32})
 
     mock = _MockBrowser("Helium", profiles=["Default"])
     dlg = SettingsDialog(browsers_list=[mock])

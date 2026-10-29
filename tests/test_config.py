@@ -21,6 +21,37 @@ def test_load_returns_empty_when_missing():
     assert config_module.load() == {}
 
 
+def test_load_and_save_do_not_share_nested_mutable_config():
+    original = {"nested": {"value": ["original"]}}
+    config_module.save(original)
+    original["nested"]["value"].append("changed outside config")
+    loaded = config_module.load()
+    loaded["nested"]["value"].append("changed snapshot")
+    assert config_module.load() == {"nested": {"value": ["original"]}}
+
+
+def test_remove_one_profile_preserves_other_profiles_and_shared_settings(tmp_path):
+    profile = tmp_path / "Default"
+    config_module.save(
+        {
+            "enabled_profiles": {"Browser": ["Default", "Profile 1"]},
+            "enabled_browsers": {"Browser": True},
+            "profiles_needing_restore": {"Browser": ["Default", "Profile 1"]},
+            "profile_directions": {"Browser": {"Default": "push", "Profile 1": "both"}},
+            "extension_observations": {str(profile.resolve()): ["extension"]},
+            "sync_folder": "keep-shared-backup",
+        }
+    )
+    config_module.remove_profile("Browser", "Default", profile)
+    saved = config_module.load()
+    assert saved["enabled_profiles"] == {"Browser": ["Profile 1"]}
+    assert saved["enabled_browsers"] == {"Browser": True}
+    assert saved["profiles_needing_restore"] == {"Browser": ["Profile 1"]}
+    assert saved["profile_directions"] == {"Browser": {"Profile 1": "both"}}
+    assert saved["extension_observations"] == {}
+    assert saved["sync_folder"] == "keep-shared-backup"
+
+
 def test_save_creates_file_and_load_reads_it_back(tmp_path):
     data = {"key": "value", "num": 42}
     config_module.save(data)
@@ -45,10 +76,14 @@ def test_set_and_get_sync_folder(tmp_path):
     assert isinstance(result, Path)
 
 
-def test_load_returns_empty_on_corrupt_json():
+def test_corrupt_config_is_not_silently_overwritten():
     config_module.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     config_module.CONFIG_PATH.write_text("not valid json {{{", encoding="utf-8")
-    assert config_module.load() == {}
+    with pytest.raises(ValueError):
+        config_module.load()
+    with pytest.raises(ValueError):
+        config_module.set_autostart(False)
+    assert config_module.CONFIG_PATH.read_text() == "not valid json {{{"
 
 
 def test_set_sync_folder_persists_across_calls(tmp_path):

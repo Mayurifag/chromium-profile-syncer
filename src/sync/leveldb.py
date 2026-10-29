@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import tempfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -41,17 +42,27 @@ def copy_atomic(
     *,
     display_name: str | None = None,
 ) -> None:
-    tmp = dst.parent / f"{dst.name}.tmp"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=f".{dst.name}.", dir=dst.parent))
+    staging, previous = temporary / "data", temporary / "previous"
     try:
-        if tmp.exists():
-            shutil.rmtree(tmp)
         report(display_name or src.name)
-        shutil.copytree(src, tmp, ignore=shutil.ignore_patterns("._*"))
+        shutil.copytree(src, staging, ignore=shutil.ignore_patterns("._*"))
         if dst.exists():
-            shutil.rmtree(dst)
-        shutil.move(str(tmp), dst)
-    except OSError:
-        _LOG.exception("Atomic copy failed: %s -> %s (dst untouched)", src, dst)
+            dst.rename(previous)
+        try:
+            staging.rename(dst)
+        except OSError:
+            if previous.exists():
+                previous.rename(dst)
+            raise
+        if previous.exists():
+            shutil.rmtree(previous)
+    finally:
+        if previous.exists():
+            _LOG.error("Copy recovery data retained at %s", previous)
+        else:
+            shutil.rmtree(temporary)
 
 
 def sync_dir(
@@ -61,7 +72,6 @@ def sync_dir(
     direction: str = "both",
     report: Callable[[str], None] = _noop,
     name_filter: Callable[[str], bool] | None = None,
-    key_skip_prefixes: dict[str, tuple[bytes, ...]] | None = None,
 ) -> tuple[int, int]:
     profile_base = profile_dir / subpath
     sync_base = sync_path / subpath
@@ -98,23 +108,20 @@ def sync_dir(
             if profile_empty and not sync_empty:
                 _LOG.info(
                     "Skip push %s/%s: profile is empty stub, sync has data",
-                    subpath, name,
+                    subpath,
+                    name,
                 )
                 skipped_list.append(1)
                 return
             sync_base.mkdir(parents=True, exist_ok=True)
-            prefixes = (key_skip_prefixes or {}).get(name)
-            if prefixes and profile_unit.exists():
-                from src.sync.ldb_filter import copy_filtered
-                copy_filtered(profile_unit, sync_unit, prefixes)
-            else:
-                copy_atomic(profile_unit, sync_unit, report)
+            copy_atomic(profile_unit, sync_unit, report)
             synced_list.append(1)
         elif not profile_newer and direction in ("pull", "both"):
             if sync_empty and not profile_empty:
                 _LOG.info(
                     "Skip pull %s/%s: sync is empty stub, profile has data",
-                    subpath, name,
+                    subpath,
+                    name,
                 )
                 skipped_list.append(1)
                 return

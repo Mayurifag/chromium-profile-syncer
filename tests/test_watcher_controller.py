@@ -10,6 +10,7 @@ PySide6 = pytest.importorskip("PySide6")
 @pytest.fixture(scope="module")
 def qapp():
     from PySide6.QtWidgets import QApplication
+
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
@@ -18,6 +19,7 @@ def qapp():
 
 def _make_controller(parent=None, debounce_ms=2000):
     from src.watcher_controller import WatcherController
+
     return WatcherController("CPS_Sync", debounce_ms=debounce_ms, parent=parent)
 
 
@@ -92,7 +94,7 @@ def test_change_skipped_when_metadata_mtime_unchanged(qapp, tmp_path):
 
     ctl = _make_controller(debounce_ms=0)
     ctl.update_sync_folder(tmp_path)
-    ctl.record_mtime_baseline()
+    ctl.record_baseline()
 
     handler = MagicMock()
     ctl.change_detected.connect(handler)
@@ -109,3 +111,19 @@ def test_stop_debounce(qapp, tmp_path):
     assert ctl._debounce.isActive()
     ctl.stop_debounce()
     assert not ctl._debounce.isActive()
+
+
+def test_resume_catches_changes_arriving_while_paused(qapp, tmp_path):
+    current = tmp_path / "CPS_Sync"
+    current.mkdir()
+    metadata = current / "metadata.json"
+    metadata.write_text('{"revision":"one"}')
+    ctl = _make_controller()
+    ctl.update_sync_folder(tmp_path)
+    ctl.record_baseline()
+    ctl.pause()
+    metadata.write_text('{"revision":"two"}')
+    ctl.resume()
+    assert ctl._debounce.isActive()
+    ctl.stop_debounce()
+    ctl.update_sync_folder(None)

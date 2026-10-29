@@ -3,68 +3,58 @@ from __future__ import annotations
 import sys
 from unittest.mock import MagicMock, patch
 
-
-def test_tray_flag_prevents_settings_dialog():
-    """With --tray flag, settings dialog should not open on startup."""
-    import src.main
-
-    with patch.object(sys, "argv", ["main.py", "--tray"]), \
-         patch("src.main.single_instance.acquire"), \
-         patch("src.main.single_instance.setup_signal_handler"), \
-         patch("src.main.QApplication") as mock_app, \
-         patch("src.main.TrayApp") as mock_tray, \
-         patch("src.main.SyncEngine"), \
-         patch("src.main.config.get_sync_folder", return_value=None), \
-         patch("src.main.config.get_enabled_profiles", return_value={}), \
-         patch("src.main.autostart.apply"), \
-         patch("PySide6.QtCore.QTimer") as mock_timer:
-
-        app_instance = MagicMock()
-        mock_app.return_value = app_instance
-        app_instance.exec.return_value = 0
-
-        tray_instance = MagicMock()
-        mock_tray.return_value = tray_instance
-
-        try:
-            src.main.main()
-        except SystemExit:
-            pass
-
-        # QTimer.singleShot should NOT be called when --tray is present
-        mock_timer.singleShot.assert_not_called()
+import pytest
 
 
-def test_no_tray_flag_opens_settings_dialog():
-    """Without --tray flag, settings dialog should open on startup."""
-    import src.main
+@pytest.mark.parametrize("tray_only", [False, True])
+def test_startup_respects_tray_and_autostart_preferences(tray_only):
+    from src import main
 
-    with patch.object(sys, "argv", ["main.py"]), \
-         patch("src.main.single_instance.acquire"), \
-         patch("src.main.single_instance.setup_signal_handler"), \
-         patch("src.main.QApplication") as mock_app, \
-         patch("src.main.TrayApp") as mock_tray, \
-         patch("src.main.SyncEngine"), \
-         patch("src.main.config.get_sync_folder", return_value=None), \
-         patch("src.main.config.get_enabled_profiles", return_value={}), \
-         patch("src.main.autostart.apply"), \
-         patch("PySide6.QtCore.QTimer") as mock_timer:
+    with (
+        patch.object(sys, "argv", ["app", *(["--tray"] if tray_only else [])]),
+        patch.object(main, "QApplication") as application,
+        patch.object(main, "SingleInstance") as instance,
+        patch.object(main, "TrayApp"),
+        patch.object(main, "make_app_icon"),
+        patch.object(main, "QTimer") as timer,
+        patch.object(main.autostart, "apply") as autostart,
+        patch.object(main.config, "get_autostart", return_value=False),
+        patch.object(main.config, "get_enabled_profiles", return_value={"Chrome": ["Default"]}),
+    ):
+        application.return_value.exec.return_value = 0
+        instance.return_value.acquire.return_value = True
+        with pytest.raises(SystemExit):
+            main.main()
+        autostart.assert_called_once_with(False)
+        assert timer.singleShot.call_count == (0 if tray_only else 1)
 
-        app_instance = MagicMock()
-        mock_app.return_value = app_instance
-        app_instance.exec.return_value = 0
 
-        tray_instance = MagicMock()
-        mock_tray.return_value = tray_instance
+def test_main_routes_cli_to_the_same_entry_point():
+    from src import main
 
-        try:
-            src.main.main()
-        except SystemExit:
-            pass
+    with (
+        patch.object(sys, "argv", ["app", "sync", "--browser", "Chrome"]),
+        patch.object(main.cli, "run", return_value=0) as run,
+        pytest.raises(SystemExit),
+    ):
+        main.main()
+    run.assert_called_once_with(["sync", "--browser", "Chrome"])
 
-        # QTimer.singleShot should be called to open settings
-        mock_timer.singleShot.assert_called_once()
-        # Verify it was called with tray.open_settings
-        call_args = mock_timer.singleShot.call_args
-        assert call_args[0][0] == 0  # delay is 0
-        assert call_args[0][1] == tray_instance.open_settings
+
+def test_remove_one_profile_preserves_shared_backup(tmp_path, monkeypatch, capsys):
+    from src import cli, config
+
+    profile = tmp_path / "Default"
+    profile.mkdir()
+    backup = tmp_path / "current"
+    backup.mkdir()
+    (backup / "Bookmarks").write_text("shared backup")
+    browser = MagicMock()
+    browser.name = "Browser"
+    browser.is_running.return_value = False
+    browser.discover_profiles.return_value = [profile]
+    monkeypatch.setattr(cli, "get_browser", lambda name: browser)
+    config.set_sync_folder(backup.parent)
+    assert cli.run(["remove-profile", "--browser", "Browser", "--profile", "Default", "--yes"]) == 0
+    assert not profile.exists()
+    assert (backup / "Bookmarks").read_text() == "shared backup"

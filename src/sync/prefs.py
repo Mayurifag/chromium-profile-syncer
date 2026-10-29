@@ -75,11 +75,25 @@ def merge_prefs(target: dict, source: dict) -> None:
             target[key] = value
 
 
+def selected_preferences(prefs: dict, *, include_extensions: bool = True) -> dict:
+    selected: dict = {}
+    for dotted in PREFERENCES_KEYS:
+        if not include_extensions and dotted.startswith("extensions."):
+            continue
+        keys = dotted.split(".")
+        found, value = _get_nested(prefs, keys)
+        if found:
+            _set_nested(selected, keys, value)
+    return selected
+
+
 def sync_preferences_json(
     profile_path: Path,
     sync_profile_path: Path,
     direction: str,
     report: Callable[[str], None] = _noop,
+    *,
+    include_extensions: bool = True,
 ) -> tuple[int, int]:
     prefs_path = profile_path / "Preferences"
     json_path = sync_profile_path / "preferences.json"
@@ -92,31 +106,19 @@ def sync_preferences_json(
 
     if do_push and prefs_path.exists():
         prefs = json.loads(prefs_path.read_bytes())
-        extracted: dict = {}
-        for dotted in PREFERENCES_KEYS:
-            keys = dotted.split(".")
-            found, value = _get_nested(prefs, keys)
-            if found:
-                _set_nested(extracted, keys, value)
-        found_pins, pins = _get_nested(extracted, ["extensions", "pinned_extensions"])
-        if found_pins and pins == [] and json_path.exists():
-            try:
-                current = json.loads(json_path.read_bytes())
-                found_old_pins, old_pins = _get_nested(current, ["extensions", "pinned_extensions"])
-                if found_old_pins and isinstance(old_pins, list) and old_pins:
-                    _set_nested(extracted, ["extensions", "pinned_extensions"], old_pins)
-            except (json.JSONDecodeError, OSError):
-                pass
+        extracted = selected_preferences(prefs, include_extensions=include_extensions)
         if not write_text_if_changed(json_path, json.dumps(extracted)):
             return 0, 1
         report("preferences.json")
         return 1, 0
 
     if do_pull and json_path.exists() and prefs_path.exists():
-        saved = json.loads(json_path.read_bytes())
+        saved = selected_preferences(
+            json.loads(json_path.read_bytes()), include_extensions=include_extensions
+        )
         prefs = json.loads(prefs_path.read_bytes())
         merge_prefs(prefs, saved)
-        prefs_path.write_bytes(json.dumps(prefs, separators=(",", ":")).encode())
+        write_text_if_changed(prefs_path, json.dumps(prefs, separators=(",", ":")))
         report("Preferences")
         return 1, 0
 

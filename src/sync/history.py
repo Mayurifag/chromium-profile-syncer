@@ -30,8 +30,7 @@ def snapshot_typed_urls(profile_path: Path) -> list[dict] | None:
         return None
 
     return [
-        {"url": r[0], "title": r[1], "typed_count": r[2], "last_visit_time": r[3]}
-        for r in rows
+        {"url": r[0], "title": r[1], "typed_count": r[2], "last_visit_time": r[3]} for r in rows
     ]
 
 
@@ -88,7 +87,7 @@ def restore_typed_urls(
                 if row:
                     conn.execute(
                         "UPDATE urls SET typed_count = ?, last_visit_time = ? WHERE id = ?",
-                        (row[1] + typed_count, max(row[2], last_visit_time), row[0]),
+                        (max(row[1], typed_count), max(row[2], last_visit_time), row[0]),
                     )
                 else:
                     conn.execute(

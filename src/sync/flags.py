@@ -4,6 +4,10 @@ import json
 import logging
 from pathlib import Path
 
+from src.operations import locked
+from src.sync import write_text_if_changed
+from src.sync.sync_dir import edit_snapshot
+
 _LOG = logging.getLogger(__name__)
 
 FLAGS_FILE = "browser_flags.json"
@@ -18,9 +22,7 @@ def _load_local_state(local_state_path: Path) -> dict | None:
 
 
 def _save_local_state(local_state_path: Path, data: dict) -> None:
-    tmp = local_state_path.with_suffix(local_state_path.suffix + ".cps-tmp")
-    tmp.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
-    tmp.replace(local_state_path)
+    write_text_if_changed(local_state_path, json.dumps(data, separators=(",", ":")))
 
 
 def get_local_flags(local_state_path: Path) -> list[str]:
@@ -44,9 +46,7 @@ def load_sync_flags(sync_root: Path) -> dict[str, dict]:
 
 def save_sync_flags(sync_root: Path, data: dict[str, dict]) -> None:
     sync_root.mkdir(parents=True, exist_ok=True)
-    (sync_root / FLAGS_FILE).write_text(
-        json.dumps(data, indent=2, sort_keys=True), encoding="utf-8"
-    )
+    write_text_if_changed(sync_root / FLAGS_FILE, json.dumps(data, indent=2, sort_keys=True))
 
 
 def prune_sync_flags(sync_root: Path, keep_browsers: set[str]) -> list[str]:
@@ -72,9 +72,7 @@ def clear_local_flags(local_state_path: Path) -> bool:
     return True
 
 
-def prune_local_flags(
-    browser_states: list[tuple[str, Path]], keep_browsers: set[str]
-) -> list[str]:
+def prune_local_flags(browser_states: list[tuple[str, Path]], keep_browsers: set[str]) -> list[str]:
     pruned: list[str] = []
     for name, local_state in browser_states:
         if name in keep_browsers:
@@ -86,6 +84,7 @@ def prune_local_flags(
     return pruned
 
 
+@locked
 def remove_flags(
     sync_root: Path,
     flags_to_remove: set[str],
@@ -93,16 +92,17 @@ def remove_flags(
 ) -> None:
     if not flags_to_remove:
         return
-    data = load_sync_flags(sync_root)
-    changed = False
-    for entry in data.values():
-        existing = entry.get(FLAGS_KEY, [])
-        filtered = [f for f in existing if f not in flags_to_remove]
-        if filtered != existing:
-            entry[FLAGS_KEY] = filtered
-            changed = True
-    if changed:
-        save_sync_flags(sync_root, data)
+    with edit_snapshot(sync_root) as work:
+        data = load_sync_flags(work)
+        changed = False
+        for entry in data.values():
+            existing = entry.get(FLAGS_KEY, [])
+            filtered = [f for f in existing if f not in flags_to_remove]
+            if filtered != existing:
+                entry[FLAGS_KEY] = filtered
+                changed = True
+        if changed:
+            save_sync_flags(work, data)
 
     for _name, local_state in browser_states:
         if not local_state.exists():
@@ -122,6 +122,8 @@ def sync_flags(
     local_state_path: Path,
     sync_root: Path,
     ignore: list[str],
+    *,
+    direction: str = "both",
 ) -> tuple[int, int]:
     if not local_state_path.exists():
         _LOG.debug("%s: Local State missing — skipping flags sync", browser_name)
@@ -136,7 +138,7 @@ def sync_flags(
     local_flags_list = get_local_flags(local_state_path)
     ignore_set = set(ignore)
 
-    if local_mtime >= sync_mtime:
+    if direction == "push" or (direction == "both" and local_mtime >= sync_mtime):
         merged = list(local_flags_list)
         for f in sync_flags_list:
             if f in ignore_set and f not in merged:
@@ -148,6 +150,8 @@ def sync_flags(
         _LOG.info("%s: pushed %d flag(s) to sync", browser_name, len(merged))
         return 1, 0
 
+    if not entry:
+        return 0, 1
     new_local = [f for f in sync_flags_list if f not in ignore_set]
     if new_local == local_flags_list:
         return 0, 1

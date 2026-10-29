@@ -2,129 +2,48 @@ from __future__ import annotations
 
 import argparse
 import logging
-import pathlib
 import sys
-import tempfile
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
-from src import autostart, config, single_instance
+from src import autostart, cli, config
 from src.dracula import DRACULA_STYLESHEET
-from src.sync.sync_dir import SYNC_DIR_NAME as _SYNC_DIR_NAME
+from src.single_instance import SingleInstance, send_command
 from src.sync_engine import SyncEngine
 from src.tray import TrayApp, make_app_icon
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    if len(sys.argv) > 1 and sys.argv[1] in cli.COMMANDS:
+        sys.exit(cli.run(sys.argv[1:]))
     parser = argparse.ArgumentParser(description="Chromium Profile Syncer")
+    parser.add_argument("--tray", action="store_true", help="Start without opening settings")
     parser.add_argument(
-        "--tray",
-        action="store_true",
-        help="Start in tray-only mode (for autostart)",
-    )
-    parser.add_argument(
-        "--remove-profile",
-        metavar="BROWSER",
-        help="Delete browser profile from disk, remove from config, delete sync data, then exit",
-    )
-    parser.add_argument(
-        "--sync",
-        action="store_true",
-        help="Run sync (respects config; combine with --browser/--profile/--direction), then exit",
-    )
-    parser.add_argument(
-        "--browser",
-        metavar="BROWSER",
-        help="Target browser (for --sync)",
-    )
-    parser.add_argument(
-        "--profile",
-        metavar="PROFILE",
-        help="Target profile name (for --sync)",
-    )
-    parser.add_argument(
-        "--direction",
-        metavar="DIRECTION",
-        choices=["push", "pull", "both"],
-        default=None,
-        help="Sync direction for --sync: push, pull, or both",
+        "--quit", action="store_true", help="Ask the running app to finish and quit"
     )
     args = parser.parse_args()
-
-    if args.remove_profile:
-        import shutil
-
-        from src.browsers import get_browser
-        browser = get_browser(args.remove_profile)
-        if browser is None:
-            print(f"Unknown browser: {args.remove_profile}")
-            sys.exit(1)
-        enabled = config.get_enabled_profiles().get(browser.name, [])
-        root = browser.profile_root()
-        for profile_name in enabled:
-            profile_dir = root / profile_name if root else None
-            if profile_dir and profile_dir.is_dir():
-                shutil.rmtree(profile_dir)
-                print(f"Deleted {profile_dir}")
-        config.remove_browser_profile(browser.name)
-        sync_folder = config.get_sync_folder()
-        if sync_folder:
-            current_dir = sync_folder / _SYNC_DIR_NAME
-            if current_dir.is_dir():
-                shutil.rmtree(current_dir)
-                print(f"Deleted {current_dir}")
-        print(f"Profile '{browser.name}' removed. Start the app to upload fresh.")
-        sys.exit(0)
-
-    if args.sync:
-        logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-        sync_folder = config.get_sync_folder()
-        if sync_folder is None:
-            print("ERROR: sync_folder not configured — run the app first")
-            sys.exit(1)
-        engine = SyncEngine(sync_folder)
-        result = engine.sync_all(
-            only_browser=args.browser,
-            only_profile=args.profile,
-            force_direction=args.direction,
-            on_progress=lambda m: print(f"  {m}"),
-        )
-        skipped = result.get("skipped_running", [])
-        if skipped:
-            print(f"Skipped (running): {', '.join(skipped)}")
-        sys.exit(0)
-
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-    )
-
-    single_instance.acquire()
-
     app = QApplication(sys.argv)
+    app.setApplicationName("chromium-profile-syncer")
+    if args.quit:
+        sys.exit(0 if send_command("quit") else 1)
+    instance = SingleInstance(app)
+    if not instance.acquire(show_existing=not args.tray):
+        sys.exit(0)
     app.setQuitOnLastWindowClosed(False)
     app.setStyleSheet(DRACULA_STYLESHEET)
     app.setWindowIcon(make_app_icon())
-
-    from PySide6.QtCore import QTimer
-
-    sync_folder = config.get_sync_folder()
-    if sync_folder is not None:
-        engine = SyncEngine(sync_folder)
-    else:
-        engine = SyncEngine(pathlib.Path(tempfile.mkdtemp()))
-
-    tray = TrayApp(engine, config)
+    folder = config.get_sync_folder()
+    tray = TrayApp(SyncEngine(folder or config.CONFIG_DIR / "unconfigured-sync"), config)
     tray.show()
-
-    single_instance.setup_signal_handler(tray.open_settings)
-
-    has_profiles = any(profiles for profiles in config.get_enabled_profiles().values())
-    autostart.apply(has_profiles)
-
+    instance.show_requested.connect(tray.open_settings)
+    instance.quit_requested.connect(tray.request_quit)
+    app.aboutToQuit.connect(tray.wait_for_workers)
+    app.aboutToQuit.connect(instance.close)
+    autostart.apply(config.get_autostart() and any(config.get_enabled_profiles().values()))
     if not args.tray:
         QTimer.singleShot(0, tray.open_settings)
-
     sys.exit(app.exec())
 
 

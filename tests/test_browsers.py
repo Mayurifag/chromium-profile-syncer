@@ -4,224 +4,69 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from src.browsers import ALL_BROWSERS
-from src.browsers.chrome import Chrome
-from src.browsers.helium import Helium
-from src.browsers.thorium import Thorium
-from src.browsers.yandex import Yandex
+import pytest
+
+from src.browsers import ALL_BROWSERS, get_browser
 
 
-def test_browser_names() -> None:
-    assert Thorium().name == "Thorium"
-    assert Helium().name == "Helium"
-    assert Chrome().name == "Chrome"
-    assert Yandex().name == "Yandex"
+def test_browser_specs_have_unique_names():
+    assert {browser.name for browser in ALL_BROWSERS} == {"Chrome", "Helium", "Thorium", "Yandex"}
+    assert get_browser("helium").ungoogled
+    assert get_browser("missing") is None
 
 
-def test_all_browsers_list() -> None:
-    assert len(ALL_BROWSERS) == 4
-    types = {type(b) for b in ALL_BROWSERS}
-    assert Thorium in types
-    assert Helium in types
-    assert Chrome in types
-    assert Yandex in types
-
-
-def test_profile_root_returns_path() -> None:
-    for browser in (Thorium(), Helium(), Chrome(), Yandex()):
-        result = browser.profile_root()
-        assert isinstance(result, Path)
-
-
-def test_is_installed_false_when_missing() -> None:
-    for cls in (Thorium, Helium, Chrome, Yandex):
-        browser = cls()
-        missing = Path("/nonexistent/does/not/exist")
-        with patch.object(type(browser), "profile_root", return_value=missing):
-            assert browser.is_installed() is False
-
-
-def test_is_installed_true_when_exists(tmp_path: Path) -> None:
-    for cls in (Thorium, Helium, Chrome, Yandex):
-        browser = cls()
-        with patch.object(type(browser), "profile_root", return_value=tmp_path):
-            assert browser.is_installed() is True
-
-
-def test_discover_profiles_finds_default_and_numbered(tmp_path: Path) -> None:
-    for name in ("Default", "Profile 1", "Profile 2"):
-        d = tmp_path / name
-        d.mkdir()
-        (d / "Preferences").write_text("{}")
-
-    browser = Thorium()
+@pytest.mark.parametrize("browser", ALL_BROWSERS, ids=lambda browser: browser.name)
+def test_profile_paths_and_discovery(browser, tmp_path):
+    assert isinstance(browser.profile_root(), Path)
+    for name in ("Default", "Profile 1", "Guest Profile", "Cache"):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "Preferences").write_text("{}")
+    (tmp_path / "Profile 2").mkdir()
     with patch.object(type(browser), "profile_root", return_value=tmp_path):
-        profiles = browser.discover_profiles()
-
-    assert len(profiles) == 3
-    names = [p.name for p in profiles]
-    assert "Default" in names
-    assert "Profile 1" in names
-    assert "Profile 2" in names
+        assert browser.is_installed()
+        assert {p.name for p in browser.discover_profiles()} == {"Default", "Profile 1"}
+        assert browser.external_extensions_dir() == tmp_path / "External Extensions"
+        assert browser.local_state_path() == tmp_path / "Local State"
 
 
-def test_discover_profiles_skips_dirs_without_preferences(tmp_path: Path) -> None:
-    (tmp_path / "Default").mkdir()  # no Preferences file
-    profile1 = tmp_path / "Profile 1"
-    profile1.mkdir()
-    (profile1 / "Preferences").write_text("{}")
-
-    browser = Thorium()
-    with patch.object(type(browser), "profile_root", return_value=tmp_path):
-        profiles = browser.discover_profiles()
-
-    assert len(profiles) == 1
-    assert profiles[0].name == "Profile 1"
-
-
-def test_discover_profiles_skips_non_matching_dirs(tmp_path: Path) -> None:
-    for name in ("Guest Profile", "System Profile", "Cache"):
-        d = tmp_path / name
-        d.mkdir()
-        (d / "Preferences").write_text("{}")
-
-    browser = Thorium()
-    with patch.object(type(browser), "profile_root", return_value=tmp_path):
-        profiles = browser.discover_profiles()
-
-    assert profiles == []
-
-
-def test_discover_profiles_empty_when_not_installed() -> None:
-    browser = Thorium()
-    missing = Path("/nonexistent/does/not/exist")
-    with patch.object(type(browser), "profile_root", return_value=missing):
+@pytest.mark.parametrize("browser", ALL_BROWSERS, ids=lambda browser: browser.name)
+def test_missing_browser_and_process(browser, tmp_path):
+    with patch.object(type(browser), "profile_root", return_value=tmp_path / "missing"):
+        assert not browser.is_installed()
         assert browser.discover_profiles() == []
+    assert not browser.is_running(set())
 
 
-def test_external_extensions_dir_returns_path(tmp_path: Path) -> None:
-    browser = Yandex()
-    with patch.object(type(browser), "profile_root", return_value=tmp_path):
-        result = browser.external_extensions_dir()
-    assert result == tmp_path / "External Extensions"
-
-
-def test_is_running_false_when_no_process() -> None:
-    import psutil
-
-    with patch.object(psutil, "process_iter", return_value=[]):
-        for cls in (Thorium, Helium, Chrome, Yandex):
-            assert cls().is_running() is False
-
-
-def test_get_profile_name_reads_preferences(tmp_path: Path) -> None:
-    profile_dir = tmp_path / "Profile 1"
-    profile_dir.mkdir()
-    (profile_dir / "Preferences").write_text(
-        json.dumps({"profile": {"name": "Work"}}), encoding="utf-8"
-    )
-    browser = Chrome()
-    with patch.object(type(browser), "profile_root", return_value=tmp_path):
-        assert browser.get_profile_name(profile_dir) == "Work"
-
-
-def test_get_profile_name_fallback_to_dir_name(tmp_path: Path) -> None:
-    browser = Chrome()
-    with patch.object(type(browser), "profile_root", return_value=tmp_path.parent):
-        assert browser.get_profile_name(tmp_path) == tmp_path.name
-
-
-def test_get_profile_name_prefers_custom_name_from_local_state(tmp_path: Path) -> None:
-    profile_dir = tmp_path / "Profile 1"
-    profile_dir.mkdir()
+@pytest.mark.parametrize(
+    "info, expected",
+    [
+        ({"name": "Work", "is_using_default_name": False}, "Work"),
+        ({"user_name": "user@example.invalid"}, "user@example.invalid"),
+        ({"gaia_name": "Person"}, "Person"),
+        ({}, "Profile name"),
+    ],
+)
+def test_profile_display_name(info, expected, tmp_path):
+    profile = tmp_path / "Default"
+    profile.mkdir()
+    (profile / "Preferences").write_text(json.dumps({"profile": {"name": "Profile name"}}))
     (tmp_path / "Local State").write_text(
-        json.dumps({
-            "profile": {
-                "info_cache": {
-                    "Profile 1": {
-                        "name": "Crypto",
-                        "user_name": "test@example.com",
-                        "gaia_name": "Test User",
-                        "is_using_default_name": False,
-                    }
-                }
-            }
-        }),
-        encoding="utf-8",
+        json.dumps({"profile": {"info_cache": {"Default": info}}})
     )
-    browser = Chrome()
+    browser = get_browser("Chrome")
     with patch.object(type(browser), "profile_root", return_value=tmp_path):
-        assert browser.get_profile_name(profile_dir) == "Crypto"
+        assert browser.get_profile_name(profile) == expected
 
 
-def test_get_profile_name_uses_email_when_no_custom_name(tmp_path: Path) -> None:
-    profile_dir = tmp_path / "Profile 2"
-    profile_dir.mkdir()
-    (tmp_path / "Local State").write_text(
-        json.dumps({
-            "profile": {
-                "info_cache": {
-                    "Profile 2": {
-                        "name": "Person 1",
-                        "user_name": "work@example.com",
-                        "gaia_name": "John Doe",
-                        "is_using_default_name": True,
-                    }
-                }
-            }
-        }),
-        encoding="utf-8",
-    )
-    browser = Chrome()
-    with patch.object(type(browser), "profile_root", return_value=tmp_path):
-        assert browser.get_profile_name(profile_dir) == "work@example.com"
-
-
-def test_get_profile_name_uses_gaia_name_when_no_email_or_custom(tmp_path: Path) -> None:
-    profile_dir = tmp_path / "Profile 3"
-    profile_dir.mkdir()
-    (tmp_path / "Local State").write_text(
-        json.dumps({
-            "profile": {
-                "info_cache": {
-                    "Profile 3": {
-                        "name": "Person 1",
-                        "user_name": "",
-                        "gaia_name": "John Doe",
-                        "is_using_default_name": True,
-                    }
-                }
-            }
-        }),
-        encoding="utf-8",
-    )
-    browser = Chrome()
-    with patch.object(type(browser), "profile_root", return_value=tmp_path):
-        assert browser.get_profile_name(profile_dir) == "John Doe"
-
-
-def test_get_profile_name_skips_default_name(tmp_path: Path) -> None:
-    profile_dir = tmp_path / "Profile 4"
-    profile_dir.mkdir()
-    (profile_dir / "Preferences").write_text(
-        json.dumps({"profile": {"name": "MyProfile"}}), encoding="utf-8"
-    )
-    (tmp_path / "Local State").write_text(
-        json.dumps({
-            "profile": {
-                "info_cache": {
-                    "Profile 4": {
-                        "name": "Person 1",
-                        "user_name": "",
-                        "gaia_name": "",
-                        "is_using_default_name": True,
-                    }
-                }
-            }
-        }),
-        encoding="utf-8",
-    )
-    browser = Chrome()
-    with patch.object(type(browser), "profile_root", return_value=tmp_path):
-        # Should fall back to Preferences since Local State name is default
-        assert browser.get_profile_name(profile_dir) == "MyProfile"
+def test_system_wide_windows_chrome_executable(tmp_path, monkeypatch):
+    browser = get_browser("Chrome")
+    binary = tmp_path / "programs" / "Google" / "Chrome" / "Application" / "chrome.exe"
+    binary.parent.mkdir(parents=True)
+    binary.touch()
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path / "programs"))
+    with (
+        patch("src.browsers.base.sys.platform", "win32"),
+        patch.object(type(browser), "profile_root", return_value=tmp_path / "user" / "User Data"),
+    ):
+        assert browser.executable() == binary

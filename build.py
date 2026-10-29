@@ -17,7 +17,7 @@ import shutil
 import struct
 import subprocess
 import sys
-import time
+import tempfile
 from pathlib import Path
 
 try:
@@ -85,7 +85,8 @@ def _generate_icns(renderer) -> Path:
         for size in (16, 32, 64, 128, 256, 512):
             (iconset / f"icon_{size}x{size}.png").write_bytes(_render_png(renderer, size))
             if size * 2 <= 1024:
-                (iconset / f"icon_{size}x{size}@2x.png").write_bytes(_render_png(renderer, size * 2))
+                retina = iconset / f"icon_{size}x{size}@2x.png"
+                retina.write_bytes(_render_png(renderer, size * 2))
         subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(icns_path)], check=True)
     return icns_path
 
@@ -128,9 +129,11 @@ def _compute_release_tag() -> str:
         if not m:
             return ""
         major_minor = ".".join(m.group(1).split(".")[:2])
-        out = subprocess.check_output(
-            ["git", "tag", "-l", f"v{major_minor}.*"], text=True
-        ).strip().splitlines()
+        out = (
+            subprocess.check_output(["git", "tag", "-l", f"v{major_minor}.*"], text=True)
+            .strip()
+            .splitlines()
+        )
         out = sorted(out, key=lambda t: [int(x) for x in t.lstrip("v").split(".")])
         patch = int(out[-1].split(".")[-1]) + 1 if out else 0
         return f"v{major_minor}.{patch}"
@@ -143,9 +146,7 @@ def _write_build_info() -> None:
     sha = os.environ.get("GITHUB_SHA")
     if not sha:
         try:
-            sha = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], text=True
-            ).strip()
+            sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
         except Exception:
             sha = "unknown"
     tag = _compute_release_tag()
@@ -205,31 +206,46 @@ def build() -> Path:
 
 
 def _kill_running() -> None:
-    """Kill any running instance via the lock file, then remove the lock."""
+    """Stop the app without interrupting profile writes; support the old PID lock once."""
+    from src.config import CONFIG_DIR
+    from src.single_instance import send_command
+
+    if send_command("quit"):
+        from PySide6.QtCore import QLockFile
+
+        lock = QLockFile(str(CONFIG_DIR / "gui.lock"))
+        lock.setStaleLockTime(0)
+        if not lock.tryLock(120000):
+            raise OSError("App is still finishing an operation; installation cancelled")
+        lock.unlock()
+        return
     if psutil is None:
         return
+    from PySide6.QtCore import QLockFile
 
-    # Use proper config dir (cross-platform)
-    if sys.platform == "win32":
-        appdata = os.environ.get("APPDATA")
-        config_dir = Path(appdata) / APP_NAME if appdata else Path.home() / "AppData" / "Roaming" / APP_NAME
-    else:
-        xdg_config = os.environ.get("XDG_CONFIG_HOME")
-        config_dir = Path(xdg_config) / APP_NAME if xdg_config else Path.home() / ".config" / APP_NAME
-
-    lock_file = config_dir / "app.lock"
+    gui_lock = QLockFile(str(CONFIG_DIR / "gui.lock"))
+    gui_lock.setStaleLockTime(0)
+    if not gui_lock.tryLock(0):
+        raise OSError("Running app did not respond; installation cancelled")
+    gui_lock.unlock()
+    lock_file = CONFIG_DIR / "app.lock"
     try:
         parts = lock_file.read_text(encoding="utf-8").strip().split(":", 1)
         pid = int(parts[0])
         proc = psutil.Process(pid)
+        if APP_NAME not in proc.name().casefold():
+            raise OSError("Legacy PID belongs to another process; installation cancelled")
         proc.terminate()
         print(f"Terminated running instance (pid={pid})")
-        time.sleep(1)
-    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError, OSError, psutil.NoSuchProcess):
+        proc.wait(timeout=30)
+    except (FileNotFoundError, ValueError, ProcessLookupError, psutil.NoSuchProcess):
         pass
 
 
 def install(artifact: Path) -> None:
+    from src.operations import operation_lock
+    from src.sync import copy_file_atomic, replace_directory
+
     _kill_running()
 
     if sys.platform == "darwin":
@@ -239,27 +255,16 @@ def install(artifact: Path) -> None:
     INSTALL_DIR.mkdir(parents=True, exist_ok=True)
 
     print(f"Installing to {INSTALL_PATH}...")
-    if artifact.is_dir():
-        if sys.platform == "darwin":
-            # macOS .app bundle: install as-is
-            if INSTALL_PATH.exists():
-                print(f"Removing existing {INSTALL_PATH}...")
-                shutil.rmtree(INSTALL_PATH)
-            shutil.copytree(artifact, INSTALL_PATH)
+    with operation_lock():
+        if artifact.is_dir():
+            target = INSTALL_PATH if sys.platform == "darwin" else INSTALL_PATH.parent
+            with tempfile.TemporaryDirectory(prefix=".cps-install-", dir=target.parent) as temp:
+                staging = Path(temp) / "app"
+                shutil.copytree(artifact, staging)
+                replace_directory(staging, target)
         else:
-            # Windows onedir: copy whole bundle dir to INSTALL_PATH.parent
-            install_target = INSTALL_PATH.parent
-            if install_target.exists():
-                print(f"Removing existing {install_target}...")
-                shutil.rmtree(install_target)
-            shutil.copytree(artifact, install_target)
-    else:
-        # Linux single executable
-        if INSTALL_PATH.exists():
-            print(f"Removing existing {INSTALL_PATH}...")
-            INSTALL_PATH.unlink()
-        shutil.copy2(artifact, INSTALL_PATH)
-        INSTALL_PATH.chmod(0o755)
+            copy_file_atomic(artifact, INSTALL_PATH)
+            INSTALL_PATH.chmod(0o755)
 
     print(f"Installed: {INSTALL_PATH}")
 
