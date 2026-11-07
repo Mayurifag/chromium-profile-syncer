@@ -1,8 +1,5 @@
 
-# ── GSD baseline (auto-generated) ──
-.gsd
-.gsd-id
-.bg-shell/
+# Common generated and local files
 .DS_Store
 Thumbs.db
 *.swp
